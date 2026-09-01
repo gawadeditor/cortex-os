@@ -12,7 +12,7 @@
   ('Production',     '/runs',                 ['/runs', '/run/', '/create', '/live', '/failures', '/queue']),
   ('Episodes',       '/episodes',             ['/episodes', '/episode/', '/attention', '/approvals']),
   ('Learning',       '/intelligence/learning',['/intelligence', '/compare', '/learning', '/analytics']),
-  ('Providers',      '/providers',            ['/providers']),
+  ('Providers',      '/providers',            ['/providers', '/providers/models']),
   ('Infrastructure', '/infrastructure',       ['/infrastructure', '/preflight', '/setup', '/signals']),
   ('Governance',     '/decisions',            ['/decisions', '/decision-reviews', '/decision-inputs', '/execution-plans']),
   ('Storage',        '/settings/storage',     ['/settings/storage', '/archive']),
@@ -100,7 +100,8 @@
   '/infrastructure':  [('Overview','/infrastructure'), ('Workers','/infrastructure/workers'), ('Providers','/infrastructure/providers'), ('Connections','/infrastructure/connections'), ('Config','/infrastructure/config'), ('Debug','/infrastructure/debug')],
   '/decisions':       [('Decisions','/decisions'), ('Reviews','/decision-reviews'), ('Inputs','/decision-inputs'), ('Plans','/execution-plans')],
   '/settings/storage':[('Storage','/settings/storage'), ('Asset archive','/archive')],
-  '/advanced':        [('Overview','/advanced'), ('Prompt registry','/prompts'), ('Model comparison','/compare'), ('Video test','/providers/video-test'), ('Command','/command')],
+  '/advanced':        [('Overview','/advanced'), ('Prompt registry','/prompts'), ('Model comparison','/compare'), ('Video test','/providers/video-test'), ('Model registry','/providers/models'), ('Command','/command')],
+  '/providers':       [('Providers','/providers'), ('Model registry','/providers/models'), ('Video test','/providers/video-test')],
 } -%}
 {%- set subs = subgroups.get(ns.active, []) if not cid else [] -%}
 {%- if subs -%}

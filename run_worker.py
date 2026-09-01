@@ -93,6 +93,7 @@ _DEFAULT_INTERVAL = 60  # seconds between iterations
 import os as _os
 _ANALYTICS_SYNC_EVERY_N = int(_os.environ.get("ANALYTICS_SYNC_EVERY_N_ITERATIONS", "60"))
 _HEALTH_CHECK_EVERY_N = int(_os.environ.get("HEALTH_CHECK_EVERY_N_ITERATIONS", "5"))
+_MODEL_REGISTRY_SYNC_EVERY_N = int(_os.environ.get("MODEL_REGISTRY_SYNC_EVERY_N_ITERATIONS", "240"))
 
 
 # ---------------------------------------------------------------------------
@@ -1162,6 +1163,19 @@ def run_iteration(
                 log.debug("health_sweep ok")
         except Exception as exc:  # noqa: BLE001
             log.error("health_sweep_error error=%s", exc)
+
+    # Model registry sync — track the generation-model catalogue so a
+    # price change or a deprecation of a model an active channel uses raises
+    # a capability_drift signal. Infrequent (default every ~4h at 60s cadence).
+    if not dry_run and iteration % _MODEL_REGISTRY_SYNC_EVERY_N == 0:
+        try:
+            from hypogeum.model_registry import sync_from_muapi
+            _mr = sync_from_muapi(db_path=db_path, config=config)
+            if _mr.get("ok") and (_mr.get("sunset") or _mr.get("price_changes")):
+                log.info("model_registry_sweep sunset=%s price_changes=%s",
+                         _mr["sunset"], len(_mr["price_changes"]))
+        except Exception as exc:  # noqa: BLE001
+            log.error("model_registry_sweep_error error=%s", exc)
 
     # Step 4: background analytics sync — every _ANALYTICS_SYNC_EVERY_N iterations
     analytics_synced = False

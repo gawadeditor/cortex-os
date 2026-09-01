@@ -587,11 +587,21 @@ def resolve_video_price(
     """
     from hypogeum.muapi import MODEL_CREDIT_COSTS  # noqa: PLC0415
     price = MODEL_CREDIT_COSTS.get(model)
-    if price is None:
-        if channel_price is not None and float(channel_price) > 0:
-            return float(channel_price)
-        raise ProductionPlanPricingError(episode_id, "video_generation_model", model)
-    return float(price)
+    if price is not None:
+        return float(price)
+    # Adopted-model price captured from the live provider catalogue at adoption.
+    if channel_price is not None and float(channel_price) > 0:
+        return float(channel_price)
+    # Last resort: the synced model registry (Factory Capability Evolution
+    # substrate) — still an authoritative provider price, not an estimate.
+    try:
+        from hypogeum.model_registry import price_of  # noqa: PLC0415
+        reg = price_of(model)
+        if reg is not None and float(reg) > 0:
+            return float(reg)
+    except Exception:  # noqa: BLE001
+        pass
+    raise ProductionPlanPricingError(episode_id, "video_generation_model", model)
 
 
 def resolve_enhancement_price(*, episode_id: str) -> float:

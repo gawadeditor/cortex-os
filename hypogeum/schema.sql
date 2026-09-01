@@ -1071,6 +1071,35 @@ CREATE INDEX IF NOT EXISTS idx_cld_channel   ON channel_learning_directives(chan
 CREATE INDEX IF NOT EXISTS idx_cld_dimension ON channel_learning_directives(channel_id, dimension, active);
 
 -- ---------------------------------------------------------------------------
+-- model_registry — the versioned generation-model catalogue Cortex tracks
+-- (Phase 6 / Factory Capability Evolution substrate). Synced from a
+-- provider's model listing; a model that disappears from a fresh sync is
+-- marked 'sunset' (deprecation detected), so Cortex notices when a model a
+-- channel depends on goes away or changes price. Factory Learning —
+-- cross-channel, never inside a Channel Package. See hypogeum/model_registry.py.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS model_registry (
+    model_id         TEXT    NOT NULL PRIMARY KEY,   -- provider model slug
+    provider         TEXT    NOT NULL DEFAULT 'muapi',
+    category         TEXT,                           -- text_to_video|image_to_video|text_to_image|...
+    family           TEXT,
+    price_usd        REAL,
+    price_currency   TEXT    DEFAULT 'USD',
+    dynamic_pricing  INTEGER NOT NULL DEFAULT 0,
+    lifecycle_status TEXT    NOT NULL DEFAULT 'active'
+                             CHECK(lifecycle_status IN ('active','deprecated','sunset','unknown')),
+    notes            TEXT,
+    first_seen_at    TEXT    NOT NULL,
+    last_seen_at     TEXT    NOT NULL,               -- last sync this model was in the catalogue
+    last_synced_at   TEXT    NOT NULL,
+    last_price_usd   REAL,                           -- previous price, when it changed
+    price_changed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_mr_category  ON model_registry(category, lifecycle_status);
+CREATE INDEX IF NOT EXISTS idx_mr_lifecycle ON model_registry(lifecycle_status);
+
+-- ---------------------------------------------------------------------------
 -- Phase E Views
 -- ---------------------------------------------------------------------------
 

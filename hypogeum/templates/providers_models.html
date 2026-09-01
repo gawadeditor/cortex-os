@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Model Registry — Cortex</title>
+  {% include '_base_style.html' %}
+</head>
+<body>
+{% include '_nav.html' %}
+<div class="container">
+
+<div class="breadcrumb">
+  <a href="/providers">Providers</a>
+  <span class="breadcrumb-sep">›</span>
+  <span>Model Registry</span>
+</div>
+
+<div class="page-header">
+  <h1>Model Registry</h1>
+  <span class="page-meta">
+    {{ total }} tracked ·
+    {{ by_life.get('active', []) | length }} active ·
+    {{ by_life.get('sunset', []) | length }} sunset ·
+    {% if last_synced %}synced {{ last_synced[:16].replace('T',' ') }}{% else %}never synced{% endif %}
+  </span>
+  <a href="/providers/models?sync=1" class="btn" style="margin-left:auto;">Sync now</a>
+</div>
+
+<p class="muted" style="font-size:12px; margin-bottom:var(--gap);">
+  The generation-model catalogue Cortex tracks so a price change or the
+  disappearance of a model a channel depends on is noticed, not discovered
+  mid-run. Factory Learning — shared across every channel.
+</p>
+
+{% if by_life.get('sunset') %}
+<div class="card" style="border-color:var(--warn); margin-bottom:var(--gap);">
+  <div class="card-title" style="color:var(--warn);">Sunset — no longer offered by the provider</div>
+  {% for m in by_life['sunset'] %}
+  <div style="font-size:12px; padding:3px 0; border-bottom:1px solid var(--border);">
+    <span class="mono">{{ m.model_id }}</span>
+    <span class="muted"> · last seen {{ (m.last_seen_at or '')[:10] }}</span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if changed %}
+<div class="card" style="margin-bottom:var(--gap);">
+  <div class="card-title">Recent price changes</div>
+  {% for m in changed %}
+  <div style="font-size:12px; padding:3px 0; border-bottom:1px solid var(--border); display:flex; gap:10px;">
+    <span class="mono" style="flex:1;">{{ m.model_id }}</span>
+    <span class="mono">${{ '%.4f' | format(m.last_price_usd or 0) }} → <b>${{ '%.4f' | format(m.price_usd or 0) }}</b></span>
+    <span class="muted">{{ (m.price_changed_at or '')[:10] }}</span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<div class="card" style="padding:0;">
+  <div class="table-wrap" style="border:none;"><table>
+    <thead><tr><th>Model</th><th>Category</th><th>Family</th><th>Price</th><th>Status</th></tr></thead>
+    <tbody>
+    {% for m in models %}
+    <tr {% if m.lifecycle_status != 'active' %}style="opacity:.5;"{% endif %}>
+      <td class="mono" style="font-size:11px;">{{ m.model_id }}</td>
+      <td style="font-size:11px;">{{ m.category or '—' }}</td>
+      <td style="font-size:11px;" class="muted">{{ m.family or '—' }}</td>
+      <td style="font-variant-numeric:tabular-nums;">
+        {% if m.price_usd is not none %}${{ '%.4f' | format(m.price_usd) }}{% if m.dynamic_pricing %}<span class="muted">*</span>{% endif %}{% else %}—{% endif %}
+      </td>
+      <td><span class="badge badge-{{ 'complete' if m.lifecycle_status == 'active' else 'failed' if m.lifecycle_status == 'sunset' else 'degraded' }}" style="font-size:10px;">{{ m.lifecycle_status }}</span></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</div>
+
+</div><!-- /.container -->
+</body>
+</html>

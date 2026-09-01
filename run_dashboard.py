@@ -1594,6 +1594,29 @@ def _build_providers(provider_list, creds_map, cost_map, verif_map=None):
     return result
 
 
+@app.route("/providers/models")
+def providers_models_page():
+    """The tracked generation-model catalogue (Factory Capability Evolution
+    substrate) — lifecycle status + recent price changes."""
+    from hypogeum import model_registry as _mr
+    models = _mr.list_models(db_path=_db_path())
+    by_life: dict = {}
+    for m in models:
+        by_life.setdefault(m["lifecycle_status"], []).append(m)
+    changed = sorted(
+        [m for m in models if m.get("price_changed_at")],
+        key=lambda m: m["price_changed_at"], reverse=True)[:20]
+    if request.args.get("sync") == "1":
+        _mr.sync_from_muapi(db_path=_db_path())
+        return redirect("/providers/models")
+    return render_template(
+        "providers_models.html",
+        models=models, by_life=by_life, changed=changed,
+        total=len(models),
+        last_synced=(max((m["last_synced_at"] for m in models), default=None)),
+    )
+
+
 @app.route("/providers")
 def providers_page():
     db = _db_path()

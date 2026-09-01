@@ -259,28 +259,28 @@ def get_sync_log(
     platform: Optional[str] = None,
     limit: int = 20,
     db_path: Optional[Path] = None,
+    channel_id: Optional[str] = None,
 ) -> list[dict]:
-    """Return recent sync log rows, newest first."""
+    """Return recent sync log rows, newest first. When channel_id is given,
+    only that channel's rows (rows with a NULL channel_id are excluded)."""
     db = _resolve(db_path) or _DEFAULT_DB_PATH
     conn = get_connection(db)
     try:
+        clauses, params = [], []
         if platform:
-            rows = conn.execute(
-                """SELECT sync_id, platform, channel_id, status, records_imported,
-                          errors_json, window_days, triggered_by, synced_at
-                   FROM platform_sync_log
-                   WHERE platform = ?
-                   ORDER BY synced_at DESC LIMIT ?""",
-                (platform, limit),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """SELECT sync_id, platform, channel_id, status, records_imported,
-                          errors_json, window_days, triggered_by, synced_at
-                   FROM platform_sync_log
-                   ORDER BY synced_at DESC LIMIT ?""",
-                (limit,),
-            ).fetchall()
+            clauses.append("platform = ?"); params.append(platform)
+        if channel_id:
+            clauses.append("channel_id = ?"); params.append(channel_id)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+        rows = conn.execute(
+            f"""SELECT sync_id, platform, channel_id, status, records_imported,
+                       errors_json, window_days, triggered_by, synced_at
+                FROM platform_sync_log
+                {where}
+                ORDER BY synced_at DESC LIMIT ?""",
+            params,
+        ).fetchall()
         cols = ["sync_id", "platform", "channel_id", "status", "records_imported",
                 "errors_json", "window_days", "triggered_by", "synced_at"]
         return [dict(zip(cols, r)) for r in rows]
@@ -288,18 +288,23 @@ def get_sync_log(
         conn.close()
 
 
-def get_last_sync_by_platform(db_path: Optional[Path] = None) -> dict[str, dict]:
-    """Return the most recent sync log row per platform as {platform: row}."""
+def get_last_sync_by_platform(db_path: Optional[Path] = None,
+                              channel_id: Optional[str] = None) -> dict[str, dict]:
+    """Return the most recent sync log row per platform as {platform: row}.
+    Scoped to channel_id when given (NULL-channel rows excluded)."""
     db = _resolve(db_path) or _DEFAULT_DB_PATH
     conn = get_connection(db)
     try:
+        _cw = "WHERE channel_id = ?" if channel_id else ""
+        _cp = (channel_id,) if channel_id else ()
         rows = conn.execute(
-            """SELECT platform, status, records_imported, synced_at
+            f"""SELECT platform, status, records_imported, synced_at
                FROM platform_sync_log
                WHERE sync_id IN (
-                   SELECT MAX(sync_id) FROM platform_sync_log GROUP BY platform
+                   SELECT MAX(sync_id) FROM platform_sync_log {_cw} GROUP BY platform
                )
-               ORDER BY synced_at DESC"""
+               ORDER BY synced_at DESC""",
+            _cp,
         ).fetchall()
         result = {}
         for r in rows:

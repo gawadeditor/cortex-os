@@ -7135,12 +7135,14 @@ def intelligence_sync_page():
         youtube_last_synced = get_last_youtube_sync(db_path=_db_path())
     except Exception:
         youtube_last_synced = None
+    _sync_ch = request.args.get("channel_id") or _scope_channel()
     try:
-        sync_log = get_sync_log(limit=30, db_path=_db_path())
+        sync_log = get_sync_log(limit=30, db_path=_db_path(), channel_id=_sync_ch or None)
     except Exception:
         sync_log = []
     try:
-        last_sync_by_platform = get_last_sync_by_platform(db_path=_db_path())
+        last_sync_by_platform = get_last_sync_by_platform(db_path=_db_path(),
+                                                          channel_id=_sync_ch or None)
     except Exception:
         last_sync_by_platform = {}
 

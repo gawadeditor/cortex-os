@@ -53,7 +53,20 @@
 
 <div class="page-header">
   <h1>Analytics Sync Status</h1>
-  <span class="page-meta">Auto-sync state per platform</span>
+  <span class="page-meta">
+    {% if scope_channel %}{{ scope_channel }} · {% endif %}auto-sync state per platform
+  </span>
+</div>
+
+<div class="card" style="margin-bottom:var(--gap);">
+  <p style="font-size:12px; color:var(--muted); line-height:1.55; margin:0;">
+    Publishing and analytics go through <strong>Zernio</strong>. Connect each
+    platform account on a channel's
+    {% if scope_channel %}<a href="/channel/{{ scope_channel }}/publishing?scope={{ scope_channel }}">Publishing tab</a>{% else %}<strong>Publishing</strong> tab{% endif %};
+    the OAuth cards below are the older direct-connection path (YouTube only,
+    for the legacy sync). The log shows this
+    {% if scope_channel %}channel's{% else %}factory's{% endif %} recent syncs.
+  </p>
 </div>
 
 {% if flash == 'ok' %}

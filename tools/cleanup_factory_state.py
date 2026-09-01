@@ -65,7 +65,7 @@ _PROTECTED_TABLES = {
 }
 
 _CATEGORIES = ["stale-episodes", "dead-runs", "topics", "dup-grants",
-               "dead-schedules", "local-files", "logs"]
+               "dead-schedules", "stale-sync-log", "local-files", "logs"]
 
 _DEAD_RUN_STATES = ("failed", "cancelled", "orphaned", "paused")
 _DEAD_TOPIC_STATES = ("cancelled", "skipped")
@@ -254,6 +254,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"=== dead-schedules ===\n  disabled schedules: {len(sched_del)}\n"
               f"  their scheduled_runs: {sr_n}\n")
 
+    # ---- stale analytics sync log --------------------------------
+    # platform_sync_log rows with no channel_id are pre-multi-channel test
+    # runs (triggered_by 'test' / 'p12-*'); nothing real writes NULL now.
+    synclog_n = 0
+    if not args.skip_stale_sync_log:
+        try:
+            synclog_n = conn.execute(
+                "SELECT COUNT(*) FROM platform_sync_log WHERE channel_id IS NULL"
+            ).fetchone()[0]
+        except Exception:  # noqa: BLE001
+            synclog_n = 0
+        print(f"=== stale-sync-log ===\n  platform_sync_log rows with NULL channel_id: {synclog_n}\n")
+
     # ---- local files ---------------------------------------------
     # Every directory directly under .hypogeum-assets/episodes/ whose name is
     # not a kept/held episode is cruft: DB-tracked stale episodes AND pure
@@ -331,6 +344,8 @@ def main(argv: list[str] | None = None) -> int:
             cl, p = _in_clause(sched_del)
             conn.execute(f"DELETE FROM scheduled_runs WHERE schedule_id IN {cl}", p)
             conn.execute(f"DELETE FROM schedules WHERE schedule_id IN {cl}", p)
+        if not args.skip_stale_sync_log and synclog_n:
+            conn.execute("DELETE FROM platform_sync_log WHERE channel_id IS NULL")
         conn.commit()
         print("  DB writes committed.")
     finally:

@@ -214,6 +214,10 @@ _V3_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("moved_at",          "TEXT"),
         ("version",           "INTEGER DEFAULT 1"),
         ("asset_created_at",  "TEXT"),
+        # Phase 2 — post-publish archive pass (relocation + publish state)
+        ("published_at",      "TEXT"),           # ISO ts the source episode was published
+        ("used_in_episodes",  "TEXT"),           # JSON array of episode_ids that used this asset
+        ("storage_status",    "TEXT DEFAULT 'hot_retained'"),  # hot_retained | cold_archived | purged
     ],
 }
 
@@ -1573,6 +1577,10 @@ def insert_archive_index_entry(
     moved_at: Optional[str] = None,
     version: int = 1,
     asset_created_at: Optional[str] = None,
+    # Phase 2 — post-publish archive pass
+    published_at: Optional[str] = None,
+    used_in_episodes: Optional[list] = None,
+    storage_status: str = "hot_retained",
 ) -> None:
     """Insert an archive index entry for an archived asset."""
     conn.execute(
@@ -1585,10 +1593,11 @@ def insert_archive_index_entry(
              quality_verdict, gate_name, performance_signal,
              archived_at, metadata_version,
              generation_prompt, generation_params, cost_usd,
-             scene_id, archive_location, moved_at, version, asset_created_at)
+             scene_id, archive_location, moved_at, version, asset_created_at,
+             published_at, used_in_episodes, storage_status)
         VALUES
             (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-             ?, ?, ?, ?, ?, ?, ?, ?)
+             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             archive_id, asset_id, episode_id, run_id, asset_type,
@@ -1606,6 +1615,10 @@ def insert_archive_index_entry(
             moved_at,
             version,
             asset_created_at if asset_created_at is not None else archived_at,
+            published_at,
+            json.dumps(used_in_episodes) if used_in_episodes is not None
+                else json.dumps([episode_id] if episode_id else []),
+            storage_status,
         ),
     )
 
@@ -3162,6 +3175,48 @@ def set_worker_control(
     try:
         conn.execute(
             "INSERT INTO worker_control (key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            (key, value, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# factory_settings table helpers (factory-wide operator settings)
+# ---------------------------------------------------------------------------
+
+def get_factory_setting(
+    key: str,
+    default: str = "",
+    db_path: Optional[Path] = None,
+) -> str:
+    """Read a factory_settings value by key. Returns default if key absent or on error."""
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT value FROM factory_settings WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row and row["value"] else default
+    except Exception:
+        return default
+    finally:
+        conn.close()
+
+
+def set_factory_setting(
+    key: str,
+    value: str,
+    db_path: Optional[Path] = None,
+) -> None:
+    """Upsert a factory_settings key-value pair."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO factory_settings (key, value, updated_at) VALUES (?, ?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
             (key, value, now),
         )

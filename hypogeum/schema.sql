@@ -1608,6 +1608,25 @@ CREATE TABLE IF NOT EXISTS worker_control (
 );
 
 -- ---------------------------------------------------------------------------
+-- factory_settings
+-- Key-value store for factory-wide (not channel-scoped) operator settings
+-- that a client can change from the dashboard without touching .env.
+--
+-- Standard keys:
+--   archive_root   absolute filesystem path — where published episode assets
+--                  are relocated to after publish + catalog. Empty/absent =>
+--                  fall back to Config.HYPOGEUM_ARCHIVE_ROOT, then the
+--                  built-in default (<project>/.hypogeum-assets/archive).
+--                  Resolved by hypogeum.archive_storage.resolve_archive_root().
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS factory_settings (
+    key        TEXT NOT NULL PRIMARY KEY,
+    value      TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
+
+-- ---------------------------------------------------------------------------
 -- bounded_runs / bounded_run_claims
 -- Durable, permanent claim allowance for run_worker.py's --max-episodes
 -- bounded mode (hypogeum.queue.claim_next_bounded() /

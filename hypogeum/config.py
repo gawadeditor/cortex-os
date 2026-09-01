@@ -331,6 +331,8 @@ class Config:
     SMOKE_TEST_MODE: bool                # master switch; default: false
     SMOKE_TEST_MAX_NARRATION_BEATS: int  # 0 = unlimited; default: 0
 
+    HYPOGEUM_ARCHIVE_ROOT: str           # fallback archive root; default: "" (built-in)
+
     # ------------------------------------------------------------------
     # Brand Guardian Agent (BGA v1A) — pre-generation brand compliance gate
     # ------------------------------------------------------------------
@@ -563,6 +565,13 @@ class Config:
         # work at all -- see hypogeum.agents.video_renderer.assert_subtitle_filter_available().
         # Never hardcode "ffmpeg" in a subprocess call; always read this.
         self.FFMPEG_BINARY = _get_optional("FFMPEG_BINARY", default="ffmpeg")
+        # HYPOGEUM_ARCHIVE_ROOT: absolute filesystem path where published
+        # episode assets are relocated after publish + catalog. This is only
+        # the fallback default -- the operator-editable value lives in the
+        # factory_settings DB table (key 'archive_root') and is resolved by
+        # hypogeum.archive_storage.resolve_archive_root(). Empty => the
+        # built-in default (<project>/.hypogeum-assets/archive).
+        self.HYPOGEUM_ARCHIVE_ROOT = _get_optional("HYPOGEUM_ARCHIVE_ROOT", default="")
         # REQUIRE_SHORT_BURNED_CAPTIONS: fail closed (raise, never silently
         # render without them) when a Short's caption asset cannot be
         # resolved to its own canonical short_id. Default True -- burned-in

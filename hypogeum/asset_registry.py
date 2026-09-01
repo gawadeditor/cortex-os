@@ -590,6 +590,9 @@ def register_existing_asset(
     scene_id: Optional[str] = None,
     archive_location: Optional[str] = None,
     asset_created_at: Optional[str] = None,
+    published_at: Optional[str] = None,
+    used_in_episodes: Optional[list] = None,
+    storage_status: str = "hot_retained",
 ) -> None:
     """
     Register an asset discovered at archive time rather than during generation.
@@ -687,6 +690,9 @@ def register_existing_asset(
                     archive_location=archive_location if archive_location is not None else resolved_file_path,
                     version=1,
                     asset_created_at=asset_created_at or now,
+                    published_at=published_at,
+                    used_in_episodes=used_in_episodes,
+                    storage_status=storage_status,
                 )
 
             conn.commit()

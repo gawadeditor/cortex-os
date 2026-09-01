@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{{ asset.asset_type }} — Asset archive</title>
+  {% include '_base_style.html' %}
+  {% from '_icons.html' import icon %}
+  <style>
+    .aa-k { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--faint); }
+    .aa-v { font-size: 13.5px; font-weight: 600; margin-top: 3px; word-break: break-all; }
+    .aa-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px 20px; }
+    .aa-mono { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; }
+    .aa-prompt { white-space: pre-wrap; font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px;
+      line-height: 1.6; color: var(--text); background: var(--raised); border-radius: var(--radius-sm);
+      padding: 14px 16px; overflow-x: auto; }
+    .pill { display: inline-block; font-size: 10.5px; font-weight: 700; padding: 2px 7px; border-radius: 999px;
+      text-transform: uppercase; letter-spacing: .04em; background: var(--raised); color: var(--muted); }
+    .pill.cold { background: var(--accent-bg); color: var(--accent); }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="container">
+
+  <div class="page-header">
+    <span class="eyebrow"><a href="/archive">← Archive</a></span>
+    <h1>{{ asset.asset_type }}{% if asset.scene_id %} · {{ asset.scene_id }}{% endif %}</h1>
+    <span class="page-meta ar-mono">{{ asset.asset_id }}</span>
+  </div>
+
+  <div class="card">
+    <div class="aa-grid">
+      <div><div class="aa-k">Provider / model</div><div class="aa-v">{{ asset.provider }}{% if asset.model %} · {{ asset.model }}{% endif %}</div></div>
+      <div><div class="aa-k">Source episode</div><div class="aa-v aa-mono">{{ asset.episode_id }}</div></div>
+      <div><div class="aa-k">Source stage</div><div class="aa-v">{{ asset.source_stage or '—' }}</div></div>
+      <div><div class="aa-k">Cost</div><div class="aa-v">{{ '$%.2f'|format(asset.cost_usd) if asset.cost_usd else '—' }}</div></div>
+      <div><div class="aa-k">Published</div><div class="aa-v aa-mono">{{ asset.published_at or '—' }}</div></div>
+      <div><div class="aa-k">Archived</div><div class="aa-v aa-mono">{{ asset.moved_at or 'not yet' }}</div></div>
+      <div><div class="aa-k">Storage</div><div class="aa-v">
+        {% if asset.moved_at %}<span class="pill cold">{{ asset.storage_status or 'cold_archived' }}</span>
+        {% else %}<span class="pill">{{ asset.storage_status or 'hot_retained' }}</span>{% endif %}</div></div>
+      <div><div class="aa-k">Reuse eligible</div><div class="aa-v">{{ 'yes' if asset.reuse_eligible else 'no' }}</div></div>
+      <div><div class="aa-k">Quality verdict</div><div class="aa-v">{{ asset.quality_verdict or 'unvalidated' }}</div></div>
+      <div><div class="aa-k">Version</div><div class="aa-v">{{ asset.version or 1 }}</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Current location</div>
+    <div class="aa-v aa-mono">{{ asset.archive_location or asset.file_path or '—' }}</div>
+  </div>
+
+  {% if asset.used_in_episodes %}
+  <div class="card">
+    <div class="card-title">Used in {{ asset.used_in_episodes | length }} episode{{ 's' if asset.used_in_episodes | length != 1 }}</div>
+    <div class="aa-v aa-mono">{{ asset.used_in_episodes | join(', ') }}</div>
+  </div>
+  {% endif %}
+
+  <div class="card">
+    <div class="card-title">Generation prompt</div>
+    {% if asset.generation_prompt %}
+      <div class="aa-prompt">{{ asset.generation_prompt }}</div>
+    {% else %}
+      <p style="color:var(--muted)">No prompt was captured for this asset (composite render, cached clip, or channel-library track).</p>
+    {% endif %}
+  </div>
+
+  {% if asset.generation_params %}
+  <div class="card">
+    <div class="card-title">Generation parameters</div>
+    <div class="aa-prompt">{{ asset.generation_params | tojson(indent=2) }}</div>
+  </div>
+  {% endif %}
+
+  {% if versions and versions | length > 1 %}
+  <div class="card">
+    <div class="card-title">Versions ({{ versions | length }})</div>
+    <div class="aa-mono" style="line-height:1.7">
+      {% for v in versions %}{{ v }}<br>{% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+</div>
+</body>
+</html>

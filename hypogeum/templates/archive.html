@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Asset archive — Factory OS</title>
+  {% include '_base_style.html' %}
+  {% from '_icons.html' import icon %}
+  <style>
+    .ar-tools { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; margin: 4px 0 18px; }
+    .ar-tools input, .ar-tools select { padding: 8px 10px; border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font-size: 13px; }
+    .ar-tools input[type=search] { min-width: 260px; flex: 1; }
+    .ar-tools label { display: block; font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .06em; color: var(--faint); margin-bottom: 4px; }
+    .ar-count { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+    .ar-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .ar-table th { text-align: left; font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .06em; color: var(--faint); padding: 8px 10px; border-bottom: 1px solid var(--border-strong); }
+    .ar-table td { padding: 9px 10px; border-bottom: 1px solid var(--hairline); vertical-align: top; }
+    .ar-table tr:hover td { background: var(--raised); }
+    .ar-type { font-weight: 600; }
+    .ar-prompt { color: var(--muted); font-size: 12px; max-width: 460px; display: -webkit-box;
+      -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .ar-mono { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11.5px; color: var(--faint); word-break: break-all; }
+    .pill { display: inline-block; font-size: 10.5px; font-weight: 700; padding: 2px 7px; border-radius: 999px;
+      text-transform: uppercase; letter-spacing: .04em; }
+    .pill.local { background: var(--raised); color: var(--muted); }
+    .pill.cold  { background: var(--accent-bg); color: var(--accent); }
+    .pill.reuse { background: var(--good-bg, var(--raised)); color: var(--good, var(--muted)); }
+    .ar-pager { display: flex; gap: 8px; margin-top: 16px; align-items: center; }
+    .ar-num { font-variant-numeric: tabular-nums; }
+    .ar-scroll { overflow-x: auto; }
+    .ar-empty { padding: 40px; text-align: center; color: var(--muted); }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="container">
+
+  <div class="page-header">
+    <span class="eyebrow">Archive</span>
+    <h1>Asset archive</h1>
+    <span class="page-meta">
+      {{ data.total }} catalogued asset{{ 's' if data.total != 1 }} ·
+      root <span class="ar-mono">{{ root.resolved_root }}</span> ·
+      <a href="/settings/storage">change</a>
+    </span>
+  </div>
+
+  <form class="ar-tools" method="get" action="/archive">
+    <div style="flex:1">
+      <label for="q">Search prompt</label>
+      <input type="search" id="q" name="q" value="{{ filters.q }}" placeholder="brick vault, oil lamp, colonnade…">
+    </div>
+    <div>
+      <label for="asset_type">Type</label>
+      <select id="asset_type" name="asset_type">
+        <option value="">all</option>
+        {% for f in data.facets.get('asset_type', []) %}
+        <option value="{{ f.value }}" {{ 'selected' if f.value == filters.asset_type }}>{{ f.value }} ({{ f.count }})</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label for="provider">Provider</label>
+      <select id="provider" name="provider">
+        <option value="">all</option>
+        {% for f in data.facets.get('provider', []) %}
+        <option value="{{ f.value }}" {{ 'selected' if f.value == filters.provider }}>{{ f.value }} ({{ f.count }})</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label for="storage_status">Location</label>
+      <select id="storage_status" name="storage_status">
+        <option value="">all</option>
+        {% for f in data.facets.get('storage_status', []) %}
+        <option value="{{ f.value }}" {{ 'selected' if f.value == filters.storage_status }}>{{ f.value }} ({{ f.count }})</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label for="reuse">Reusable</label>
+      <select id="reuse" name="reuse">
+        <option value="">any</option>
+        <option value="1" {{ 'selected' if filters.reuse == '1' }}>reusable only</option>
+      </select>
+    </div>
+    <button type="submit" class="btn btn-primary">Filter</button>
+    {% if filters.q or filters.asset_type or filters.provider or filters.storage_status or filters.reuse %}
+    <a href="/archive" class="btn">Clear</a>
+    {% endif %}
+  </form>
+
+  {% if data.rows %}
+  <div class="card ar-scroll">
+    <table class="ar-table">
+      <thead><tr>
+        <th>Type</th><th>Prompt</th><th>Provider / model</th><th>Source episode</th>
+        <th>Used in</th><th>Published</th><th>Cost</th><th>Location</th>
+      </tr></thead>
+      <tbody>
+      {% for r in data.rows %}
+        <tr>
+          <td class="ar-type">
+            <a href="/archive/{{ r.asset_id }}">{{ r.asset_type }}</a>
+            {% if r.scene_id %}<div class="ar-mono">{{ r.scene_id }}</div>{% endif %}
+          </td>
+          <td><div class="ar-prompt">{{ r.generation_prompt or '—' }}</div></td>
+          <td>{{ r.provider }}{% if r.model %}<div class="ar-mono">{{ r.model }}</div>{% endif %}</td>
+          <td class="ar-mono">{{ r.episode_id }}</td>
+          <td class="ar-num">{{ r.used_in_episodes | length }}</td>
+          <td class="ar-mono">{{ (r.published_at or '')[:10] or '—' }}</td>
+          <td class="ar-num">{{ '$%.2f'|format(r.cost_usd) if r.cost_usd else '—' }}</td>
+          <td>
+            {% if r.moved_at %}<span class="pill cold">archived</span>
+            {% else %}<span class="pill local">local</span>{% endif %}
+            {% if r.reuse_eligible %}<span class="pill reuse">reuse</span>{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  {% set pages = (data.total // per) + (1 if data.total % per else 0) %}
+  {% if pages > 1 %}
+  <div class="ar-pager">
+    {% set qs = [] %}
+    {% for k, v in filters.items() if v %}{% set _ = qs.append(k ~ '=' ~ v) %}{% endfor %}
+    {% set base = '/archive?' ~ (qs | join('&')) ~ ('&' if qs else '') %}
+    {% if page > 1 %}<a class="btn" href="{{ base }}page={{ page - 1 }}">← Prev</a>{% endif %}
+    <span class="ar-count">Page {{ page }} of {{ pages }}</span>
+    {% if page < pages %}<a class="btn" href="{{ base }}page={{ page + 1 }}">Next →</a>{% endif %}
+  </div>
+  {% endif %}
+
+  {% else %}
+  <div class="card"><div class="ar-empty">
+    {% if filters.q or filters.asset_type or filters.provider %}
+      No catalogued assets match these filters.
+    {% else %}
+      Nothing catalogued yet. Assets are indexed automatically when an episode
+      finishes the pipeline, and moved here once it is published.
+    {% endif %}
+  </div></div>
+  {% endif %}
+
+</div>
+</body>
+</html>

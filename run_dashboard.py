@@ -2674,6 +2674,116 @@ def channel_profile_save():
 
 
 # ===========================================================================
+# Storage & Archive — factory-wide archive root + the asset archive browser
+# ===========================================================================
+
+@app.route("/settings/storage")
+def settings_storage_page():
+    from hypogeum.archive_storage import describe_archive_root
+    try:
+        info = describe_archive_root(db_path=_db_path())
+    except Exception as exc:  # noqa: BLE001
+        info = {"error": str(exc)}
+    return render_template("settings_storage.html", archive=info,
+                           saved=request.args.get("saved"),
+                           err=request.args.get("err"))
+
+
+@app.route("/api/settings/archive-root", methods=["POST"])
+def api_settings_archive_root():
+    from hypogeum.archive_storage import set_archive_root, describe_archive_root
+    body = request.get_json(silent=True) or request.form
+    path = (body.get("archive_root") or "").strip()
+    try:
+        set_archive_root(path, db_path=_db_path())
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 422
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    return jsonify({"ok": True, "archive": describe_archive_root(db_path=_db_path())})
+
+
+@app.route("/settings/storage/save", methods=["POST"])
+def settings_storage_save():
+    from hypogeum.archive_storage import set_archive_root
+    try:
+        set_archive_root((request.form.get("archive_root") or "").strip(), db_path=_db_path())
+    except ValueError as exc:
+        return redirect(url_for("settings_storage_page") + "?err=" + str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return redirect(url_for("settings_storage_page") + "?err=" + str(exc))
+    return redirect(url_for("settings_storage_page") + "?saved=1")
+
+
+@app.route("/archive")
+def archive_page():
+    from hypogeum.archive_storage import browse_archive, describe_archive_root
+    args = request.args
+    try:
+        page = max(1, int(args.get("page", 1)))
+    except ValueError:
+        page = 1
+    per = 60
+    data = browse_archive(
+        db_path=_db_path(),
+        q=args.get("q", "").strip(),
+        asset_type=args.get("asset_type", "").strip(),
+        episode_id=args.get("episode_id", "").strip(),
+        provider=args.get("provider", "").strip(),
+        storage_status=args.get("storage_status", "").strip(),
+        reuse_only=args.get("reuse") == "1",
+        limit=per, offset=(page - 1) * per,
+    )
+    try:
+        root = describe_archive_root(db_path=_db_path())
+    except Exception:  # noqa: BLE001
+        root = {}
+    return render_template(
+        "archive.html", data=data, root=root, page=page, per=per,
+        filters={k: args.get(k, "") for k in
+                 ("q", "asset_type", "episode_id", "provider", "storage_status", "reuse")},
+    )
+
+
+@app.route("/api/archive")
+def api_archive():
+    from hypogeum.archive_storage import browse_archive
+    a = request.args
+    try:
+        offset = max(0, int(a.get("offset", 0)))
+        limit = max(1, min(int(a.get("limit", 60)), 200))
+    except ValueError:
+        offset, limit = 0, 60
+    return jsonify(browse_archive(
+        db_path=_db_path(),
+        q=a.get("q", "").strip(), asset_type=a.get("asset_type", "").strip(),
+        episode_id=a.get("episode_id", "").strip(), provider=a.get("provider", "").strip(),
+        storage_status=a.get("storage_status", "").strip(),
+        reuse_only=a.get("reuse") == "1", limit=limit, offset=offset,
+    ))
+
+
+@app.route("/archive/<path:asset_id>")
+def archive_asset_page(asset_id):
+    from hypogeum.archive_storage import get_archive_asset
+    from hypogeum.archive_recall import get_asset_lineage, get_asset_versions
+    asset = get_archive_asset(asset_id, db_path=_db_path())
+    if not asset:
+        return render_template("not_found.html", kind="Archive asset", id=asset_id), 404
+    lineage = versions = None
+    try:
+        lineage = get_asset_lineage(asset_id, db_path=_db_path())
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        versions = get_asset_versions(asset_id, db_path=_db_path())
+    except Exception:  # noqa: BLE001
+        pass
+    return render_template("archive_asset.html", asset=asset,
+                           lineage=lineage, versions=versions)
+
+
+# ===========================================================================
 # F9 — Platform Connection Setup
 # ===========================================================================
 

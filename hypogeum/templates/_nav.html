@@ -4,7 +4,7 @@
 {% set sec_production = p in ['/create','/live','/runs','/failures','/queue'] or p.startswith('/discover') or p.startswith('/run/') or p.startswith('/create/') %}
 {% set sec_review     = p in ['/attention','/approvals','/episodes','/preflight'] or p.startswith('/episode/') or p.startswith('/approvals/') %}
 {% set sec_creds      = p in ['/providers','/platforms'] or p.startswith('/platforms/') or p.startswith('/providers/') %}
-{% set sec_settings   = p in ['/channel-profile','/setup'] or p.startswith('/infrastructure/config') %}
+{% set sec_settings   = p in ['/channel-profile','/setup'] or p.startswith('/infrastructure/config') or p.startswith('/settings') %}
 {% set sec_home       = p == '/dashboard' or p == '/' %}
 
 <nav class="site-nav">
@@ -24,6 +24,7 @@
         <div class="nav-ops-group">Modules</div>
         <a href="/analytics">{{ icon('analytics') }} Analytics</a>
         <a href="/intelligence/learning">{{ icon('learning') }} Learning</a>
+        <a href="/archive">{{ icon('grid') }} Asset archive</a>
 
         <div class="nav-ops-group">System</div>
         <a href="/infrastructure">{{ icon('grid') }} Infrastructure</a>

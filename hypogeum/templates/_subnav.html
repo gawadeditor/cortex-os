@@ -9,7 +9,7 @@
   'production': [('Queue','/create'), ('Live','/live'), ('Run history','/runs'), ('Failures','/failures'), ('Discovery','/discover')],
   'review':     [('Attention','/attention'), ('Approvals','/approvals'), ('Episodes','/episodes'), ('Preflight','/preflight')],
   'credentials':[('AI providers','/providers'), ('Platform connections','/platforms')],
-  'settings':   [('Channel profile','/channel-profile'), ('Setup checklist','/setup')],
+  'settings':   [('Channel profile','/channel-profile'), ('Storage & archive','/settings/storage'), ('Setup checklist','/setup')],
   'governance': [('Decisions','/decisions'), ('Reviews','/decision-reviews'), ('Inputs','/decision-inputs'), ('Plans','/execution-plans')],
 } -%}
 {%- set tabs = groups.get(section, []) -%}

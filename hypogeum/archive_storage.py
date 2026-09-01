@@ -189,6 +189,109 @@ def set_archive_root(path_str: str, db_path: Optional[Path] = None) -> Path:
 # cross-episode reuse bookkeeping
 # ---------------------------------------------------------------------------
 
+def browse_archive(
+    db_path: Optional[Path] = None,
+    *,
+    q: str = "",
+    asset_type: str = "",
+    episode_id: str = "",
+    provider: str = "",
+    storage_status: str = "",
+    reuse_only: bool = False,
+    limit: int = 60,
+    offset: int = 0,
+) -> dict:
+    """
+    Paginated view over ``archive_index`` for the dashboard archive browser.
+
+    Returns ``{"total": int, "rows": [ {..full archive_index columns..} ],
+    "facets": {"asset_type": [...], "provider": [...], "episode_id": [...]}}``.
+    ``q`` is a case-insensitive substring match on ``generation_prompt``.
+    """
+    try:
+        from hypogeum.db import get_connection  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return {"total": 0, "rows": [], "facets": {}}
+
+    where: list[str] = []
+    params: list = []
+    if q:
+        where.append("LOWER(COALESCE(generation_prompt,'')) LIKE ?")
+        params.append(f"%{q.lower()}%")
+    for col, val in (("asset_type", asset_type), ("episode_id", episode_id),
+                     ("provider", provider), ("storage_status", storage_status)):
+        if val:
+            where.append(f"{col} = ?")
+            params.append(val)
+    if reuse_only:
+        where.append("reuse_eligible = 1")
+    wsql = (" WHERE " + " AND ".join(where)) if where else ""
+
+    conn = get_connection(db_path)
+    try:
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM archive_index{wsql}", params
+        ).fetchone()[0]
+        rows = [
+            dict(r) for r in conn.execute(
+                f"SELECT * FROM archive_index{wsql} "
+                f"ORDER BY COALESCE(published_at, archived_at) DESC, archived_at DESC "
+                f"LIMIT ? OFFSET ?",
+                params + [max(1, min(limit, 200)), max(0, offset)],
+            )
+        ]
+        facets = {}
+        for col in ("asset_type", "provider", "episode_id", "storage_status"):
+            facets[col] = [
+                {"value": rr[0], "count": rr[1]}
+                for rr in conn.execute(
+                    f"SELECT {col}, COUNT(*) FROM archive_index "
+                    f"WHERE {col} IS NOT NULL AND {col} != '' "
+                    f"GROUP BY {col} ORDER BY COUNT(*) DESC LIMIT 40"
+                )
+            ]
+    finally:
+        conn.close()
+
+    for r in rows:
+        try:
+            r["used_in_episodes"] = json.loads(r["used_in_episodes"]) if r.get("used_in_episodes") else []
+        except Exception:  # noqa: BLE001
+            r["used_in_episodes"] = []
+        try:
+            r["generation_params"] = json.loads(r["generation_params"]) if r.get("generation_params") else {}
+        except Exception:  # noqa: BLE001
+            r["generation_params"] = {}
+
+    return {"total": total, "rows": rows, "facets": facets}
+
+
+def get_archive_asset(asset_id: str, db_path: Optional[Path] = None) -> Optional[dict]:
+    """Full archive_index detail for one asset_id (newest row wins)."""
+    try:
+        from hypogeum.db import get_connection  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return None
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM archive_index WHERE asset_id = ? "
+            "ORDER BY archived_at DESC LIMIT 1", (asset_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    for k in ("used_in_episodes", "generation_params", "semantic_tags_json", "visual_style_json"):
+        if d.get(k):
+            try:
+                d[k] = json.loads(d[k])
+            except Exception:  # noqa: BLE001
+                pass
+    return d
+
+
 def record_asset_reuse(
     asset_id: str,
     episode_id: str,

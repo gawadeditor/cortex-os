@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Storage &amp; archive — Factory OS</title>
+  {% include '_base_style.html' %}
+  {% from '_icons.html' import icon %}
+  <style>
+    .st-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px 20px; margin-top: 4px; }
+    .st-k { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--faint); }
+    .st-v { font-size: 14px; font-weight: 600; margin-top: 3px; font-variant-numeric: tabular-nums; word-break: break-all; }
+    .st-path { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12.5px; }
+    .st-src { display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px;
+              background: var(--raised); color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+    .st-src.is-default { background: var(--warn-bg, var(--raised)); color: var(--warn, var(--muted)); }
+    .st-form { margin-top: 18px; display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
+    .st-form label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+    .st-form input { min-width: 340px; flex: 1; padding: 9px 11px; border: 1px solid var(--border-strong);
+                     border-radius: var(--radius-sm); background: var(--surface); color: var(--text);
+                     font-family: var(--font-mono, ui-monospace, monospace); font-size: 13px; }
+    .st-note { font-size: 12px; color: var(--muted); margin-top: 10px; line-height: 1.55; }
+    .bar { height: 8px; border-radius: 999px; background: var(--raised); overflow: hidden; margin-top: 8px; }
+    .bar > span { display: block; height: 100%; background: var(--accent); }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+{% from '_subnav.html' import subnav %}
+{{ subnav('settings') }}
+
+<div class="container">
+
+  <div class="page-header">
+    <span class="eyebrow">Settings</span>
+    <h1>Storage &amp; archive</h1>
+    <span class="page-meta">Where published episode assets are kept for reuse</span>
+  </div>
+
+  {% if saved %}<div class="flash flash-ok">Archive root updated.</div>{% endif %}
+  {% if err %}<div class="flash flash-err">{{ err }}</div>{% endif %}
+
+  {% if archive.error %}
+    <div class="card"><p>Could not read archive state: {{ archive.error }}</p></div>
+  {% else %}
+  <div class="card">
+    <div class="card-title">Archive root</div>
+    <p class="st-note">
+      When an episode is published and catalogued, its whole asset tree is moved
+      out of the working area to this location and the catalog is repointed.
+      Set this to a durable path on the server — it can be changed here at any
+      time; the offline signing key is never involved.
+    </p>
+    <div class="st-grid">
+      <div>
+        <div class="st-k">Resolved path</div>
+        <div class="st-v st-path">{{ archive.resolved_root }}</div>
+      </div>
+      <div>
+        <div class="st-k">Source</div>
+        <div class="st-v"><span class="st-src {{ 'is-default' if archive.is_default }}">{{ archive.source }}</span></div>
+      </div>
+      {% if archive.disk_free_bytes is not none %}
+      <div>
+        <div class="st-k">Disk free</div>
+        <div class="st-v">{{ '%.1f'|format(archive.disk_free_bytes / 1e9) }} GB
+          <span style="color:var(--faint);font-weight:400">/ {{ '%.0f'|format(archive.disk_total_bytes / 1e9) }} GB</span></div>
+        <div class="bar"><span style="width: {{ (100 * archive.disk_used_bytes / archive.disk_total_bytes)|round(1) }}%"></span></div>
+      </div>
+      {% endif %}
+      <div>
+        <div class="st-k">Catalogued assets</div>
+        <div class="st-v">{{ archive.cataloged_assets }}</div>
+      </div>
+      <div>
+        <div class="st-k">Archived / local</div>
+        <div class="st-v">{{ archive.assets_archived }} <span style="color:var(--faint);font-weight:400">/ {{ archive.assets_local }}</span></div>
+      </div>
+    </div>
+
+    <form class="st-form" method="post" action="/settings/storage/save">
+      <div style="flex:1">
+        <label for="archive_root">New archive root (absolute path)</label>
+        <input type="text" id="archive_root" name="archive_root"
+               placeholder="/var/lib/factory-os/archive" value="{{ archive.configured_value if not archive.is_default else '' }}">
+      </div>
+      <button type="submit" class="btn btn-primary">{{ icon('check') }} Save</button>
+    </form>
+    <p class="st-note">
+      Must be an absolute path outside the working <code>.hypogeum-assets/episodes</code>
+      tree, on a filesystem the factory process can write to. Existing archived
+      files are not moved when this changes — only new relocations use the new root.
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Asset archive</div>
+    <p class="st-note">
+      Every generated scene, thumbnail and music track is catalogued with its
+      prompt, provider, cost, which episode(s) used it, and when it was
+      published — browse and search it in the
+      <a href="/archive">archive</a>.
+    </p>
+    <a href="/archive" class="btn">{{ icon('grid') }} Open archive</a>
+  </div>
+  {% endif %}
+
+</div>
+</body>
+</html>

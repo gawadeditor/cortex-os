@@ -568,6 +568,26 @@ def validate_deliverable_shape(
 # Authoritative pricing — never an independently invented constant
 # ---------------------------------------------------------------------------
 
+# Non-empty placeholder handed to muapi._resolve_scene_model() at plan-compile
+# time for a scene predicted to take the I2V conditioning path. Its only job is
+# to be truthy — _resolve_scene_model returns config.MUAPI_I2V_MODEL for any
+# non-empty reference_image_url and never inspects the value.
+_I2V_PLAN_SENTINEL = "planned-i2v-conditioning"
+
+
+def _scene_will_be_i2v(scene: dict, final_locked_entity_ids: set) -> bool:
+    """True when submit_scene() will route this scene to the I2V model.
+
+    Mirrors entity_continuity_manager.get_primary_entity_url: only the FIRST
+    primary entity_appearance matters, and I2V applies iff that entity is
+    final-locked (and therefore carries a generated reference image).
+    """
+    for ea in scene.get("entity_appearances", []) or []:
+        if ea.get("role") == "primary":
+            return ea.get("entity_id") in final_locked_entity_ids
+    return False
+
+
 def resolve_video_price(
     model: str, *, episode_id: str, channel_price: Optional[float] = None,
 ) -> float:
@@ -860,6 +880,19 @@ def compile_production_plan(
     except Exception:  # noqa: BLE001
         _channel_video_model, _channel_video_price = None, None
 
+    # Scenes whose first primary entity is a final-locked entity will be routed
+    # to the I2V model at submission time (submit_scene() conditions on that
+    # entity's generated reference image — see
+    # entity_continuity_manager.get_primary_entity_url). The reference URL does
+    # not exist yet at plan-compile time, so predict it here and declare the
+    # I2V model + price now — otherwise every such scene's real submission
+    # mismatches its own authorized plan (model_mismatch / plan_price_mismatch).
+    _final_locked_entity_ids = {
+        e.get("entity_id")
+        for e in ((visual_package.get("visual_continuity_record") or {}).get("locked_entities") or [])
+        if e.get("lock_state") == "final" and e.get("entity_id")
+    }
+
     contract = load_deliverable_contract(channel_id, packages_root=packages_root)
     validate_deliverable_shape(
         contract, script_package, channel_id=channel_id, episode_id=episode_id,
@@ -898,6 +931,8 @@ def compile_production_plan(
         prod_spec = scene.get("production_spec", {})
         routing = prod_spec.get("provider_routing", {})
         reference_image_url = prod_spec.get("reference_image_url")
+        if not reference_image_url and _scene_will_be_i2v(scene, _final_locked_entity_ids):
+            reference_image_url = _I2V_PLAN_SENTINEL
         tier = int(routing.get("primary_tier") or getattr(config, "MUAPI_DEFAULT_TIER", 2))
         model = _resolve_scene_model(tier, reference_image_url, config, channel_id)
         _cp = _channel_video_price if model == _channel_video_model else None

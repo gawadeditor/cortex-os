@@ -137,3 +137,65 @@ def test_production_plan_unchanged_for_channel_without_override(monkeypatch):
     models = {a.model for a in plan.assets if a.provider == "muapi"}
     assert "seedance-pro-t2v-fast" not in models
     assert "veo3.1-lite-text-to-video" in models
+
+
+# ── plan/gate symmetry: I2V-predicted scenes + off-table channel price ──
+
+def _vp_with_final_locked_primary():
+    """The standard hypogeum visual package, but s01 gets a final-locked
+    primary entity (→ I2V at submission) and s02 references it only as
+    secondary (→ stays on the channel T2V model)."""
+    from tests.test_production_plan import _make_visual_package
+    vp = _make_visual_package()
+    vp["scenes"][0]["entity_appearances"] = [{"entity_id": "hero", "role": "primary"}]
+    vp["scenes"][1]["entity_appearances"] = [{"entity_id": "hero", "role": "secondary"}]
+    vp["visual_continuity_record"] = {
+        "locked_entities": [
+            {"entity_id": "hero", "lock_state": "final",
+             "reference_image_asset_id": "episodes/ep_test/video/ref_hero"},
+        ],
+    }
+    return vp
+
+
+def test_plan_predicts_i2v_for_final_locked_primary_scene(monkeypatch):
+    from tests.test_production_plan import _compile
+
+    monkeypatch.setattr(
+        "hypogeum.channel_config.resolve_channel_video_model",
+        lambda cid, db_path=None: ("seedance-pro-t2v-fast", 0.06),
+    )
+    plan = _compile(visual_package=_vp_with_final_locked_primary())
+
+    by_scene = {a.scene_id: a for a in plan.assets if a.role == "required"}
+    # s01: final-locked primary → declared as the I2V model at its table price
+    assert "image-to-video" in by_scene["s01"].model
+    from hypogeum.muapi import MODEL_CREDIT_COSTS
+    assert by_scene["s01"].unit_price_usd == MODEL_CREDIT_COSTS[by_scene["s01"].model]
+    # s02: no final-locked primary → channel T2V model at the channel price
+    assert by_scene["s02"].model == "seedance-pro-t2v-fast"
+    assert by_scene["s02"].unit_price_usd == 0.06
+
+
+def test_gate_unit_price_matches_plan_for_every_model(tmp_path):
+    """_resolve_gate_unit_price must return the SAME number the plan priced
+    each model at — otherwise a legit submission fails plan_price_mismatch."""
+    from hypogeum.muapi import _resolve_gate_unit_price, MODEL_CREDIT_COSTS
+    from hypogeum.production_plan import resolve_video_price
+
+    db = tmp_path / "t.db"
+    _channel_with_model(db, "cc", "seedance-pro-t2v-fast", 0.06)
+    import hypogeum.channel_config as cc
+    orig = cc._resolve_db_path
+    cc._resolve_db_path = lambda p: db
+    try:
+        # off-table channel model: gate price == channel price == plan price
+        gate = _resolve_gate_unit_price("seedance-pro-t2v-fast", "cc", "ep")
+        plan = resolve_video_price("seedance-pro-t2v-fast", episode_id="ep", channel_price=0.06)
+        assert gate == plan == 0.06
+        # on-table model (I2V): both use the table
+        m = "veo3-image-to-video"
+        assert _resolve_gate_unit_price(m, "cc", "ep") == MODEL_CREDIT_COSTS[m]
+        assert resolve_video_price(m, episode_id="ep") == MODEL_CREDIT_COSTS[m]
+    finally:
+        cc._resolve_db_path = orig

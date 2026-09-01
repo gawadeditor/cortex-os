@@ -905,7 +905,7 @@ def _submit_scene_via_gate(
     operation_payload_content = operation_payload_bytes.decode("utf-8")
     operation_payload_sha256 = hashlib.sha256(operation_payload_bytes).hexdigest()
 
-    max_cost = Decimal(str(MODEL_CREDIT_COSTS.get(model, _DEFAULT_UNKNOWN_MODEL_COST)))
+    max_cost = Decimal(str(_resolve_gate_unit_price(model, channel_id, episode_id)))
 
     # ------------------------------------------------------------------
     # Phase 3: plan-bound price cross-check (2026-08-25) -- the envelope's
@@ -4173,6 +4173,40 @@ def _resolve_scene_model(
         except Exception:  # noqa: BLE001
             pass
     return _tier_to_model(tier, reference_image_url, config)
+
+
+def _resolve_gate_unit_price(
+    model: str, channel_id: Optional[str], episode_id: str,
+) -> float:
+    """The per-call price ceiling for `model`, resolved the SAME way
+    hypogeum.production_plan.resolve_video_price() prices it for the compiled
+    Production Plan: the static MODEL_CREDIT_COSTS table first, then a
+    channel's adopted-model price (Video Model bake-off, persisted on the
+    ModelProfile), then the synced model registry. Only when nothing
+    authoritative is available does it fall back to the budget guard's
+    conservative default -- so a bake-off model the plan priced from the live
+    catalogue is not re-priced to the $2.50 unknown-model ceiling here and
+    rejected as a plan_price_mismatch against its own authorized plan.
+    """
+    price = MODEL_CREDIT_COSTS.get(model)
+    if price is not None:
+        return float(price)
+    if channel_id:
+        try:
+            from hypogeum.channel_config import resolve_channel_video_model  # noqa: PLC0415
+            ch_model, ch_price = resolve_channel_video_model(channel_id)
+            if ch_model and model == ch_model and ch_price and float(ch_price) > 0:
+                return float(ch_price)
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        from hypogeum.model_registry import price_of  # noqa: PLC0415
+        reg = price_of(model)
+        if reg is not None and float(reg) > 0:
+            return float(reg)
+    except Exception:  # noqa: BLE001
+        pass
+    return float(_DEFAULT_UNKNOWN_MODEL_COST)
 
 
 def get_requested_clip_duration_seconds(config: Config) -> float:

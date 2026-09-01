@@ -745,6 +745,7 @@ class PipelineResult:
     archive_record: Optional[dict] = None
     finance_record: Optional[dict] = None
     asset_archive_record: Optional[dict] = None
+    relocation_record: Optional[dict] = None
     production_metadata_record: Optional[dict] = None
     analytics_pending_record: Optional[dict] = None
     approval_id: Optional[str] = None
@@ -1816,6 +1817,37 @@ def run_pipeline(
             )
 
         # -----------------------------------------------------------------------
+        # Archive Relocation — move the published episode's asset tree to the
+        # configured archive root and repoint the catalog. Terminal, non-
+        # blocking, and NOT a verified workflow stage (it changes no agent
+        # output and must never gate a run): it runs after the frozen stage
+        # sequence has completed. Only acts when the episode has a succeeded
+        # publication — relocate_episode_assets() enforces that itself.
+        # -----------------------------------------------------------------------
+        relocation_record = None
+        _pub_overall = (
+            (publishing_record or {}).get("package_metadata", {}).get("overall_status", "")
+        )
+        if _pub_overall in ("published", "partially_published") and \
+                (archive_record or {}).get("verdict") in ("ARCHIVED", "WARNING"):
+            log.info("archive_relocation_started", episode_id=episode_id)
+            try:
+                relocation_record = _run_archive_relocation(
+                    episode_id=episode_id,
+                    channel_id=channel_id,
+                    output_dir=output_dir,
+                    db_path=db_path,
+                )
+            except Exception as _exc:  # noqa: BLE001
+                log.warn("archive_relocation_errored", episode_id=episode_id, error=str(_exc))
+            log.info(
+                "archive_relocation_completed",
+                episode_id=episode_id,
+                verdict=(relocation_record or {}).get("verdict"),
+                files_moved=(relocation_record or {}).get("files_moved", 0),
+            )
+
+        # -----------------------------------------------------------------------
         # 16. Seal result
         # -----------------------------------------------------------------------
         complete_run(run_id=run_id, episode_id=episode_id, db_path=db_path)
@@ -1848,6 +1880,7 @@ def run_pipeline(
             archive_record=archive_record,
             finance_record=finance_record,
             asset_archive_record=asset_archive_record,
+            relocation_record=relocation_record,
             production_metadata_record=production_metadata_record,
             analytics_pending_record=analytics_pending_record,
         )
@@ -2677,6 +2710,32 @@ def _run_archive_agent(
         final_render_package=final_render_package,
         publishing_record=publishing_record,
         episode_id=episode_id,
+        output_dir=output_dir,
+    )
+
+
+def _run_archive_relocation(
+    episode_id: str,
+    channel_id: Optional[str],
+    output_dir: Optional[Path],
+    db_path: Optional[Path],
+) -> dict:
+    """
+    Archive Relocation — terminal, non-blocking.
+
+    Moves the published episode's asset tree from the working
+    ``.hypogeum-assets/episodes/<episode_id>/`` directory to the configured
+    archive root and repoints the catalog (archive_index + JSONL + assets).
+    Only acts on an episode with a succeeded publication; otherwise a no-op.
+    Never raises — the episode is already published and catalogued.
+
+    Delegates to hypogeum.archive_relocation.relocate_episode_assets().
+    """
+    from hypogeum.archive_relocation import relocate_episode_assets
+    return relocate_episode_assets(
+        episode_id,
+        channel_id or "hypogeum",
+        db_path=db_path,
         output_dir=output_dir,
     )
 

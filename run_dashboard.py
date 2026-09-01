@@ -2301,17 +2301,48 @@ def _compute_video_test(episode_id: str) -> dict | None:
     }
 
 
+def _local_episodes_with_video() -> list[dict]:
+    """Episodes whose video clips are still on local disk (published episodes
+    are moved to the archive after release), newest first."""
+    root = _ASSETS_ROOT_PATH / "episodes"
+    out = []
+    if not root.exists():
+        return out
+    for d in root.iterdir():
+        vid = d / "video"
+        if not d.is_dir() or not vid.is_dir():
+            continue
+        clips = list(vid.glob("*.mp4"))
+        if not clips:
+            continue
+        out.append({
+            "episode_id": d.name,
+            "clip_count": len(clips),
+            "mtime": max((c.stat().st_mtime for c in clips), default=0),
+        })
+    out.sort(key=lambda e: e["mtime"], reverse=True)
+    return out
+
+
 @app.route("/providers/video-test")
 def video_test_page():
-    episode_id = request.args.get("episode", "ep_003")
-    cached = _VIDEO_TEST_CACHE.get(episode_id)
-    if not cached:
-        cached = _compute_video_test(episode_id)
-        if cached:
-            _VIDEO_TEST_CACHE[episode_id] = cached
-    if not cached:
-        return render_template("not_found.html", kind="Episode", id=episode_id), 404
-    return render_template("video_test.html", data=cached, episode_id=episode_id)
+    available = _local_episodes_with_video()
+    episode_id = request.args.get("episode") or (
+        available[0]["episode_id"] if available else ""
+    )
+    cached = None
+    if episode_id:
+        cached = _VIDEO_TEST_CACHE.get(episode_id)
+        if not cached:
+            cached = _compute_video_test(episode_id)
+            if cached:
+                _VIDEO_TEST_CACHE[episode_id] = cached
+    return render_template(
+        "video_test.html",
+        data=cached,
+        episode_id=episode_id,
+        available=available,
+    )
 
 
 @app.route("/api/providers/video-test/clip/<episode_id>/<scene_id>")
@@ -2327,7 +2358,10 @@ def api_video_test_clip(episode_id: str, scene_id: str):
 @app.route("/api/providers/video-test")
 def api_video_test():
     """Per-clip video analysis. No write actions, no provider calls."""
-    episode_id = request.args.get("episode", "ep_003")
+    _avail = _local_episodes_with_video()
+    episode_id = request.args.get("episode") or (
+        _avail[0]["episode_id"] if _avail else ""
+    )
     refresh    = request.args.get("refresh", "0") == "1"
     if refresh:
         _VIDEO_TEST_CACHE.pop(episode_id, None)

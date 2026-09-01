@@ -119,11 +119,40 @@
   <span>Video Test</span>
 </div>
 
-<div class="page-header" style="display:flex; align-items:baseline; gap:16px;">
+<div class="page-header" style="display:flex; align-items:baseline; gap:16px; flex-wrap:wrap;">
   <h1>Video Provider Test</h1>
-  <span class="page-meta">{{ episode_id }} — {{ data.clips_present }}/{{ data.scene_count }} clips — read-only</span>
+  {% if available %}
+  <form method="get" style="display:flex; align-items:center; gap:6px;">
+    <label class="filter-label" for="ep-pick">Episode</label>
+    <select id="ep-pick" name="episode" onchange="this.form.submit()"
+            style="font-size:12px; padding:3px 6px; background:var(--surface);
+                   color:var(--text); border:1px solid var(--border); border-radius:6px;">
+      {% for e in available %}
+      <option value="{{ e.episode_id }}" {{ 'selected' if e.episode_id == episode_id }}>
+        {{ e.episode_id }} — {{ e.clip_count }} clips
+      </option>
+      {% endfor %}
+    </select>
+  </form>
+  {% endif %}
+  {% if data %}
+  <span class="page-meta">{{ data.clips_present }}/{{ data.scene_count }} clips — read-only</span>
   <a href="?episode={{ episode_id }}&refresh=1" class="btn" style="margin-left:auto; font-size:11px;">↻ Refresh</a>
+  {% endif %}
 </div>
+
+{% if not data %}
+<div class="empty" style="margin-top:var(--gap);">
+  {% if episode_id %}
+    <strong>No local video for “{{ episode_id }}”.</strong><br>
+  {% else %}
+    <strong>No episodes with generated video are available locally.</strong><br>
+  {% endif %}
+  This page inspects the raw clips a run produced. Published episodes are moved
+  to the archive after release, so their clips are no longer on this machine —
+  it only shows runs whose video is still in the working area.
+</div>
+{% else %}
 
 {# ── Summary tiles ──────────────────────────────────────────────────────── #}
 <div class="summ-grid">
@@ -370,6 +399,7 @@ function updateCompare() {
   });
 }
 </script>
+{% endif %}{# /if data #}
 </div><!-- /.container -->
 </body>
 </html>

@@ -144,6 +144,19 @@ def run_script_engine(
     if (getattr(config, "SHORT_NATIVE_MODE", False) is True):
         _max_words = int(getattr(config, "SHORT_NATIVE_MAX_NARRATION_WORDS", 150) or 150)
         _beat_secs = float(getattr(config, "SHORT_NATIVE_MAX_BEAT_SECONDS", 8.5) or 8.5)
+        # Model-aware: the default 8.5s ceiling assumes an 8s clip. A channel
+        # on a shorter-clip model (e.g. seedance ~5s, adopted via the bake-off)
+        # must cap each beat's narration to what ONE of its clips covers, or
+        # every beat needs a second (contingency) clip and Assembly's
+        # coverage-fill is exercised on every short — the exact failure the
+        # "one clip per beat" short-native design exists to avoid.
+        try:
+            from hypogeum.muapi import get_requested_clip_duration_seconds  # noqa: PLC0415
+            _clip_secs = get_requested_clip_duration_seconds(config, channel_id)
+            if _clip_secs and _clip_secs > 0:
+                _beat_secs = min(_beat_secs, float(_clip_secs))
+        except Exception:  # noqa: BLE001
+            pass
         _wps = float(getattr(config, "SHORT_NATIVE_WORDS_PER_SECOND", 2.9) or 2.9)
         _per_beat_words = max(8, int(_beat_secs * _wps))
         _beat_lo = max(3, _max_words // _per_beat_words)
@@ -154,9 +167,9 @@ def run_script_engine(
             "sections": 1,
             "narration_beats": (
                 f"{_beat_lo} to {_beat_hi} beats. EACH beat becomes exactly one "
-                f"8-second vertical video clip, so each beat's spoken narration "
-                f"MUST be sayable in {_beat_secs:.0f} seconds or less — hard cap "
-                f"{_per_beat_words} words per beat. A beat that runs long will be "
+                f"{_beat_secs:.0f}-second vertical video clip, so each beat's spoken "
+                f"narration MUST be sayable in {_beat_secs:.0f} seconds or less — hard "
+                f"cap {_per_beat_words} words per beat. A beat that runs long will be "
                 f"truncated automatically; write within the budget."
             ),
             "per_beat_words_max": _per_beat_words,
@@ -194,7 +207,7 @@ def run_script_engine(
         humanize_beats(short.get("narration_beats", []))
 
     if (getattr(config, "SHORT_NATIVE_MODE", False) is True):
-        _enforce_short_native_budget(script_package, config, log)
+        _enforce_short_native_budget(script_package, config, log, channel_id=channel_id)
 
     output_sections = len(script_package.get("sections", []))
     cta_count       = script_package.get("script_integrity", {}).get("cta_count", 0)
@@ -215,26 +228,40 @@ def run_script_engine(
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
 
-def _enforce_short_native_budget(script_package: dict, config, log) -> None:
+def _enforce_short_native_budget(
+    script_package: dict, config, log, *, channel_id: Optional[str] = None,
+) -> None:
     """Deterministically make a short-native script fit its clip budget.
 
-    SHORT_NATIVE gives every narration beat its own single 8s vertical clip
+    SHORT_NATIVE gives every narration beat its own single vertical clip
     (see scene_planner.build_scene_plan_input). If a beat's narration runs
     longer than one clip can cover, Assembly is forced onto the coverage-fill
     path -- the exact thing short-native exists to avoid. The LLM directive
     asks for a compliant script; this pass guarantees one, with no extra
     model call:
 
-      1. per beat: keep only the leading whole sentences that fit
-         SHORT_NATIVE_MAX_BEAT_SECONDS (always keep at least one sentence).
+      1. per beat: keep only the leading whole sentences that fit the
+         per-beat second ceiling (always keep at least one sentence).
       2. across beats, in order: once the running total passes
          SHORT_NATIVE_MAX_NARRATION_WORDS, drop the remaining beats
          (never below 3 beats / 1 beat minimum).
       3. drop any text_overlay whose beat_reference no longer exists.
+
+    The per-beat ceiling is min(SHORT_NATIVE_MAX_BEAT_SECONDS, the channel's
+    real clip duration) -- the 8.5s default assumes an 8s clip; a channel on
+    a shorter-clip model (seedance ~5s) must trim tighter or every beat
+    over-runs one clip.
     """
     wps = float(getattr(config, "SHORT_NATIVE_WORDS_PER_SECOND", 2.9) or 2.9)
-    max_beat_words = max(8, int(float(
-        getattr(config, "SHORT_NATIVE_MAX_BEAT_SECONDS", 8.5) or 8.5) * wps))
+    _beat_secs = float(getattr(config, "SHORT_NATIVE_MAX_BEAT_SECONDS", 8.5) or 8.5)
+    try:
+        from hypogeum.muapi import get_requested_clip_duration_seconds  # noqa: PLC0415
+        _clip_secs = get_requested_clip_duration_seconds(config, channel_id)
+        if _clip_secs and _clip_secs > 0:
+            _beat_secs = min(_beat_secs, float(_clip_secs))
+    except Exception:  # noqa: BLE001
+        pass
+    max_beat_words = max(8, int(_beat_secs * wps))
     max_total_words = int(getattr(config, "SHORT_NATIVE_MAX_NARRATION_WORDS", 150) or 150)
 
     sections = script_package.get("sections", []) or []

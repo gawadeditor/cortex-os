@@ -769,7 +769,7 @@ def _submit_scene_via_gate(
     )
     from hypogeum.provider_receipt import WriteAheadReceiptStore
 
-    model = _tier_to_model(tier, reference_image_url, config)
+    model = _resolve_scene_model(tier, reference_image_url, config, channel_id)
     at = datetime.now(timezone.utc).isoformat()
 
     package_identity = channel_config.compute_channel_package_identity(channel_id)
@@ -4131,6 +4131,46 @@ def _tier_to_model(tier: int, reference_image_url: Optional[str], config: Config
     if tier == 3:
         return config.MUAPI_T3_MODEL
     return config.MUAPI_T2_MODEL  # default and tier 2
+
+
+def _resolve_scene_model(
+    tier: int,
+    reference_image_url: Optional[str],
+    config: Config,
+    channel_id: Optional[str] = None,
+) -> str:
+    """The model slug for one scene, honouring a channel's adopted per-channel
+    video model (hypogeum.channel_config.ModelProfile.video_model, set via the
+    Video Model bake-off) when one exists.
+
+    Resolution order:
+      1. reference_image_url set -> the I2V model (always; conditioning path).
+      2. A global cost/safety mode is active (SMOKE_TEST_MODE / MUAPI_CHEAP_MODE
+         / MUAPI_RUNWAY_ONLY_MODE) -> _tier_to_model(). These explicit operator
+         overrides win over a channel preference.
+      3. channel_id given and that channel has an adopted video_model -> it.
+      4. Otherwise -> _tier_to_model() (the global MUAPI_T{1,2,3}_MODEL config).
+
+    Both the Production Plan compiler (hypogeum.production_plan) and the paid
+    submission gate (_submit_scene_via_gate) call this, so the plan declares
+    and the submission produces the SAME model -- the plan's model-match check
+    stays satisfied.
+    """
+    if reference_image_url:
+        return config.MUAPI_I2V_MODEL
+    if (getattr(config, "SMOKE_TEST_MODE", False)
+            or getattr(config, "MUAPI_CHEAP_MODE", False)
+            or getattr(config, "MUAPI_RUNWAY_ONLY_MODE", False)):
+        return _tier_to_model(tier, reference_image_url, config)
+    if channel_id:
+        try:
+            from hypogeum.channel_config import resolve_channel_video_model
+            override, _price = resolve_channel_video_model(channel_id)
+            if override:
+                return override
+        except Exception:  # noqa: BLE001
+            pass
+    return _tier_to_model(tier, reference_image_url, config)
 
 
 def get_requested_clip_duration_seconds(config: Config) -> float:

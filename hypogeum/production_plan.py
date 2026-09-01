@@ -568,18 +568,28 @@ def validate_deliverable_shape(
 # Authoritative pricing — never an independently invented constant
 # ---------------------------------------------------------------------------
 
-def resolve_video_price(model: str, *, episode_id: str) -> float:
+def resolve_video_price(
+    model: str, *, episode_id: str, channel_price: Optional[float] = None,
+) -> float:
     """
     hypogeum.muapi.MODEL_CREDIT_COSTS is the SAME table
     MUAPIBudgetGuard.check_and_record_attempt() already uses for real
-    pre-submission budget reservation. No fallback here (unlike that
-    guard's own _DEFAULT_UNKNOWN_MODEL_COST safety net, which exists for
-    genuinely unanticipated runtime drift, not for planning) -- planning
-    must know the real price or refuse to plan.
+    pre-submission budget reservation. No silent fallback (unlike that
+    guard's own _DEFAULT_UNKNOWN_MODEL_COST safety net) -- planning must
+    know the real price or refuse to plan.
+
+    `channel_price` is the ONE explicit exception: a model adopted per
+    channel via the Video Model bake-off carries a price captured from the
+    live MUAPI catalogue at adoption time, persisted on the ModelProfile.
+    That is an authoritative provider number, not an estimate, so it is
+    accepted for a `model` that is not in MODEL_CREDIT_COSTS. A model that
+    is in the table always uses the table value.
     """
     from hypogeum.muapi import MODEL_CREDIT_COSTS  # noqa: PLC0415
     price = MODEL_CREDIT_COSTS.get(model)
     if price is None:
+        if channel_price is not None and float(channel_price) > 0:
+            return float(channel_price)
         raise ProductionPlanPricingError(episode_id, "video_generation_model", model)
     return float(price)
 
@@ -828,8 +838,17 @@ def compile_production_plan(
     Channel Package's deliverable contract, and ProductionPlanPricingError
     if any category has no authoritative finite price.
     """
-    from hypogeum.muapi import _compute_asset_id, _tier_to_model  # noqa: PLC0415
+    from hypogeum.muapi import _compute_asset_id, _resolve_scene_model  # noqa: PLC0415
     from hypogeum.video_prompt_writer import assemble_video_scene_prompt  # noqa: PLC0415
+
+    # A channel that adopted a video model via the Video Model bake-off — the
+    # price was captured from the live MUAPI catalogue at adoption, so planning
+    # can price a model that is not in muapi.MODEL_CREDIT_COSTS.
+    try:
+        from hypogeum.channel_config import resolve_channel_video_model  # noqa: PLC0415
+        _channel_video_model, _channel_video_price = resolve_channel_video_model(channel_id)
+    except Exception:  # noqa: BLE001
+        _channel_video_model, _channel_video_price = None, None
 
     contract = load_deliverable_contract(channel_id, packages_root=packages_root)
     validate_deliverable_shape(
@@ -870,8 +889,9 @@ def compile_production_plan(
         routing = prod_spec.get("provider_routing", {})
         reference_image_url = prod_spec.get("reference_image_url")
         tier = int(routing.get("primary_tier") or getattr(config, "MUAPI_DEFAULT_TIER", 2))
-        model = _tier_to_model(tier, reference_image_url, config)
-        unit_price = resolve_video_price(model, episode_id=episode_id)
+        model = _resolve_scene_model(tier, reference_image_url, config, channel_id)
+        _cp = _channel_video_price if model == _channel_video_model else None
+        unit_price = resolve_video_price(model, episode_id=episode_id, channel_price=_cp)
         aspect_ratio = prod_spec.get("aspect_ratio", "16:9")
         # The declared prompt is the FULLY ASSEMBLED provider payload text
         # (hypogeum.video_prompt_writer.assemble_video_scene_prompt()),

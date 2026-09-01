@@ -1,0 +1,139 @@
+"""A channel's adopted video model (Video Model bake-off) drives production:
+resolution helper, Production Plan pricing, and the plan/submission model-match.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from hypogeum.channel_config import (
+    create_brand_profile, create_channel_profile, create_model_profile,
+    resolve_channel_video_model, update_channel_profile, update_model_profile,
+)
+from hypogeum.config import Config
+from hypogeum.muapi import _resolve_scene_model, _tier_to_model
+from hypogeum.production_plan import ProductionPlanPricingError, resolve_video_price
+
+
+def _cfg(**over):
+    c = Config()
+    c.MUAPI_T1_MODEL = "veo3-text-to-video"
+    c.MUAPI_T2_MODEL = "veo3.1-lite-text-to-video"
+    c.MUAPI_T3_MODEL = "veo3.1-lite-text-to-video"
+    c.MUAPI_I2V_MODEL = "veo3-image-to-video"
+    c.SMOKE_TEST_MODE = False
+    c.MUAPI_CHEAP_MODE = False
+    c.MUAPI_RUNWAY_ONLY_MODE = False
+    for k, v in over.items():
+        setattr(c, k, v)
+    return c
+
+
+def _channel_with_model(db, channel_id="c", model="seedance-pro-t2v-fast", price=0.06):
+    mp = create_model_profile(f"{channel_id} models", db_path=db)
+    create_channel_profile(channel_id, channel_id.title(),
+                           model_profile_id=mp.model_profile_id, db_path=db)
+    if model:
+        update_model_profile(mp.model_profile_id, db_path=db,
+                             video_model=model, video_model_price_usd=price)
+    return mp
+
+
+# ── resolve_channel_video_model ──────────────────────────────────────────
+
+def test_resolve_channel_video_model(tmp_path):
+    db = tmp_path / "t.db"
+    _channel_with_model(db, "ch1", "kling-v3.0-pro-text-to-video", 0.72)
+    assert resolve_channel_video_model("ch1", db_path=db) == ("kling-v3.0-pro-text-to-video", 0.72)
+    # unknown / no-profile channel
+    assert resolve_channel_video_model("nope", db_path=db) == (None, None)
+
+
+def test_resolve_channel_video_model_none_when_unset(tmp_path):
+    db = tmp_path / "t.db"
+    _channel_with_model(db, "ch2", model=None)
+    assert resolve_channel_video_model("ch2", db_path=db) == (None, None)
+
+
+# ── _resolve_scene_model precedence ──────────────────────────────────────
+
+def test_scene_model_uses_channel_override(tmp_path, monkeypatch):
+    db = tmp_path / "t.db"
+    _channel_with_model(db, "ovr", "seedance-pro-t2v-fast", 0.06)
+    monkeypatch.setattr("hypogeum.channel_config._resolve_db_path", lambda p: db)
+    assert _resolve_scene_model(2, None, _cfg(), "ovr") == "seedance-pro-t2v-fast"
+    # no channel -> global tier config
+    assert _resolve_scene_model(2, None, _cfg(), None) == "veo3.1-lite-text-to-video"
+
+
+def test_i2v_always_wins_over_channel_override(tmp_path, monkeypatch):
+    db = tmp_path / "t.db"
+    _channel_with_model(db, "ovr", "seedance-pro-t2v-fast", 0.06)
+    monkeypatch.setattr("hypogeum.channel_config._resolve_db_path", lambda p: db)
+    assert _resolve_scene_model(2, "http://ref.png", _cfg(), "ovr") == "veo3-image-to-video"
+
+
+@pytest.mark.parametrize("mode", ["SMOKE_TEST_MODE", "MUAPI_CHEAP_MODE", "MUAPI_RUNWAY_ONLY_MODE"])
+def test_global_safety_mode_wins_over_channel_override(tmp_path, monkeypatch, mode):
+    db = tmp_path / "t.db"
+    _channel_with_model(db, "ovr", "seedance-pro-t2v-fast", 0.06)
+    monkeypatch.setattr("hypogeum.channel_config._resolve_db_path", lambda p: db)
+    cfg = _cfg(**{mode: True})
+    got = _resolve_scene_model(2, None, cfg, "ovr")
+    assert got == _tier_to_model(2, None, cfg)  # global config, not the channel model
+
+
+# ── resolve_video_price channel_price fallback ───────────────────────────
+
+def test_price_uses_channel_price_for_off_table_model():
+    # seedance-pro-t2v-fast is not in MODEL_CREDIT_COSTS
+    assert resolve_video_price("seedance-pro-t2v-fast", episode_id="e",
+                               channel_price=0.06) == 0.06
+
+
+def test_price_still_refuses_unknown_model_with_no_channel_price():
+    with pytest.raises(ProductionPlanPricingError):
+        resolve_video_price("totally-made-up-model", episode_id="e")
+
+
+def test_price_table_wins_over_channel_price_for_known_model():
+    # a known model ignores channel_price and uses the authoritative table
+    from hypogeum.muapi import MODEL_CREDIT_COSTS
+    known = "veo3.1-lite-text-to-video"
+    assert resolve_video_price(known, episode_id="e", channel_price=99.0) == \
+        float(MODEL_CREDIT_COSTS[known])
+
+
+# ── end-to-end: the plan declares the channel's model, at the channel's price ──
+
+def test_production_plan_declares_channel_model_and_price(monkeypatch):
+    from tests.test_production_plan import _compile
+
+    monkeypatch.setattr(
+        "hypogeum.channel_config.resolve_channel_video_model",
+        lambda cid, db_path=None: ("seedance-pro-t2v-fast", 0.06),
+    )
+    plan = _compile()
+    video_assets = [a for a in plan.assets if a.provider == "muapi"
+                    and a.model == "seedance-pro-t2v-fast"]
+    other = [a for a in plan.assets if a.provider == "muapi"
+             and a.model != "seedance-pro-t2v-fast" and "image" not in a.model]
+    assert video_assets, "expected video assets on the channel model"
+    assert not other, f"some video assets kept a non-channel model: {[a.model for a in other]}"
+    for a in video_assets:
+        assert a.unit_price_usd == 0.06
+
+    # _submit_scene_via_gate would compute the SAME model -> no plan mismatch
+    from hypogeum.muapi import _resolve_scene_model
+    c = _cfg()
+    assert _resolve_scene_model(2, None, c, "any_channel") == "seedance-pro-t2v-fast"
+
+
+def test_production_plan_unchanged_for_channel_without_override(monkeypatch):
+    from tests.test_production_plan import _compile
+    monkeypatch.setattr("hypogeum.channel_config.resolve_channel_video_model",
+                        lambda cid, db_path=None: (None, None))
+    plan = _compile()
+    models = {a.model for a in plan.assets if a.provider == "muapi"}
+    assert "seedance-pro-t2v-fast" not in models
+    assert "veo3.1-lite-text-to-video" in models

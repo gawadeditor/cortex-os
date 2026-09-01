@@ -243,8 +243,12 @@ class ModelProfile:
     video_provider:    str            = "muapi"
     # Per-channel video model slug (e.g. "veo3.1-lite-text-to-video"), chosen
     # via the Video Model bake-off (hypogeum.video_bakeoff). None = fall back
-    # to the global MUAPI tier configuration.
-    video_model:       Optional[str]  = None
+    # to the global MUAPI tier configuration. video_model_price_usd is the
+    # model's price captured from the live MUAPI catalogue at adoption time —
+    # it is what hypogeum.production_plan uses to price a channel model that
+    # is not in muapi.MODEL_CREDIT_COSTS (planning must know the real price).
+    video_model:       Optional[str]   = None
+    video_model_price_usd: Optional[float] = None
     created_at:        str            = ""
     metadata_version:  str            = METADATA_VERSION
 
@@ -610,6 +614,7 @@ _MODEL_PROFILE_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     # 2026-09-01: per-channel video model chosen via the Video Model bake-off
     # (hypogeum.video_bakeoff). NULL = use the global MUAPI tier config.
     ("video_model", "TEXT"),
+    ("video_model_price_usd", "REAL"),
 ]
 
 
@@ -698,6 +703,8 @@ def _row_to_model(row) -> ModelProfile:
         image_provider    = row["image_provider"],
         video_provider    = row["video_provider"],
         video_model       = (row["video_model"] if "video_model" in row.keys() else None),
+        video_model_price_usd = (
+            row["video_model_price_usd"] if "video_model_price_usd" in row.keys() else None),
         created_at        = row["created_at"],
         metadata_version  = row["metadata_version"],
     )
@@ -1139,7 +1146,7 @@ def update_model_profile(
     _allowed = {
         "name", "episode_producer", "research_director", "thumbnail_planner",
         "brand_guardian_p1", "brand_guardian_p2", "narration_voice_id",
-        "image_provider", "video_provider", "video_model",
+        "image_provider", "video_provider", "video_model", "video_model_price_usd",
     }
     try:
         assignments, params = [], []
@@ -1180,6 +1187,25 @@ def list_model_profiles(db_path: Optional[Path] = None) -> list[ModelProfile]:
         return [_row_to_model(r) for r in rows]
     except Exception:
         return []
+
+
+def resolve_channel_video_model(
+    channel_id: str, db_path: Optional[Path] = None,
+) -> tuple[Optional[str], Optional[float]]:
+    """The video model a channel has adopted (via the Video Model bake-off),
+    and the price captured for it at adoption time. (None, None) when the
+    channel has no model profile or no adopted model -- callers then fall
+    back to the global MUAPI tier configuration. Never raises."""
+    try:
+        ch = get_channel_profile(channel_id, db_path=db_path)
+        if not ch or not ch.model_profile_id:
+            return None, None
+        mp = get_model_profile(ch.model_profile_id, db_path=db_path)
+        if not mp or not mp.video_model:
+            return None, None
+        return mp.video_model, mp.video_model_price_usd
+    except Exception:  # noqa: BLE001
+        return None, None
 
 
 # ===========================================================================

@@ -2437,8 +2437,13 @@ def video_bakeoff_adopt():
             update_channel_profile(channel_id, model_profile_id=mp_id, db_path=_db_path())
         except Exception:  # noqa: BLE001
             pass
-    update_model_profile(mp_id, db_path=_db_path(), video_model=model)
-    _audit_note(f"video model for {channel_id} set to {model} via bake-off")
+    # Capture the model's live price now so the Production Plan can price it
+    # even though it is not in muapi.MODEL_CREDIT_COSTS.
+    from hypogeum import video_bakeoff as _bo
+    price = next((m["price_usd"] for m in _bo.list_video_models() if m["id"] == model), None)
+    update_model_profile(mp_id, db_path=_db_path(),
+                         video_model=model, video_model_price_usd=price)
+    _audit_note(f"video model for {channel_id} set to {model} (${price}) via bake-off")
     return redirect(f"/providers/video-test?channel={channel_id}&flash=adopted+{model}")
 
 

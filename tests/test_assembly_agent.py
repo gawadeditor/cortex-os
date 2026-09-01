@@ -3302,3 +3302,66 @@ class TestShortsMetadataGenerationWiring:
         shorts_titles = result["metadata_source"]["shorts_titles"]
         for entry in shorts_titles:
             assert entry["title"] == ""
+
+
+class TestNarrationCompletenessGate:
+    """A narrated beat with no video scene must fail assembly loudly
+    (B0 gate), never be silently trimmed away — the ep_twinkle_sep08
+    symptom: 10 narrated beats, 8 scenes, the last 2 beats (the story's
+    ending) dropped, yet coverage_check reported 'sufficient' and QA
+    passed."""
+
+    def test_beat_without_a_scene_blocks_assembly(self, tmp_path):
+        cfg = _make_config()
+        # 2-scene visual package, but narration for a THIRD main-episode beat
+        visual = _make_visual_package()
+        narration = _make_narration_package()
+        narration["narration_segments"].append({
+            "segment_id": "seg_b_003",
+            "beat_reference": "b_003",
+            "source_type": "main_episode",
+            "generation_status": "generated",
+            "audio_asset_id": "episodes/ep_001/narration/b_003",
+            "duration_seconds": 4.0,
+        })
+        thumbnails = _make_thumbnail_package()
+        assets_root = tmp_path / ".hypogeum-assets"
+        _setup_clips_on_disk(visual, assets_root, "ep_001")
+        _setup_narration_on_disk(narration, assets_root)
+
+        with patch("hypogeum.agents.music_agent.generate_music_track",
+                   return_value=_make_music_track_result(tmp_path=tmp_path)):
+            with patch("subprocess.run", side_effect=_mock_ffmpeg_success()):
+                result = run_assembly_agent(
+                    visual_package=visual, narration_package=narration,
+                    thumbnail_package=thumbnails, config=cfg, episode_id="ep_001",
+                    output_dir=tmp_path / "episodes" / "ep_001",
+                )
+
+        assert result.get("package_integrity", {}).get("production_ready") is False
+        acr = result.get("additional_coverage_required", {})
+        assert acr.get("reason") == "narration_beats_without_a_video_scene"
+        assert any(r["scene_id"] == "b_003" for r in acr.get("requests", []))
+
+    def test_all_beats_covered_passes(self, tmp_path):
+        cfg = _make_config()
+        visual = _make_visual_package()
+        narration = _make_narration_package()  # 2 main beats, 2 scenes — matched
+        thumbnails = _make_thumbnail_package()
+        assets_root = tmp_path / ".hypogeum-assets"
+        _setup_clips_on_disk(visual, assets_root, "ep_001")
+        _setup_narration_on_disk(narration, assets_root)
+
+        with patch("hypogeum.agents.music_agent.generate_music_track",
+                   return_value=_make_music_track_result(tmp_path=tmp_path)):
+            with patch("subprocess.run", side_effect=_mock_ffmpeg_success()):
+                result = run_assembly_agent(
+                    visual_package=visual, narration_package=narration,
+                    thumbnail_package=thumbnails, config=cfg, episode_id="ep_001",
+                    output_dir=tmp_path / "episodes" / "ep_001",
+                )
+
+        assert result.get("additional_coverage_required", {}).get("reason") != \
+            "narration_beats_without_a_video_scene"
+        cc = result.get("coverage_check_summary") or {}
+        assert cc.get("narrated_beats") == cc.get("beats_checked")

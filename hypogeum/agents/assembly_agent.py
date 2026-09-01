@@ -533,6 +533,71 @@ def run_assembly_agent(
     )
 
     # ------------------------------------------------------------------
+    # B0. Narration-completeness gate (2026-09-01) — every narrated beat
+    # MUST have a timeline entry (= a video scene). The timeline is built
+    # from the Visual Package's scenes, so a beat the scene planner never
+    # produced a scene for (e.g. its scene cap fell below the script's
+    # beat count) is silently absent here: downstream, its narration audio
+    # is trimmed away to fit the shorter video and the story ends
+    # mid-arc, yet the coverage check (which only ever sees the timeline)
+    # reports "sufficient" and QA passes. This gate makes that an explicit,
+    # resumable failure instead — the operator re-runs and the (scene-cap-
+    # aware) planner covers every beat. NEVER ship a deliverable that
+    # drops narrated content.
+    # ------------------------------------------------------------------
+    _covered_refs = {
+        e.narration_reference for e in main_timeline if e.narration_reference
+    }
+    for _st in shorts_timelines.values():
+        _covered_refs.update(e.narration_reference for e in _st if e.narration_reference)
+    # Only MAIN-episode narrated beats must be covered. A narration segment
+    # tagged source_type == "short" for a Short that was intentionally not
+    # generated (short-native mode, or ENABLE_DEDICATED_SHORT_GENERATION off)
+    # is not dropped story content.
+    _narrated_refs = {
+        (seg.get("beat_reference") or "")
+        for seg in narration_package.get("narration_segments", [])
+        if (seg.get("source_type") or "main_episode") != "short"
+    }
+    _narrated_refs.discard("")
+    _uncovered_beats = sorted(_narrated_refs - _covered_refs)
+    if _uncovered_beats:
+        from hypogeum.agents.coverage_check import MAX_EDITORIAL_SPEED_FACTOR  # noqa: PLC0415
+        _acr = {
+            "status": "additional_coverage_required",
+            "episode_id": episode_id,
+            "reason": "narration_beats_without_a_video_scene",
+            "max_editorial_speed_factor": MAX_EDITORIAL_SPEED_FACTOR,
+            "requests": [
+                {
+                    "scene_id": _bref,
+                    "narration_beat_reference": _bref,
+                    "reason": "beat has narration audio but no video scene — "
+                              "shipping would silently drop this narrated content",
+                }
+                for _bref in _uncovered_beats
+            ],
+        }
+        log.error(
+            "assembly_narration_beats_uncovered",
+            episode_id=episode_id,
+            uncovered_beats=_uncovered_beats,
+            narrated_beat_count=len(_narrated_refs),
+            timeline_entry_count=len(_covered_refs),
+        )
+        return _build_additional_coverage_required_package(
+            episode_id=episode_id,
+            visual_package=visual_package,
+            narration_package=narration_package,
+            thumbnail_package=thumbnail_package,
+            additional_coverage_required=_acr,
+            log=log,
+            episode_dir=episode_dir,
+            topic_brief=topic_brief,
+            source_registry=source_registry,
+        )
+
+    # ------------------------------------------------------------------
     # B1. Coverage check (2026-08-01 policy) — before any rendering, verify
     # every beat (main episode AND every Short — Video Renderer enforces this
     # uniformly, so the pre-render gate must too) has enough real,
@@ -1219,6 +1284,16 @@ def run_assembly_agent(
             {
                 "sufficient": coverage_result.sufficient,
                 "beats_checked": len(coverage_result.beats),
+                # Narrated-beat count from the Narration Package. The B0 gate
+                # above hard-fails before render when this exceeds
+                # beats_checked, so on any package that reaches here the two
+                # are equal — surfaced anyway so a reviewer / the output gate
+                # can see the deliverable covers the whole narrated story.
+                "narrated_beats": len({
+                    (s.get("beat_reference") or "")
+                    for s in narration_package.get("narration_segments", [])
+                    if (s.get("source_type") or "main_episode") != "short"
+                } - {""}),
                 "insufficient_beats": [
                     b.scene_id for b in coverage_result.insufficient_beats
                 ],

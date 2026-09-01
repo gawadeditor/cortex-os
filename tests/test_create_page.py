@@ -216,13 +216,12 @@ class TestCreateNavIntegration:
 
     def test_create_link_in_nav(self, client):
         html = _html(client)
+        # /create is the "Queue" entry of the Production sub-nav
         assert 'href="/create"' in html
 
     def test_create_nav_link_marked_active(self, client):
         html = _html(client)
-        # On /create page, the Create nav link should be active
         import re
-        active_links = re.findall(r'href="([^"]+)"[^>]*class="nav-link[^"]*active[^"]*"', html)
-        if not active_links:
-            active_links = re.findall(r'class="nav-link[^"]*active[^"]*"[^>]*href="([^"]+)"', html)
-        assert "/create" in active_links or any("create" in h for h in active_links)
+        active = re.findall(r'href="([^"]+)"[^>]*class="sub-nav-link[^"]*active', html)
+        active += re.findall(r'class="sub-nav-link[^"]*active[^"]*"[^>]*href="([^"]+)"', html)
+        assert any("create" in h for h in active)

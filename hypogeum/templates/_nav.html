@@ -1,45 +1,69 @@
 {% from '_icons.html' import icon %}
-{% set p = request.path %}
-{% set sec_channels   = p == '/channels' or p.startswith('/channels/') or (p.startswith('/channel/') and not p.startswith('/channel-profile')) or p.startswith('/brand/') or p.startswith('/model/') or p.startswith('/publishing/') %}
-{% set sec_production = p in ['/create','/live','/runs','/failures','/queue'] or p.startswith('/discover') or p.startswith('/run/') or p.startswith('/create/') %}
-{% set sec_review     = p in ['/attention','/approvals','/episodes','/preflight'] or p.startswith('/episode/') or p.startswith('/approvals/') %}
-{% set sec_creds      = p in ['/providers','/platforms'] or p.startswith('/platforms/') or p.startswith('/providers/') %}
-{% set sec_settings   = p in ['/channel-profile','/setup'] or p.startswith('/infrastructure/config') or p.startswith('/settings') %}
-{% set sec_home       = p == '/dashboard' or p == '/' %}
+{%- set p = nav_path or request.path -%}
+{%- set cid = scope_channel -%}
 
-<nav class="site-nav">
-  <a href="/dashboard" class="nav-brand">Cortex</a>
+{#- ─────────────────────────────────────────────────────────────────────
+    Section tab definitions. Factory scope and channel scope each get
+    their own set. Active tab = longest matching prefix against `p`.
+ ────────────────────────────────────────────────────────────────────── -#}
+{%- set factory_tabs = [
+  ('Overview',       '/dashboard',            ['/dashboard', '/']),
+  ('Channels',       '/channels',             ['/channels']),
+  ('Production',     '/runs',                 ['/runs', '/run/', '/create', '/live', '/failures', '/queue']),
+  ('Episodes',       '/episodes',             ['/episodes', '/episode/', '/attention', '/approvals']),
+  ('Learning',       '/intelligence/learning',['/intelligence', '/compare', '/learning', '/analytics']),
+  ('Providers',      '/providers',            ['/providers']),
+  ('Infrastructure', '/infrastructure',       ['/infrastructure', '/preflight', '/setup', '/signals']),
+  ('Governance',     '/decisions',            ['/decisions', '/decision-reviews', '/decision-inputs', '/execution-plans']),
+  ('Storage',        '/settings/storage',     ['/settings/storage', '/archive']),
+  ('Advanced',       '/advanced',             ['/advanced', '/prompts', '/command', '/published/import']),
+] -%}
+{%- set channel_tabs = [] -%}
+{%- if cid -%}
+  {%- set _s = '?scope=' ~ cid -%}
+  {%- set _sc = '&scope=' ~ cid -%}
+  {%- set channel_tabs = [
+    ('Overview',   '/channel/' ~ cid ~ _s,                          ['/channel/' ~ cid]),
+    ('Production', '/runs?channel_id=' ~ cid ~ _sc,                 ['/runs', '/run/', '/create', '/live', '/failures', '/queue']),
+    ('Episodes',   '/episodes?channel_id=' ~ cid ~ _sc,             ['/episodes', '/episode/', '/attention', '/approvals']),
+    ('Discovery',  '/discover?channel_id=' ~ cid ~ _sc,             ['/discover']),
+    ('Analytics',  '/analytics?channel_id=' ~ cid ~ _sc,            ['/analytics', '/intelligence/performance', '/intelligence/platform']),
+    ('Publishing', '/channel/' ~ cid ~ '/publishing' ~ _s,         ['/channel/' ~ cid ~ '/publishing']),
+    ('Settings',   '/channel/' ~ cid ~ '/settings' ~ _s,           ['/channel/' ~ cid ~ '/settings', '/channel/' ~ cid ~ '/edit', '/channel/' ~ cid ~ '/operations']),
+  ] -%}
+{%- endif -%}
+{%- set tabs = channel_tabs if cid else factory_tabs -%}
 
-  <div class="nav-links" id="nav-primary">
-    <a href="/dashboard"       class="nav-link {{ 'active' if sec_home }}">{{ icon('home') }}<span>Home</span></a>
-    <a href="/channels"        class="nav-link {{ 'active' if sec_channels }}">{{ icon('channels') }}<span>Channels</span></a>
-    <a href="/create"          class="nav-link {{ 'active' if sec_production }}">{{ icon('production') }}<span>Production</span></a>
-    <a href="/attention"       class="nav-link {{ 'active' if sec_review }}">{{ icon('review') }}<span>Review</span></a>
-    <a href="/providers"       class="nav-link {{ 'active' if sec_creds }}">{{ icon('credentials') }}<span>Credentials</span></a>
-    <a href="/channel-profile" class="nav-link {{ 'active' if sec_settings }}">{{ icon('settings') }}<span>Settings</span></a>
+{%- set ns = namespace(active='', alen=-1) -%}
+{%- for _label, _href, _prefixes in tabs -%}
+  {%- for pre in _prefixes -%}
+    {%- set hit = (p == pre) or (pre.endswith('/') and p.startswith(pre)) or (not pre.endswith('/') and (p == pre or p.startswith(pre ~ '/'))) -%}
+    {%- if hit and pre|length > ns.alen -%}{%- set ns.active = _href -%}{%- set ns.alen = pre|length -%}{%- endif -%}
+  {%- endfor -%}
+{%- endfor -%}
 
-    <details class="nav-ops-details">
-      <summary class="nav-ops-toggle">{{ icon('more') }}<span>More</span></summary>
-      <div class="nav-ops-menu">
-        <div class="nav-ops-group">Modules</div>
-        <a href="/analytics">{{ icon('analytics') }} Analytics</a>
-        <a href="/intelligence/learning">{{ icon('learning') }} Learning</a>
-        <a href="/archive">{{ icon('grid') }} Asset archive</a>
+<nav class="rail" id="cortex-rail" aria-label="Factory and channels">
+  <a href="/dashboard?scope=factory" class="rail-brand">Cortex</a>
 
-        <div class="nav-ops-group">System</div>
-        <a href="/infrastructure">{{ icon('grid') }} Infrastructure</a>
-        <a href="/decisions">{{ icon('review') }} Governance</a>
-        <a href="/command">{{ icon('bolt') }} Command centre</a>
+  <a href="/dashboard?scope=factory"
+     class="rail-item rail-factory {{ 'active' if not cid }}">
+    {{ icon('bolt') }}<span>Factory</span>
+  </a>
 
-        <div class="nav-ops-group">Advanced</div>
-        <a href="/prompts">{{ icon('learning') }} Prompt registry</a>
-        <a href="/compare">{{ icon('analytics') }} Model comparison</a>
-        <a href="/providers/video-test">{{ icon('play') }} Video test</a>
-      </div>
-    </details>
+  <div class="rail-group-label">Channels</div>
+  <div class="rail-channels">
+    {% for ch in (nav_channels or []) %}
+    <a href="/channel/{{ ch.channel_id }}?scope={{ ch.channel_id }}"
+       class="rail-item {{ 'active' if cid == ch.channel_id }}">
+      {{ icon('channels') }}<span>{{ ch.name or ch.channel_id }}</span>
+    </a>
+    {% endfor %}
+    <a href="/channels/new?scope=factory" class="rail-item rail-new">
+      {{ icon('plus') }}<span>New channel</span>
+    </a>
   </div>
 
-  <div class="nav-tail">
+  <div class="rail-foot">
     <button class="skin-toggle" id="skin-toggle" type="button" title="Presentation skin">
       {{ icon('sparkle') }}<span id="skin-label">Base</span>
     </button>
@@ -50,9 +74,49 @@
   </div>
 </nav>
 
+<header class="topbar">
+  <div class="topbar-crumb">
+    {% if cid %}
+      <a href="/dashboard?scope=factory">Factory</a>
+      <span class="breadcrumb-sep">›</span>
+      <span>{{ (nav_channels | selectattr('channel_id', 'equalto', cid) | map(attribute='name') | first) or cid }}</span>
+    {% else %}
+      <span>Factory</span>
+    {% endif %}
+  </div>
+  <nav class="topbar-tabs" aria-label="section">
+    {% for label, href, _pre in tabs %}
+    <a href="{{ href }}{{ ('?scope=' ~ cid if (cid and '?' not in href) else '') }}"
+       class="topbar-tab {{ 'active' if href == ns.active }}">{{ label }}</a>
+    {% endfor %}
+  </nav>
+</header>
+
+{#- Contextual sub-tabs for factory sections that have several pages. -#}
+{%- set subgroups = {
+  '/runs':            [('Queue','/create'), ('Live','/live'), ('Run history','/runs'), ('Failures','/failures'), ('Discovery','/discover')],
+  '/episodes':        [('Episodes','/episodes'), ('Attention','/attention'), ('Approvals','/approvals'), ('Preflight','/preflight')],
+  '/intelligence/learning': [('Learning','/intelligence/learning'), ('Performance','/intelligence/performance'), ('Sync health','/intelligence/sync'), ('Model comparison','/compare')],
+  '/infrastructure':  [('Overview','/infrastructure'), ('Workers','/infrastructure/workers'), ('Providers','/infrastructure/providers'), ('Connections','/infrastructure/connections'), ('Config','/infrastructure/config'), ('Debug','/infrastructure/debug')],
+  '/decisions':       [('Decisions','/decisions'), ('Reviews','/decision-reviews'), ('Inputs','/decision-inputs'), ('Plans','/execution-plans')],
+  '/settings/storage':[('Storage','/settings/storage'), ('Asset archive','/archive')],
+  '/advanced':        [('Overview','/advanced'), ('Prompt registry','/prompts'), ('Model comparison','/compare'), ('Video test','/providers/video-test'), ('Command','/command')],
+} -%}
+{%- set subs = subgroups.get(ns.active, []) if not cid else [] -%}
+{%- if subs -%}
+<nav class="sub-nav" aria-label="subsection">
+  {%- set sn = namespace(best='', blen=-1) -%}
+  {%- for _l, h in subs -%}
+    {%- if (p == h or p.startswith(h ~ '/')) and h|length > sn.blen -%}{%- set sn.best = h -%}{%- set sn.blen = h|length -%}{%- endif -%}
+  {%- endfor -%}
+  {%- for label, href in subs -%}
+  <a href="{{ href }}" class="sub-nav-link {{ 'active' if href == sn.best }}">{{ label }}</a>
+  {%- endfor -%}
+</nav>
+{%- endif -%}
+
 <script>
 (function(){
-  /* ── presentation skin toggle (per-viewer, localStorage) ── */
   var root = document.documentElement, st = document.getElementById('skin-toggle'),
       sl = document.getElementById('skin-label');
   function applySkin(s){
@@ -68,31 +132,30 @@
     try { localStorage.setItem('factoryos-skin', next); } catch(e){}
   });
 
-  /* ── worker status pill ── */
   var pill=document.getElementById('worker-pill'), lbl=document.getElementById('wp-label'), btn=document.getElementById('wp-toggle');
-  if(!pill) return;
-  var running=false;
-  function paint(s){
-    running = (s==='running'||s==='claiming');
-    pill.className='worker-pill '+(running?'is-running':(s==='idle'?'is-idle':'is-stopped'));
-    lbl.textContent = running?'worker running':(s==='idle'?'worker idle':'worker stopped');
-    btn.textContent = running?'Stop':'Start';
+  if(pill){
+    var running=false;
+    function paint(s){
+      running = (s==='running'||s==='claiming');
+      pill.className='worker-pill '+(running?'is-running':(s==='idle'?'is-idle':'is-stopped'));
+      lbl.textContent = running?'worker running':(s==='idle'?'worker idle':'worker stopped');
+      btn.textContent = running?'Stop':'Start';
+    }
+    function poll(){
+      fetch('/api/worker/status').then(function(r){return r.json();}).then(function(d){
+        paint(d.running ? (d.status||'running') : 'stopped');
+      }).catch(function(){ paint('stopped'); });
+    }
+    btn.addEventListener('click', function(){
+      btn.disabled=true; btn.textContent='…';
+      fetch('/api/worker/'+(running?'stop':'start'), {method:'POST'})
+        .then(function(r){return r.json();})
+        .then(function(){ setTimeout(function(){ btn.disabled=false; poll(); }, 1200); })
+        .catch(function(){ btn.disabled=false; poll(); });
+    });
+    poll(); setInterval(poll, 15000);
   }
-  function poll(){
-    fetch('/api/worker/status').then(function(r){return r.json();}).then(function(d){
-      paint(d.running ? (d.status||'running') : 'stopped');
-    }).catch(function(){ paint('stopped'); });
-  }
-  btn.addEventListener('click', function(){
-    btn.disabled=true; btn.textContent='…';
-    fetch('/api/worker/'+(running?'stop':'start'), {method:'POST'})
-      .then(function(r){return r.json();})
-      .then(function(){ setTimeout(function(){ btn.disabled=false; poll(); }, 1200); })
-      .catch(function(){ btn.disabled=false; poll(); });
-  });
-  poll(); setInterval(poll, 15000);
 
-  /* ── presentation skin: count-up on [data-countup] numbers ── */
   function countUp(){
     if (root.dataset.skin !== 'presentation') return;
     if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
@@ -104,58 +167,102 @@
       var t0 = null, dur = 900;
       function step(ts){
         if (!t0) t0 = ts;
-        var p = Math.min((ts - t0) / dur, 1);
-        var e = 1 - Math.pow(1 - p, 3);
+        var pr = Math.min((ts - t0) / dur, 1);
+        var e = 1 - Math.pow(1 - pr, 3);
         el.textContent = (target * e).toFixed(dec);
-        if (p < 1) requestAnimationFrame(step); else el.textContent = target.toFixed(dec);
+        if (pr < 1) requestAnimationFrame(step); else el.textContent = target.toFixed(dec);
       }
       requestAnimationFrame(step);
     });
   }
   countUp();
+
+  /* mobile: toggle the rail */
+  var railBtn = document.getElementById('rail-toggle');
+  if (railBtn) railBtn.addEventListener('click', function(){
+    document.getElementById('cortex-rail').classList.toggle('open');
+  });
 })();
 </script>
 
 <style>
-  .site-nav { gap: 14px; }
-  .nav-link { display: inline-flex; align-items: center; gap: 7px; }
-  .nav-link .i { color: var(--faint); transition: color var(--dur) var(--ease); }
-  .nav-link:hover .i, .nav-link.active .i { color: currentColor; }
-  .nav-tail { margin-left: auto; display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  :root { --rail-w: 224px; }
 
-  .skin-toggle { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px;
-                 border: 1px solid var(--border-strong); border-radius: 999px; background: var(--surface);
-                 color: var(--muted); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
-                 white-space: nowrap; transition: all var(--dur) var(--ease); }
+  .rail {
+    position: fixed; top: 0; left: 0; bottom: 0; width: var(--rail-w); z-index: 150;
+    display: flex; flex-direction: column; gap: 3px;
+    padding: 16px 12px; overflow-y: auto;
+    background: var(--surface); border-right: 1px solid var(--border);
+  }
+  :root[data-skin="presentation"] .rail { backdrop-filter: blur(16px) saturate(1.2); background: color-mix(in srgb, var(--surface) 82%, transparent); }
+
+  .rail-brand { font-family: var(--font-display); font-weight: 800; font-size: 15px;
+    text-transform: uppercase; letter-spacing: .11em; color: var(--text);
+    display: flex; align-items: center; gap: 8px; padding: 4px 8px 14px; }
+  .rail-brand::before { content: ""; width: 9px; height: 9px; border-radius: 2px;
+    background: var(--accent); box-shadow: 0 0 10px var(--accent-line); }
+
+  .rail-item { display: flex; align-items: center; gap: 9px; padding: 7px 9px;
+    border-radius: var(--radius-sm); color: var(--muted); font-size: 13px; font-weight: 500;
+    text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    transition: background var(--dur) var(--ease), color var(--dur) var(--ease); }
+  .rail-item .i { color: var(--faint); flex-shrink: 0; }
+  .rail-item:hover { background: var(--raised); color: var(--text); text-decoration: none; }
+  .rail-item.active { background: var(--accent-bg); color: var(--accent); font-weight: 600;
+    box-shadow: inset 0 0 0 1px var(--accent-line); }
+  .rail-item.active .i { color: var(--accent); }
+  .rail-factory { margin-bottom: 4px; font-weight: 600; }
+
+  .rail-group-label { font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .09em; color: var(--faint); padding: 12px 9px 5px;
+    border-top: 1px solid var(--hairline); margin-top: 5px; }
+  .rail-channels { display: flex; flex-direction: column; gap: 2px; }
+  .rail-new { color: var(--faint); }
+  .rail-new:hover { color: var(--accent); }
+
+  .rail-foot { margin-top: auto; padding-top: 14px; display: flex; flex-direction: column;
+    gap: 8px; align-items: stretch; }
+  .rail-foot .skin-toggle { justify-content: center; }
+  .rail-foot .worker-pill { margin-left: 0; justify-content: center; }
+
+  .topbar { position: sticky; top: 0; z-index: 90;
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+    padding: 11px 0 10px; margin-bottom: var(--gap);
+    background: var(--bg); border-bottom: 1px solid var(--border); }
+  :root[data-skin="presentation"] .topbar { background: color-mix(in srgb, var(--bg) 80%, transparent); backdrop-filter: blur(12px); }
+  .topbar-crumb { font-size: 12px; color: var(--faint); font-weight: 600; }
+  .topbar-crumb a { color: var(--muted); }
+  .topbar-crumb a:hover { color: var(--accent); }
+  .topbar-tabs { display: flex; gap: 3px; flex-wrap: wrap; }
+  .topbar-tab { padding: 5px 11px; border-radius: 999px; font-size: 12.5px; font-weight: 500;
+    color: var(--muted); text-decoration: none; transition: all var(--dur) var(--ease); }
+  .topbar-tab:hover { background: var(--surface); color: var(--text); text-decoration: none; }
+  .topbar-tab.active { background: var(--accent-bg); color: var(--accent); font-weight: 600;
+    box-shadow: inset 0 0 0 1px var(--accent-line); }
+
+  .skin-toggle { display: inline-flex; align-items: center; gap: 6px; padding: 6px 11px;
+    border: 1px solid var(--border-strong); border-radius: 999px; background: var(--surface);
+    color: var(--muted); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+    white-space: nowrap; transition: all var(--dur) var(--ease); }
   .skin-toggle:hover { color: var(--text); border-color: var(--accent-line); }
   .skin-toggle.on { color: var(--accent); border-color: var(--accent); background: var(--accent-bg); }
   .skin-toggle .i { width: .95em; height: .95em; }
 
-  .nav-ops-details { position: relative; }
-  .nav-ops-toggle  { display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px;
-                     border-radius: var(--radius-sm); color: var(--muted); font-size: 13px; font-weight: 500;
-                     cursor: pointer; list-style: none; user-select: none; }
-  .nav-ops-toggle::-webkit-details-marker { display: none; }
-  .nav-ops-toggle:hover { background: var(--surface); color: var(--text); }
-  .nav-ops-toggle .i { color: var(--faint); }
-  .nav-ops-menu    { position: absolute; top: 100%; right: 0; min-width: 230px; z-index: 100;
-                     background: var(--surface); border: 1px solid var(--border-strong);
-                     border-radius: var(--radius); padding: 6px; margin-top: 6px;
-                     box-shadow: var(--shadow-lg); max-height: 70vh; overflow-y: auto;
-                     display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
-  @media (max-width: 560px) { .nav-ops-menu { grid-template-columns: 1fr; min-width: 200px; } }
-  .nav-ops-menu a  { display: flex; align-items: center; gap: 8px; padding: 6px 9px; border-radius: var(--radius-sm);
-                     font-size: 12.5px; color: var(--muted); text-decoration: none; white-space: nowrap; }
-  .nav-ops-menu a:hover { color: var(--text); background: var(--raised); text-decoration: none; }
-  .nav-ops-menu a .i { color: var(--faint); width: .95em; height: .95em; }
-  .nav-ops-group   { grid-column: 1 / -1; padding: 9px 9px 3px; font-size: 10px; font-weight: 700;
-                     text-transform: uppercase; letter-spacing: .08em; color: var(--faint);
-                     border-top: 1px solid var(--hairline); margin-top: 3px; }
-  .nav-ops-group:first-child { border-top: none; margin-top: 0; }
-
-  @media (max-width: 720px) {
-    .nav-link span { display: none; }
-    .nav-link { padding: 6px 8px; }
-    .nav-ops-toggle span { display: none; }
+  /* ≥1024px: rail is fixed, main content is inset. Below: rail becomes a
+     slide-in drawer, hidden by default; a hamburger in the topbar opens it. */
+  @media (min-width: 1024px) {
+    body { padding-left: calc(var(--rail-w) + 26px); }
   }
+  @media (max-width: 1023px) {
+    .rail { transform: translateX(-100%); transition: transform var(--dur) var(--ease);
+      box-shadow: var(--shadow-lg); }
+    .rail.open { transform: none; }
+    .topbar { padding-left: 46px; }
+    #rail-toggle { display: block; position: fixed; top: 9px; left: 8px; z-index: 160;
+      width: 38px; height: 34px; border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm); background: var(--surface); color: var(--text);
+      font-size: 15px; line-height: 1; cursor: pointer; }
+  }
+  #rail-toggle { display: none; }
 </style>
+<button id="rail-toggle" type="button" aria-label="Toggle navigation">☰</button>

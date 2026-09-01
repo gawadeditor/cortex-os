@@ -59,6 +59,7 @@ def list_runs(
     db_path: Optional[Path] = None,
     limit:   int             = 100,
     status:  Optional[str]  = None,
+    channel_id: Optional[str] = None,
 ) -> list[dict]:
     """
     Return runs ordered newest-first.
@@ -73,6 +74,9 @@ def list_runs(
             if status:
                 clauses.append("r.status = ?")
                 params.append(status)
+            if channel_id:
+                clauses.append("r.channel_id = ?")
+                params.append(channel_id)
             where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
             params.append(limit)
             rows = conn.execute(f"""
@@ -227,27 +231,39 @@ def get_run_detail(
 def list_episodes(
     db_path: Optional[Path] = None,
     limit:   int             = 100,
+    channel_id: Optional[str] = None,
 ) -> list[dict]:
     """
     Episodes ordered newest-first, joined with most-recent run status and cost.
-    Non-blocking.
+    When channel_id is given, only episodes whose run OR queued topic belongs
+    to that channel are returned. Non-blocking.
     """
     try:
         conn = get_connection(_db(db_path))
         try:
-            rows = conn.execute("""
+            clause = ""
+            params: list = []
+            if channel_id:
+                clause = ("WHERE r.channel_id = ? OR e.episode_id IN "
+                          "(SELECT episode_id FROM episode_topics WHERE channel_id = ? "
+                          " AND episode_id IS NOT NULL)")
+                params = [channel_id, channel_id]
+            params.append(limit)
+            rows = conn.execute(f"""
                 SELECT e.episode_id, e.title, e.topic, e.status, e.created_at,
                        e.run_id,
                        r.status  AS run_status,
                        r.started_at AS run_started_at,
+                       r.channel_id AS channel_id,
                        COALESCE(SUM(c.cost_usd), 0.0) AS total_cost_usd
                 FROM episodes e
                 LEFT JOIN runs  r ON r.run_id = e.run_id
                 LEFT JOIN costs c ON c.episode_id = e.episode_id
+                {clause}
                 GROUP BY e.episode_id
                 ORDER BY e.created_at DESC
                 LIMIT ?
-            """, [limit]).fetchall()
+            """, params).fetchall()
         finally:
             conn.close()
         return [_row_to_dict(r) for r in rows]

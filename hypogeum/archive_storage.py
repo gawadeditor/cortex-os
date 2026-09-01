@@ -279,40 +279,54 @@ def published_episode_states(db_path: Optional[Path] = None) -> list[dict]:
         return []
     conn = get_connection(db_path)
     try:
-        rows = conn.execute(
+        # Per-episode publication summary (no join to archive_index — that
+        # would multiply the asset count by the number of publication rows).
+        pubs = conn.execute(
             """
-            SELECT pi.episode_id,
-                   MIN(pi.channel_id)                                        AS channel_id,
-                   MAX(pi.updated_at)                                        AS published_at,
-                   COUNT(ai.archive_id)                                      AS total,
-                   SUM(CASE WHEN ai.moved_at IS NOT NULL THEN 1 ELSE 0 END)  AS moved,
-                   MIN(CASE WHEN ai.moved_at IS NOT NULL THEN ai.archive_location END) AS a_loc
-            FROM publication_intents pi
-            LEFT JOIN archive_index ai ON ai.episode_id = pi.episode_id
-            WHERE pi.status = 'succeeded'
-            GROUP BY pi.episode_id
+            SELECT episode_id,
+                   MIN(channel_id) AS channel_id,
+                   MAX(updated_at) AS published_at
+            FROM publication_intents
+            WHERE status = 'succeeded'
+            GROUP BY episode_id
             ORDER BY published_at DESC
             """
         ).fetchall()
+        out = []
+        for pr in pubs:
+            ep = pr["episode_id"]
+            arc = conn.execute(
+                "SELECT COUNT(*) AS total, "
+                "SUM(CASE WHEN moved_at IS NOT NULL THEN 1 ELSE 0 END) AS moved, "
+                "MIN(CASE WHEN moved_at IS NOT NULL THEN archive_location END) AS a_loc "
+                "FROM archive_index WHERE episode_id = ?", (ep,),
+            ).fetchone()
+            try:
+                trow = conn.execute(
+                    "SELECT COALESCE(NULLIF(title,''), NULLIF(topic,'')) AS t "
+                    "FROM episodes WHERE episode_id = ?", (ep,),
+                ).fetchone()
+                title = (trow["t"] if trow else None) or ep
+            except Exception:  # noqa: BLE001
+                title = ep
+            total = arc["total"] or 0
+            moved = arc["moved"] or 0
+            state = ("archived" if total and moved == total
+                     else "partial" if moved
+                     else "local" if total else "no assets")
+            loc = None
+            if arc["a_loc"]:
+                loc = os.path.dirname(os.path.dirname(arc["a_loc"]))
+            out.append({
+                "episode_id": ep, "title": title, "channel_id": pr["channel_id"],
+                "published_at": pr["published_at"], "total": total, "moved": moved,
+                "state": state, "location": loc,
+            })
+        return out
     except Exception:  # noqa: BLE001
         return []
     finally:
         conn.close()
-    out = []
-    for r in rows:
-        total, moved = r["total"] or 0, r["moved"] or 0
-        state = ("archived" if total and moved == total
-                 else "partial" if moved
-                 else "local" if total else "no assets")
-        loc = None
-        if r["a_loc"]:
-            loc = os.path.dirname(os.path.dirname(r["a_loc"]))
-        out.append({
-            "episode_id": r["episode_id"], "channel_id": r["channel_id"],
-            "published_at": r["published_at"], "total": total, "moved": moved,
-            "state": state, "location": loc,
-        })
-    return out
 
 
 def get_archive_asset(asset_id: str, db_path: Optional[Path] = None) -> Optional[dict]:

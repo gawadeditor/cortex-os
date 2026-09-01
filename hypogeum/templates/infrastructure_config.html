@@ -193,102 +193,25 @@
   {% endif %}
 </div>
 
-{# ── Publishing Defaults ── #}
-{% set pub = config.publishing %}
-<div class="cfg-card {% if pub %}cfg-card-ok{% else %}cfg-card-empty{% endif %}">
+{# ── Per-channel config lives on each channel ── #}
+<div class="cfg-card">
   <div class="cfg-header">
-    <span class="cfg-icon">{{ icon("upload") }}</span>
-    <span class="cfg-title">Publishing</span>
-  </div>
-  {% if pub %}
-  <div class="cfg-row">
-    <span class="cr-lbl">Profile</span>
-    <span class="cr-val">{{ pub.name }}</span>
+    <span class="cfg-icon">{{ icon("channels") }}</span>
+    <span class="cfg-title">Brand · Models · Publishing</span>
   </div>
   <div class="cfg-row">
-    <span class="cr-lbl">Platforms</span>
-    <span class="cr-val">{{ pub.enabled_platforms | join(", ") or "None" }}</span>
-  </div>
-  {% if pub.schedule %}
-  <div class="cfg-row">
-    <span class="cr-lbl">Cadence</span>
-    <span class="cr-val">
-      {{ pub.schedule.get("cadence","—") }}
-      {% if pub.schedule.get("day_of_week") %} · {{ pub.schedule.day_of_week }}{% endif %}
-      {% if pub.schedule.get("time_of_day") %} {{ pub.schedule.time_of_day }} UTC{% endif %}
+    <span class="cr-val muted" style="font-size:12px;">
+      Brand identity, model assignments and publishing targets are defined
+      <strong>per channel</strong>, not factory-wide. Open a channel from the
+      rail and use its <strong>Settings</strong> and <strong>Publishing</strong> tabs.
     </span>
   </div>
-  {% endif %}
+  {% for ch in (config.channels or []) %}
   <div class="cfg-row">
-    <span class="cr-lbl">AI disclosure</span>
-    <span class="cr-val {% if pub.ai_disclosure_required %}ok{% else %}warn{% endif %}">
-      {{ "Required" if pub.ai_disclosure_required else "Disabled" }}
-    </span>
+    <span class="cr-lbl">{{ ch.name or ch.channel_id }}</span>
+    <span class="cr-val"><a href="/channel/{{ ch.channel_id }}/settings?scope={{ ch.channel_id }}">Settings →</a></span>
   </div>
-  <div class="cfg-row">
-    <span class="cr-lbl">Auto thumbnail</span>
-    <span class="cr-val">{{ "Yes" if pub.auto_thumbnail else "No" }}</span>
-  </div>
-  <div class="cfg-row">
-    <span class="cr-lbl">Auto captions</span>
-    <span class="cr-val">{{ "Yes" if pub.auto_captions else "No" }}</span>
-  </div>
-  {% if pub.default_tags %}
-  <div class="tag-row">
-    {% for tag in pub.default_tags[:10] %}
-    <span class="cfg-tag">{{ tag }}</span>
-    {% endfor %}
-    {% if pub.default_tags | length > 10 %}
-    <span class="cfg-tag">+{{ pub.default_tags | length - 10 }} more</span>
-    {% endif %}
-  </div>
-  {% endif %}
-  {% else %}
-  <div class="cfg-row"><span class="cr-lbl muted">No publishing profile configured</span></div>
-  {% endif %}
-</div>
-
-{# ── Provider / Model Defaults ── #}
-{% set mod = config.providers %}
-<div class="cfg-card {% if mod %}cfg-card-ok{% else %}cfg-card-empty{% endif %}">
-  <div class="cfg-header">
-    <span class="cfg-icon">{{ icon("robot") }}</span>
-    <span class="cfg-title">Model Defaults</span>
-  </div>
-  {% if mod %}
-  <div class="cfg-row">
-    <span class="cr-lbl">Profile</span>
-    <span class="cr-val">{{ mod.name }}</span>
-  </div>
-  <div class="cfg-row">
-    <span class="cr-lbl">Episode producer</span>
-    <span class="cr-val" style="font-size:11px; font-family:monospace;">{{ mod.episode_producer }}</span>
-  </div>
-  <div class="cfg-row">
-    <span class="cr-lbl">Research director</span>
-    <span class="cr-val" style="font-size:11px; font-family:monospace;">{{ mod.research_director }}</span>
-  </div>
-  <div class="cfg-row">
-    <span class="cr-lbl">Thumbnail planner</span>
-    <span class="cr-val" style="font-size:11px; font-family:monospace;">{{ mod.thumbnail_planner }}</span>
-  </div>
-  <div class="cfg-row">
-    <span class="cr-lbl">Image provider</span>
-    <span class="cr-val">{{ mod.image_provider }}</span>
-  </div>
-  <div class="cfg-row">
-    <span class="cr-lbl">Video provider</span>
-    <span class="cr-val">{{ mod.video_provider }}</span>
-  </div>
-  <div class="cfg-row">
-    <span class="cr-lbl">Narration voice</span>
-    <span class="cr-val {% if mod.narration_voice_configured %}ok{% else %}muted{% endif %}">
-      {{ "Configured" if mod.narration_voice_configured else "Not configured" }}
-    </span>
-  </div>
-  {% else %}
-  <div class="cfg-row"><span class="cr-lbl muted">No model profile configured</span></div>
-  {% endif %}
+  {% endfor %}
 </div>
 
 {# ── Budget / Cost Limits ── #}
@@ -316,46 +239,6 @@
       Pipeline finance gate will block every run until ceiling is set.
     </span>
   </div>
-  {% endif %}
-</div>
-
-{# ── Brand Settings ── #}
-{% set br = config.brand %}
-<div class="cfg-card {% if br %}cfg-card-ok{% else %}cfg-card-empty{% endif %}">
-  <div class="cfg-header">
-    <span class="cfg-icon">{{ icon("palette") }}</span>
-    <span class="cfg-title">Brand</span>
-  </div>
-  {% if br %}
-  <div class="cfg-row">
-    <span class="cr-lbl">Profile</span>
-    <span class="cr-val">{{ br.name }}</span>
-  </div>
-  <div class="cfg-row">
-    <span class="cr-lbl">Tone</span>
-    <span class="cr-val" style="font-size:11px;">{{ br.tone[:80] }}</span>
-  </div>
-  <div class="cfg-row">
-    <span class="cr-lbl">Audience</span>
-    <span class="cr-val" style="font-size:11px;">{{ br.target_audience[:80] }}</span>
-  </div>
-  <div class="cfg-row">
-    <span class="cr-lbl">Language</span>
-    <span class="cr-val">{{ br.language }}</span>
-  </div>
-  <div class="cfg-row">
-    <span class="cr-lbl">Voice guidelines</span>
-    <span class="cr-val muted" style="font-size:11px;">{{ br.voice_guidelines[:80] }}{% if br.voice_guidelines | length > 80 %}…{% endif %}</span>
-  </div>
-  {% if br.content_pillars %}
-  <div class="tag-row">
-    {% for pillar in br.content_pillars[:6] %}
-    <span class="cfg-tag">{{ pillar }}</span>
-    {% endfor %}
-  </div>
-  {% endif %}
-  {% else %}
-  <div class="cfg-row"><span class="cr-lbl muted">No brand profile configured</span></div>
   {% endif %}
 </div>
 

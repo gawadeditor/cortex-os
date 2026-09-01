@@ -466,12 +466,11 @@ class TestNavAnalyticsPresent:
         r = flask_client.get("/intelligence/learning")
         self._check_nav(r.get_data(as_text=True))
 
-    def test_runs_page_reaches_analytics_via_more(self, flask_client):
-        # after the IA restructure, Analytics/Learning live in the "More"
-        # menu (present in the shared nav on every page), not inline on
-        # every section page
+    def test_runs_page_reaches_learning_from_topbar(self, flask_client):
+        # post-restructure: the Factory topbar carries a Learning tab on
+        # every page (Analytics folded into the Learning section).
         text = flask_client.get("/runs").get_data(as_text=True)
-        assert "/analytics" in text and "/intelligence/learning" in text
+        assert "/intelligence/learning" in text
 
 
 # ===========================================================================

@@ -778,40 +778,38 @@ class TestFlaskTopicEnqueue:
 # ===========================================================================
 
 class TestNavPresent:
-    # the shared _nav.html now carries the six core sections; cross-section
-    # links live in each page's own _subnav.html, not on every page.
-    _CORE = ("/dashboard", "/channels", "/create", "/attention", "/providers", "/channel-profile")
-
-    def _core_nav_present(self, text):
-        assert 'class="site-nav"' in text
-        for href in self._CORE:
-            assert href in text, f"core nav link {href} missing"
+    # post-restructure: a fixed left rail (Factory + channels) + a topbar
+    # with scope-aware section tabs. Sub-pages hang off a contextual sub-nav.
+    def _rail_present(self, text):
+        assert 'class="rail"' in text
+        assert ">Factory<" in text
+        assert 'class="topbar-tabs"' in text
 
     def test_dashboard_has_nav(self, flask_client):
         client, _ = flask_client
-        self._core_nav_present(client.get("/dashboard").get_data(as_text=True))
+        self._rail_present(client.get("/dashboard").get_data(as_text=True))
 
     def test_runs_page_has_nav(self, flask_client):
         client, _ = flask_client
         text = client.get("/runs").get_data(as_text=True)
-        self._core_nav_present(text)
+        self._rail_present(text)
         assert 'class="sub-nav"' in text and "/failures" in text  # Production sub-nav
 
     def test_episodes_page_has_nav(self, flask_client):
         client, _ = flask_client
         text = client.get("/episodes").get_data(as_text=True)
-        self._core_nav_present(text)
-        assert 'class="sub-nav"' in text and "/approvals" in text  # Review sub-nav
+        self._rail_present(text)
+        assert 'class="sub-nav"' in text and "/approvals" in text  # Episodes sub-nav
 
     def test_approvals_page_has_nav(self, flask_client):
         client, _ = flask_client
         text = client.get("/approvals").get_data(as_text=True)
-        self._core_nav_present(text)
-        assert "/episodes" in text  # Review sub-nav
+        self._rail_present(text)
+        assert "/episodes" in text
 
     def test_signals_page_has_nav(self, flask_client):
         client, _ = flask_client
-        self._core_nav_present(client.get("/signals").get_data(as_text=True))
+        self._rail_present(client.get("/signals").get_data(as_text=True))
 
 
 # ===========================================================================

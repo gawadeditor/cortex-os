@@ -109,7 +109,8 @@
       {% for e in episodes %}
         <tr>
           <td style="padding:8px; border-bottom:1px solid var(--hairline);">
-            <a href="/archive?episode_id={{ e.episode_id }}" class="st-path">{{ e.episode_id }}</a>
+            <a href="/archive?episode_id={{ e.episode_id }}" style="font-weight:600; color:var(--text);">{{ e.title }}</a>
+            <div class="st-path" style="color:var(--faint); font-size:11px;">{{ e.episode_id }}</div>
           </td>
           <td style="padding:8px; border-bottom:1px solid var(--hairline); color:var(--muted);">{{ (e.published_at or '')[:10] }}</td>
           <td style="padding:8px; border-bottom:1px solid var(--hairline);">

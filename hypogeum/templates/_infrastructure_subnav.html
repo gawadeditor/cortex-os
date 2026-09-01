@@ -1,9 +1,1 @@
-{%- set p = request.path -%}
-<nav class="sub-nav" aria-label="infrastructure sections">
-  <a href="/infrastructure" class="sub-nav-link {{ 'active' if p == '/infrastructure' }}">Overview</a>
-  <a href="/infrastructure/workers" class="sub-nav-link {{ 'active' if p == '/infrastructure/workers' }}">Workers</a>
-  <a href="/infrastructure/providers" class="sub-nav-link {{ 'active' if p == '/infrastructure/providers' }}">Providers</a>
-  <a href="/infrastructure/connections" class="sub-nav-link {{ 'active' if p == '/infrastructure/connections' }}">Connections</a>
-  <a href="/infrastructure/config" class="sub-nav-link {{ 'active' if p == '/infrastructure/config' }}">Config</a>
-  <a href="/infrastructure/debug" class="sub-nav-link {{ 'active' if p == '/infrastructure/debug' }}">Debug</a>
-</nav>
+{#- Superseded by _nav.html's global topbar (scope-aware section tabs). -#}

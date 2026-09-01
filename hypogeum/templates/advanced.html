@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Advanced — Cortex</title>
+  {% include '_base_style.html' %}
+  {% from '_icons.html' import icon %}
+  <style>
+    .adv-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
+    .adv-card { display: block; background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 18px; transition: border-color var(--dur) var(--ease); }
+    .adv-card:hover { border-color: var(--accent-line); text-decoration: none; }
+    .adv-card .i { color: var(--accent); }
+    .adv-h { font-family: var(--font-display); font-size: 15px; font-weight: 700; color: var(--text);
+      margin: 8px 0 4px; }
+    .adv-d { font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="container">
+  <div class="page-header">
+    <span class="eyebrow">Factory</span>
+    <h1>Advanced</h1>
+    <span class="page-meta">Rarely-used admin &amp; engineering surfaces</span>
+  </div>
+
+  <div class="adv-grid">
+    <a class="adv-card" href="/prompts">
+      {{ icon('learning') }}
+      <div class="adv-h">Prompt registry</div>
+      <div class="adv-d">Every agent prompt, its version, and its change history.</div>
+    </a>
+    <a class="adv-card" href="/compare">
+      {{ icon('analytics') }}
+      <div class="adv-h">Model comparison</div>
+      <div class="adv-d">Side-by-side model runs — cost, latency, output quality.</div>
+    </a>
+    <a class="adv-card" href="/providers/video-test">
+      {{ icon('play') }}
+      <div class="adv-h">Video test bench</div>
+      <div class="adv-d">Fire a single MUAPI clip to check a provider or a prompt.</div>
+    </a>
+    <a class="adv-card" href="/command">
+      {{ icon('bolt') }}
+      <div class="adv-h">Command centre</div>
+      <div class="adv-d">Low-level factory controls and one-off operations.</div>
+    </a>
+    <a class="adv-card" href="/published/import">
+      {{ icon('upload') }}
+      <div class="adv-h">Import published episodes</div>
+      <div class="adv-d">Register episodes that were published outside the factory.</div>
+    </a>
+    <a class="adv-card" href="/analytics/import">
+      {{ icon('upload') }}
+      <div class="adv-h">Import analytics</div>
+      <div class="adv-d">Bulk-load platform analytics from a CSV export.</div>
+    </a>
+    <a class="adv-card" href="/signals">
+      {{ icon('warning') }}
+      <div class="adv-h">Operational signals</div>
+      <div class="adv-d">The raw OIS signal log — blocks, warnings, clears.</div>
+    </a>
+  </div>
+</div>
+</body>
+</html>

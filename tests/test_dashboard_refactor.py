@@ -428,26 +428,20 @@ class TestNeedsAttention:
 # ===========================================================================
 
 class TestOperationsCollapsed:
+    # post-restructure: no "More" dropdown. The rarely-used surfaces live on
+    # a single /advanced page reached from the Factory topbar.
 
-    def test_operations_section_uses_details_element(self, client, db):
+    def test_no_more_dropdown(self, client, db):
         html = _html(client, db)
-        assert "<details" in html
+        assert "nav-ops-details" not in html and "nav-ops-menu" not in html
 
-    def test_operations_summary_inside_details(self, client, db):
+    def test_advanced_tab_in_factory_topbar(self, client, db):
         html = _html(client, db)
-        # The secondary nav menu ("More" — modules + advanced) is collapsed.
-        assert "More" in html
-        details_match = re.search(r'<details[^>]*>(.*?)</details>', html, re.DOTALL)
-        assert details_match is not None
-        assert "More" in details_match.group(1)
+        assert ">Advanced<" in html and 'href="/advanced' in html
 
-    def test_debug_links_inside_collapsed_section(self, client, db):
-        html = _html(client, db)
-        details_match = re.search(r'<details[^>]*>(.*?)</details>', html, re.DOTALL)
-        assert details_match is not None
-        inner = details_match.group(1)
-        # advanced/system links stay collapsed in "More"
-        assert "/infrastructure" in inner or "/prompts" in inner or "/command" in inner
+    def test_advanced_page_collects_admin_links(self, client, db):
+        html = client.get("/advanced").get_data(as_text=True)
+        assert "/prompts" in html and "/command" in html and "/compare" in html
 
     def test_pending_approvals_reachable_from_review_subnav(self, client, db):
         # approvals moved from the Operations dropdown to the Review section tabs

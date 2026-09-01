@@ -1,7 +1,1 @@
-{%- set p = request.path -%}
-<nav class="sub-nav" aria-label="analytics &amp; intelligence sections">
-  <a href="/analytics" class="sub-nav-link {{ 'active' if p == '/analytics' or p.startswith('/analytics/') }}">Analytics</a>
-  <a href="/intelligence/performance" class="sub-nav-link {{ 'active' if p.startswith('/intelligence/performance') or p.startswith('/intelligence/platform') }}">Performance</a>
-  <a href="/intelligence/learning" class="sub-nav-link {{ 'active' if p.startswith('/intelligence/learning') }}">Learning</a>
-  <a href="/intelligence/sync" class="sub-nav-link {{ 'active' if p.startswith('/intelligence/sync') }}">Sync health</a>
-</nav>
+{#- Superseded by _nav.html's global topbar (scope-aware section tabs). -#}

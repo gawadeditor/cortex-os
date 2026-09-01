@@ -221,6 +221,36 @@ def _repoint(loc: Optional[str], src_root: Path, dst_root: Path, episode_id: str
     return str(dst_root / p.name)
 
 
+def _backfill_episode_title(episode_id: str, dst: Path, db_path: Optional[Path]) -> None:
+    """If episodes.title is empty, lift the real published title out of the
+    (now-relocated) final_render_package's metadata_source.episode_title."""
+    try:
+        pkg = dst / f"final_render_package_{episode_id}.json"
+        if not pkg.exists():
+            cand = sorted(dst.glob("final_render_package_*.json"))
+            pkg = next((p for p in cand if ".backup" not in p.name and ".superseded" not in p.name), None)
+        if not pkg or not pkg.exists():
+            return
+        data = json.loads(pkg.read_text(encoding="utf-8"))
+        title = ((data.get("metadata_source") or {}).get("episode_title")
+                 or data.get("episode_title") or "").strip()
+        if not title:
+            return
+        from hypogeum.db import get_connection
+        conn = get_connection(db_path)
+        try:
+            conn.execute(
+                "UPDATE episodes SET title = ? "
+                "WHERE episode_id = ? AND (title IS NULL OR title = '')",
+                (title, episode_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _update_jsonl(
     episode_id: str,
     src_root: Path,
@@ -387,6 +417,7 @@ def relocate_episode_assets(
         )
     except Exception as exc:  # noqa: BLE001
         rec["warnings"].append(f"DB repoint incomplete: {exc}")
+    _backfill_episode_title(episode_id, dst, db_path)
     try:
         rec["jsonl_records_updated"] = _update_jsonl(
             episode_id, src, dst, rec["published_at"], catalog_dir

@@ -50,7 +50,7 @@ from typing import Iterator
 _ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(_ROOT))
 
-from flask import Flask, Response, jsonify, redirect, render_template, request, url_for
+from flask import Flask, Response, g, jsonify, redirect, render_template, request, url_for
 
 from hypogeum.command_state import get_command_state
 from hypogeum.decision_inputs import get_decision_inputs_state
@@ -263,6 +263,69 @@ def _db_path():
     """Return configured DB path override, or None to use default."""
     p = app.config.get("DB_PATH")
     return Path(p) if p else None
+
+
+# ── Scope: the left-rail selection — "factory" or a single channel_id ────────
+_SCOPE_COOKIE = "cortex_scope"
+
+
+def _nav_channels():
+    """[{channel_id, name}, ...] — cached per request."""
+    if not hasattr(g, "_nav_channels"):
+        try:
+            from hypogeum.dashboard_api import get_channel_summaries
+            g._nav_channels = [
+                {"channel_id": c.channel_id, "name": getattr(c, "name", "") or c.channel_id}
+                for c in get_channel_summaries(db_path=_db_path())
+            ]
+        except Exception:  # noqa: BLE001
+            g._nav_channels = []
+    return g._nav_channels
+
+
+def _current_scope():
+    """'factory' or a channel_id. A /channel/<id>/… path always wins, then
+    ?scope=, then the cortex_scope cookie, else 'factory'."""
+    ids = {c["channel_id"] for c in _nav_channels()}
+    m = re.match(r"^/channel/([^/]+)", request.path)
+    if m and m.group(1) in ids:
+        return m.group(1)
+    q = request.args.get("scope")
+    if q == "factory" or (q and q in ids):
+        return q
+    ck = request.cookies.get(_SCOPE_COOKIE)
+    if ck == "factory" or (ck and ck in ids):
+        return ck
+    return "factory"
+
+
+def _scope_channel():
+    """The channel_id the current view is scoped to, or None for the factory."""
+    s = _current_scope()
+    return None if s == "factory" else s
+
+
+@app.context_processor
+def _inject_scope():
+    scope = _current_scope()
+    return {
+        "scope":         scope,
+        "scope_channel": None if scope == "factory" else scope,
+        "nav_channels":  _nav_channels(),
+        "nav_path":      request.path,
+    }
+
+
+@app.after_request
+def _persist_scope(resp):
+    try:
+        q = request.args.get("scope")
+        if q and (q == "factory" or q in {c["channel_id"] for c in _nav_channels()}):
+            resp.set_cookie(_SCOPE_COOKIE, q, max_age=60 * 60 * 24 * 365,
+                            samesite="Lax", httponly=True)
+    except Exception:  # noqa: BLE001
+        pass
+    return resp
 
 
 def _safe_state():
@@ -1027,7 +1090,14 @@ def channels_page():
 
 @app.route("/settings")
 def settings_page():
-    return redirect(url_for("channel_profile_page"))
+    return redirect(url_for("settings_storage_page"))
+
+
+@app.route("/advanced")
+def advanced_page():
+    """Factory 'Advanced' — one page collecting the rarely-used admin
+    surfaces that used to live in the 'More' dropdown."""
+    return render_template("advanced.html")
 
 
 _CONTENT_PROVIDERS = [
@@ -2642,12 +2712,13 @@ def api_platform_connections_detail():
 
 @app.route("/channel-profile")
 def channel_profile_page():
-    try:
-        profile = get_channel_profile(db_path=_db_path())
-    except Exception:
-        profile = {}
-    flash = request.args.get("saved")
-    return render_template("channel_profile.html", profile=profile, flash=flash)
+    # Legacy single-channel profile — superseded by per-channel Settings.
+    # Send the operator to the channel list (or straight into a channel if
+    # there is exactly one).
+    chans = _nav_channels()
+    if len(chans) == 1:
+        return redirect(url_for("channel_detail", channel_id=chans[0]["channel_id"]))
+    return redirect(url_for("channels_page"))
 
 
 @app.route("/api/channel-profile")
@@ -3987,9 +4058,11 @@ def api_preflight():
 def runs_page():
     _reconcile_stale_runs()
     status = request.args.get("status")
-    runs   = list_runs(db_path=_db_path(), status=status or None)
+    ch     = request.args.get("channel_id") or _scope_channel()
+    runs   = list_runs(db_path=_db_path(), status=status or None, channel_id=ch or None)
     return render_template("runs.html",
-                           runs=runs, status_filter=status, fmt_duration=fmt_duration)
+                           runs=runs, status_filter=status, fmt_duration=fmt_duration,
+                           channel_filter=ch)
 
 
 def _classify_run_recovery(detail: dict) -> dict:
@@ -6138,10 +6211,10 @@ def _is_test_episode(episode_id: str) -> bool:
 
 @app.route("/episodes")
 def episodes_page():
-    channel_id = request.args.get("channel_id")
+    channel_id = request.args.get("channel_id") or _scope_channel()
     show_test  = request.args.get("show_test", "0").strip() == "1"
 
-    episodes   = list_episodes(db_path=_db_path())
+    episodes   = list_episodes(db_path=_db_path(), channel_id=channel_id or None)
 
     # Include disk-only episodes not yet in DB so the history count is accurate
     try:
@@ -6599,6 +6672,125 @@ def channel_operations_edit(channel_id):
 
     return render_template("channel_operations_edit.html", channel_id=channel_id,
                            prof=prof, errors=[], form={})
+
+
+# ── Per-channel Publishing (platform connections) + Settings ───────────────
+
+@app.route("/channel/<channel_id>/publishing", methods=["GET", "POST"])
+def channel_publishing_page(channel_id):
+    """Connect & bind platform accounts for THIS channel."""
+    db = _db_path()
+    channel = get_channel_detail(channel_id, db_path=db)
+    if channel is None:
+        return render_template("not_found.html", kind="Channel", id=channel_id), 404
+
+    from hypogeum.publishing import provider_repository as _pr
+
+    if request.method == "POST":
+        action   = request.form.get("action")
+        platform = request.form.get("platform", "")
+        flash = "err"
+        try:
+            if action == "bind":
+                acct_id = request.form.get("provider_account_id", "")
+                acct = _pr.get_provider_account(db, provider_account_id=acct_id)
+                if acct:
+                    # a pre-existing enabled binding for this platform must be
+                    # cleared first (the repo refuses a silent swap)
+                    cur = _pr.resolve_active_binding(
+                        db, channel_id=channel_id, capability="publishing", platform=platform)
+                    if cur and cur.get("provider_account_id") != acct_id:
+                        _pr.disable_binding(db, binding_id=cur["binding_id"])
+                    for cap in ("publishing", "analytics"):
+                        _pr.bind_channel_provider(
+                            db, channel_id=channel_id, capability=cap, platform=platform,
+                            provider_id=acct["provider_id"],
+                            provider_profile_id=acct.get("provider_profile_id"),
+                            provider_account_id=acct_id)
+                    flash = "bound"
+            elif action == "unbind":
+                for cap in ("publishing", "analytics"):
+                    b = _pr.resolve_active_binding(
+                        db, channel_id=channel_id, capability=cap, platform=platform)
+                    if b:
+                        _pr.disable_binding(db, binding_id=b["binding_id"])
+                flash = "unbound"
+        except Exception as exc:  # noqa: BLE001
+            app.logger.warning("channel publishing bind error: %s", exc)
+            flash = "err"
+        return redirect(
+            url_for("channel_publishing_page", channel_id=channel_id,
+                    scope=channel_id) + f"&flash={flash}")
+
+    publishing = (get_publishing_detail(channel["publishing_profile_id"], db_path=db)
+                  if channel.get("publishing_profile_id") else None)
+    wanted = list((getattr(publishing, "enabled_platforms", None) or
+                   (publishing.get("enabled_platforms", []) if isinstance(publishing, dict) else []))
+                  ) if publishing else []
+    if not wanted:
+        try:
+            from hypogeum.channel_config import get_channel_operations_profile
+            _ops = get_channel_operations_profile(channel_id, db_path=db)
+            wanted = [p for p, on in (getattr(_ops, "enabled_platforms", {}) or {}).items() if on]
+        except Exception:  # noqa: BLE001
+            wanted = []
+
+    bound = {}
+    try:
+        for b in _pr.list_bindings(db, channel_id=channel_id):
+            if b.get("enabled") and b.get("capability") == "publishing":
+                bound[b["platform"]] = b
+    except Exception:  # noqa: BLE001
+        pass
+
+    zernio_pool = {}
+    try:
+        from hypogeum.publishing.zernio_accounts import get_zernio_accounts_snapshot
+        zernio_pool = (get_zernio_accounts_snapshot(db) or {}).get("by_platform", {})
+    except Exception:  # noqa: BLE001
+        zernio_pool = {}
+
+    # candidate accounts per platform from provider_accounts
+    accounts_by_platform = {}
+    try:
+        from hypogeum.db import get_connection as _gc
+        _c = _gc(db)
+        try:
+            for row in _c.execute(
+                "SELECT provider_account_id, provider_id, platform, display_label, "
+                "external_account_id, status FROM provider_accounts ORDER BY platform"):
+                accounts_by_platform.setdefault(row["platform"], []).append(dict(row))
+        finally:
+            _c.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+    return render_template("channel_publishing.html",
+                           channel=channel, wanted_platforms=wanted or list(zernio_pool.keys()),
+                           bound=bound, zernio_pool=zernio_pool,
+                           accounts_by_platform=accounts_by_platform,
+                           flash=request.args.get("flash"))
+
+
+@app.route("/channel/<channel_id>/settings")
+def channel_settings_page(channel_id):
+    """One place for this channel's brand / models / publishing / production
+    plan. Phase 1: a hub linking to the existing edit pages."""
+    db = _db_path()
+    channel = get_channel_detail(channel_id, db_path=db)
+    if channel is None:
+        return render_template("not_found.html", kind="Channel", id=channel_id), 404
+    brand      = get_brand_detail(channel["brand_profile_id"], db_path=db)      if channel.get("brand_profile_id")      else None
+    model      = get_model_detail(channel["model_profile_id"], db_path=db)      if channel.get("model_profile_id")      else None
+    publishing = get_publishing_detail(channel["publishing_profile_id"], db_path=db) if channel.get("publishing_profile_id") else None
+    try:
+        from hypogeum.channel_config import get_channel_operations_profile
+        ops = get_channel_operations_profile(channel_id, db_path=db)
+    except Exception:  # noqa: BLE001
+        ops = None
+    return render_template("channel_settings.html",
+                           channel=channel, brand=brand, model=model,
+                           publishing=publishing, ops=ops)
 
 
 # ── Brand profile edit ─────────────────────────────────────────────────────

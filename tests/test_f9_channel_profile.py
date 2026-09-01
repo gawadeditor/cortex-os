@@ -203,13 +203,14 @@ class TestAPIRoutes:
     def test_channel_profile_page_200(self, client, db):
         import run_dashboard as server
         server.app.config["DB_PATH"] = str(db)
-        resp = client.get("/channel-profile")
+        # legacy route redirects to the channel list / a channel now
+        resp = client.get("/channel-profile", follow_redirects=True)
         assert resp.status_code == 200
 
     def test_channel_profile_page_html(self, client, db):
         import run_dashboard as server
         server.app.config["DB_PATH"] = str(db)
-        resp = client.get("/channel-profile")
+        resp = client.get("/channel-profile", follow_redirects=True)
         assert b"<!DOCTYPE html>" in resp.data or b"<html" in resp.data
 
     def test_api_channel_profile_200(self, client, db):

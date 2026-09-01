@@ -554,9 +554,8 @@ class TestSSERouteReturns:
 # ===========================================================================
 
 class TestNavExpandedPhaseD:
-    # post-IA restructure: Live / Run history / Failures are Production
-    # section tabs, reachable from the Production sub-nav on those pages,
-    # not repeated on the top nav of every page.
+    # post-restructure: Live / Run history / Failures are Production
+    # sub-nav entries rendered under the topbar on Production pages.
     def _check_production_subnav(self, text):
         assert 'class="sub-nav"' in text
         assert "/live" in text

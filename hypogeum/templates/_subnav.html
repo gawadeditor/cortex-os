@@ -1,35 +1,5 @@
-{#- Section sub-navigation. Renders the tab row for a core section; the
-    active tab is derived from request.path so pages don't pass anything.
-    Usage:  {% from '_subnav.html' import subnav %}   {{ subnav('production') }}
-    Sections: production · review · credentials · settings · channels -#}
-{%- macro subnav(section) -%}
-{%- set p = request.path -%}
-{%- set groups = {
-  'channels':   [('Channels','/channels'), ('Build a channel','/channels/new')],
-  'production': [('Queue','/create'), ('Live','/live'), ('Run history','/runs'), ('Failures','/failures'), ('Discovery','/discover')],
-  'review':     [('Attention','/attention'), ('Approvals','/approvals'), ('Episodes','/episodes'), ('Preflight','/preflight')],
-  'credentials':[('AI providers','/providers'), ('Platform connections','/platforms')],
-  'settings':   [('Channel profile','/channel-profile'), ('Storage & archive','/settings/storage'), ('Setup checklist','/setup')],
-  'governance': [('Decisions','/decisions'), ('Reviews','/decision-reviews'), ('Inputs','/decision-inputs'), ('Plans','/execution-plans')],
-} -%}
-{%- set tabs = groups.get(section, []) -%}
-{%- if tabs -%}
-  {#- longest-matching tab wins, so /analytics/platform beats /analytics -#}
-  {%- set ns = namespace(best='', blen=-1) -%}
-  {%- for _l, h in tabs -%}
-    {%- set hit = (p == h) or p.startswith(h.rstrip('/') + '/')
-                  or (h == '/create' and p.startswith('/create'))
-                  or (h == '/channels' and (p == '/channels' or p.startswith('/channel/')))
-                  or (h == '/runs' and p.startswith('/run/'))
-                  or (h == '/episodes' and p.startswith('/episode/')) -%}
-    {%- if hit and h|length > ns.blen -%}{%- set ns.best = h -%}{%- set ns.blen = h|length -%}{%- endif -%}
-  {%- endfor -%}
-<div class="container">
-<nav class="sub-nav" aria-label="{{ section }} sections">
-  {%- for label, href in tabs -%}
-  <a href="{{ href }}" class="sub-nav-link {{ 'active' if href == ns.best }}">{{ label }}</a>
-  {%- endfor -%}
-</nav>
-</div>
-{%- endif -%}
-{%- endmacro -%}
+{#- Section sub-navigation is now rendered globally by _nav.html's topbar
+    (it derives the tab set from the current scope + request.path). This
+    macro is kept as a no-op so existing `{{ subnav('...') }}` call sites
+    render nothing instead of a second, stale tab row. -#}
+{%- macro subnav(section) -%}{%- endmacro -%}

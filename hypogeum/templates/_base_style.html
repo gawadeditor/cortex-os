@@ -141,7 +141,6 @@
     :root[data-skin="presentation"] .action-banner,
     :root[data-skin="presentation"] details > summary,
     :root[data-skin="presentation"] .collapse-body,
-    :root[data-skin="presentation"] .nav-ops-menu,
     :root[data-skin="presentation"] .cb-panel,
     :root[data-skin="presentation"] .t1-card,
     :root[data-skin="presentation"] .kpi-strip .kpi-card {
@@ -221,7 +220,7 @@
     @media (max-width: 400px)  { body { padding: 12px 12px 48px; } }
 
     /* subtle one-time entrance for main content */
-    body > *:not(nav):not(script):not(style):not(.toast) {
+    body > *:not(nav):not(header):not(button):not(script):not(style):not(.toast) {
       animation: rise var(--dur) var(--ease) both;
     }
     @keyframes rise { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }

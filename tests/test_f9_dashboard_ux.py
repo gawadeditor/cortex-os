@@ -318,8 +318,9 @@ class TestNoNetworkCalls:
     def test_channel_profile_page_no_network(self, client, db):
         import run_dashboard as server
         server.app.config["DB_PATH"] = str(db)
+        # legacy route now redirects to the channel list / a channel
         resp = client.get("/channel-profile")
-        assert resp.status_code == 200
+        assert resp.status_code in (200, 302)
 
     def test_connect_platform_page_no_network(self, client, db):
         import run_dashboard as server

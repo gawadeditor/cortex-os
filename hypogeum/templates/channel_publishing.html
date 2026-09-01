@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{{ channel.name }} publishing — Cortex</title>
+  {% include '_base_style.html' %}
+  {% from '_icons.html' import icon %}
+  <style>
+    .pl-row { display: grid; grid-template-columns: 140px 1fr auto; gap: 16px; align-items: center;
+      padding: 14px 0; border-bottom: 1px solid var(--hairline); }
+    .pl-row:last-child { border-bottom: none; }
+    .pl-plat { font-weight: 600; text-transform: capitalize; }
+    .pl-state { font-size: 12.5px; color: var(--muted); }
+    .pl-ok { color: var(--good); font-weight: 600; }
+    .pl-none { color: var(--warn); font-weight: 600; }
+    .pl-actions { display: flex; gap: 8px; align-items: center; }
+    .pl-actions select { padding: 6px 9px; border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font-size: 12.5px; }
+    .pl-hint { font-size: 12px; color: var(--muted); margin-top: 10px; line-height: 1.5; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="container">
+  <div class="page-header">
+    <span class="eyebrow">{{ channel.name }}</span>
+    <h1>Publishing</h1>
+    <span class="page-meta">Connect the platform accounts this channel publishes to</span>
+  </div>
+
+  {% if flash == 'bound' %}<div class="flash flash-ok">Platform connected for {{ channel.name }}.</div>{% endif %}
+  {% if flash == 'unbound' %}<div class="flash flash-ok">Platform disconnected.</div>{% endif %}
+  {% if flash == 'err' %}<div class="flash flash-err">Could not update the connection — check the Zernio account pool.</div>{% endif %}
+
+  <div class="card">
+    <div class="card-title">Platform connections</div>
+    {% if not wanted_platforms %}
+      <p class="pl-hint">This channel has no target platforms yet. Set them in
+        <a href="/publishing/{{ channel.publishing_profile_id }}/edit">the publishing profile</a>.</p>
+    {% endif %}
+    {% for plat in wanted_platforms %}
+    {% set b = bound.get(plat) %}
+    {% set pool = accounts_by_platform.get(plat, []) %}
+    <div class="pl-row">
+      <div class="pl-plat">{{ plat }}</div>
+      <div class="pl-state">
+        {% if b %}
+          <span class="pl-ok">✓ connected</span> —
+          {% set acct = (pool | selectattr('provider_account_id','equalto', b.provider_account_id) | first) %}
+          {{ (acct.display_label if acct else b.provider_account_id) }}
+          <span style="color:var(--faint)">via {{ b.provider_id }}</span>
+        {% else %}
+          <span class="pl-none">not connected</span>
+        {% endif %}
+      </div>
+      <div class="pl-actions">
+        {% if pool %}
+        <form method="post" style="display:flex; gap:8px; align-items:center;">
+          <input type="hidden" name="platform" value="{{ plat }}">
+          <input type="hidden" name="action" value="bind">
+          <select name="provider_account_id" required>
+            <option value="" disabled {{ 'selected' if not b }}>choose account…</option>
+            {% for a in pool %}
+            <option value="{{ a.provider_account_id }}" {{ 'selected' if b and b.provider_account_id == a.provider_account_id }}>
+              {{ a.display_label or a.external_account_id }} ({{ a.provider_id }}{{ ', ' ~ a.status if a.status != 'active' }})
+            </option>
+            {% endfor %}
+          </select>
+          <button type="submit" class="btn btn-primary">{{ 'Change' if b else 'Connect' }}</button>
+        </form>
+        {% if b %}
+        <form method="post" onsubmit="return confirm('Disconnect {{ plat }} for {{ channel.name }}?');">
+          <input type="hidden" name="platform" value="{{ plat }}">
+          <input type="hidden" name="action" value="unbind">
+          <button type="submit" class="btn">Disconnect</button>
+        </form>
+        {% endif %}
+        {% else %}
+        <span class="pl-hint" style="margin:0;">No {{ plat }} account in the pool —
+          <a href="/platforms">connect it in Zernio</a>, then Sync.</span>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <div class="card">
+    <div class="card-title">How this works</div>
+    <p class="pl-hint">
+      Cortex publishes through Zernio. Connect each platform account (a YouTube
+      channel, a TikTok account, …) <strong>in Zernio</strong>, run
+      <a href="/platforms">Platforms → Sync from Zernio</a>, then bind the right
+      account to <strong>{{ channel.name }}</strong> here. Each channel binds its
+      own accounts — connecting a platform for one channel never affects another.
+      The same account is bound for both publishing and analytics.
+    </p>
+  </div>
+</div>
+</body>
+</html>

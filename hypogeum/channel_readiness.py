@@ -150,6 +150,39 @@ def get_channel_readiness(channel_id: str, db_path: Optional[Path] = None) -> di
             f"the week resets ({wb.get('window_end_utc', '?')}) or the ceiling is raised.",
         ))
 
+    # ── 3b. Per-channel platform bindings ──────────────────────────────
+    # A synced Zernio account is not enough — this channel must be *bound*
+    # to a specific account per target platform (Connect on the channel's
+    # Publishing page). Unbound target platforms cannot publish.
+    try:
+        from hypogeum.publishing.provider_repository import resolve_active_binding  # noqa: PLC0415
+        wanted_b = _enabled_platforms(channel_id, db_path)
+        unbound = []
+        for p in wanted_b:
+            try:
+                if not resolve_active_binding(db_path, channel_id=channel_id,
+                                              capability="publishing", platform=p):
+                    unbound.append(p)
+            except Exception:  # noqa: BLE001
+                pass
+        if wanted_b and unbound:
+            items.append(_item(
+                "publishing.bindings",
+                "blocker" if ops.get("operator_enabled") else "warn",
+                "Channel platform connections",
+                f"not connected for: {', '.join(unbound)} — this channel cannot "
+                f"publish to {'them' if len(unbound) > 1 else 'it'} yet.",
+                f"Open {channel_id}'s Publishing tab and connect each platform "
+                f"to an account.",
+            ))
+        elif wanted_b:
+            items.append(_item(
+                "publishing.bindings", "ok", "Channel platform connections",
+                f"connected: {', '.join(wanted_b)}.",
+            ))
+    except Exception:  # noqa: BLE001
+        pass
+
     # ── 4. Zernio platform links ───────────────────────────────────────
     try:
         from hypogeum.publishing.zernio_accounts import get_zernio_accounts_snapshot  # noqa: PLC0415

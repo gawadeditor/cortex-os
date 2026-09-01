@@ -135,20 +135,24 @@
   <div class="attn-item sev-blocking" style="padding:10px 16px;">
     <div class="attn-dot dot-red"></div>
     <div class="attn-body">
-      <div class="attn-label">{{ s.signal_type | replace('_',' ') | title }}</div>
-      {% if s.message %}
+      <div class="attn-label">{{ s.title or (s.signal_type | replace('_',' ') | title) }}</div>
+      {% if s.explain %}
+      <div class="attn-detail">{{ s.explain }}</div>
+      {% elif s.message %}
       <div class="attn-detail">{{ s.message[:200] }}</div>
       {% endif %}
       <div class="attn-detail">
-        <span class="badge badge-blocked" style="font-size:10px;">BLOCKING · {{ s.severity }}</span>
-        &nbsp;<a href="/signals" class="origin-link">signals ↗</a>
+        <span class="badge badge-blocked" style="font-size:10px;">Production is blocked until this is cleared</span>
       </div>
     </div>
     <div class="attn-actions">
+      {% if s.cta_url %}
+      <a href="{{ s.cta_url }}" class="btn">{{ s.cta_label }}</a>
+      {% endif %}
       <button class="btn btn-resolve"
               onclick="postAction('/api/action/resolve-signal/{{ s.signal_id|e }}',
-                       'Mark signal as resolved?')">
-        Resolve
+                       'Mark this as resolved? It stays in signal history.')">
+        Mark resolved
       </button>
     </div>
   </div>
@@ -314,27 +318,52 @@
   <div class="section-hdr">
     Other Warnings
     <span class="section-count count-yellow">{{ warning_signals|length }}</span>
-    <a href="/signals" class="origin-link" style="margin-left:auto;">all signals ↗</a>
+    <a href="/signals" class="origin-link" style="margin-left:auto;">signal history ↗</a>
   </div>
 
   {% for s in warning_signals %}
   <div class="attn-item sev-warning" style="padding:10px 16px;">
-    <div class="attn-dot dot-yellow"></div>
+    <div class="attn-dot {{ 'dot-red' if s.severity == 'CRITICAL' else 'dot-yellow' }}"></div>
     <div class="attn-body">
-      <div class="attn-label">{{ s.signal_type | replace('_',' ') | title }}</div>
-      {% if s.message %}
-      <div class="attn-detail">{{ s.message[:200] }}</div>
+      <div class="attn-label">{{ s.title }}</div>
+      {% if s.explain %}
+      <div class="attn-detail">{{ s.explain }}</div>
       {% endif %}
-      <div class="attn-detail">
-        <span class="badge badge-degraded" style="font-size:10px;">{{ s.severity }}</span>
-      </div>
     </div>
     <div class="attn-actions">
+      {% if s.cta_url %}
+      <a href="{{ s.cta_url }}" class="btn">{{ s.cta_label }}</a>
+      {% endif %}
       <button class="btn btn-resolve"
               onclick="postAction('/api/action/resolve-signal/{{ s.signal_id|e }}',
-                       'Mark signal as resolved?')">
-        Resolve
+                       'Clear this from the list? It stays in signal history.')">
+        Dismiss
       </button>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if info_notices %}
+<div class="card" style="padding:0; margin-bottom:var(--gap);">
+  <div class="section-hdr">
+    Notifications
+    <span class="section-count" style="background:var(--raised); color:var(--muted);">{{ info_notices|length }}</span>
+    <span style="font-size:11px; color:var(--muted); font-weight:400; margin-left:4px;">
+      — status notes, nothing to act on
+    </span>
+    <button class="btn btn-resolve" style="margin-left:auto;"
+            onclick="postAction('/api/action/resolve-notices', 'Clear all status notes?')">
+      Clear all
+    </button>
+  </div>
+  {% for s in info_notices %}
+  <div class="attn-item" style="padding:8px 16px; opacity:.75;">
+    <div class="attn-dot" style="background:var(--muted);"></div>
+    <div class="attn-body">
+      <div class="attn-label" style="font-size:12px;">{{ s.title }}</div>
+      <div class="attn-detail">{{ s.explain }}</div>
     </div>
   </div>
   {% endfor %}

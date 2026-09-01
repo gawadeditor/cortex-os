@@ -1141,6 +1141,17 @@ def run_iteration(
     except Exception as exc:  # noqa: BLE001
         log.error("archive_relocation_sweep_error error=%s", exc)
 
+    # Signal-noise sweep — auto-resolve informational signals and any signal
+    # tied to an already-published episode, so the operator's attention panel
+    # only ever shows conditions that need a human. Non-blocking.
+    try:
+        from hypogeum.signal_digest import auto_resolve_stale_signals
+        _sig_cleared = auto_resolve_stale_signals(db_path=db_path)
+        if _sig_cleared:
+            log.info("signal_noise_sweep resolved=%d", _sig_cleared)
+    except Exception as exc:  # noqa: BLE001
+        log.error("signal_noise_sweep_error error=%s", exc)
+
     poll_status = proc.status if proc else (
         "paused" if (queue_paused and not bypass_pause_for_bounded_run)
         else ("not_cleared" if not clearance.cleared else "empty")

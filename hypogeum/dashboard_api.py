@@ -1366,7 +1366,8 @@ def get_active_signals(db_path: Optional[Path] = None) -> list:
         try:
             rows = conn.execute("""
                 SELECT signal_id, signal_type, severity, full_record, channel_id,
-                       source_system, blocking, lifecycle_status, ingested_at
+                       source_system, blocking, lifecycle_status, ingested_at,
+                       episode_id, run_id
                 FROM signal_records
                 WHERE lifecycle_status = 'open'
                 ORDER BY ingested_at DESC

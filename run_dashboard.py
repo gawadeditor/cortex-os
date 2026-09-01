@@ -359,10 +359,29 @@ def _build_attention_context() -> dict:
     except Exception:
         platforms = []
 
-    # 1. OIS signals — split by blocking flag
+    # 1. OIS signals — clear the noise, then translate to operator language.
+    digest_signals = None
+    try:
+        from hypogeum.signal_digest import (
+            auto_resolve_stale_signals, digest_signals, present_signal,
+        )
+        auto_resolve_stale_signals(db_path=_db_path())
+        state, report, state_err = _safe_state()  # re-read after auto-resolve
+    except Exception:  # noqa: BLE001
+        present_signal = None
+
     all_signals      = (state.active_signals or []) if state else []
-    blocking_signals = [s for s in all_signals if s.get("blocking")]
-    warning_signals  = [s for s in all_signals if not s.get("blocking")]
+    _blocking_raw    = [s for s in all_signals if s.get("blocking")]
+    _non_blocking    = [s for s in all_signals if not s.get("blocking")]
+    if digest_signals:
+        _d = digest_signals(_non_blocking, db_path=_db_path())
+        warning_signals = _d["attention"]
+        info_notices    = _d["notices"]
+        blocking_signals = [present_signal(s, db_path=_db_path()) for s in _blocking_raw]
+    else:
+        warning_signals  = _non_blocking
+        info_notices     = []
+        blocking_signals = _blocking_raw
 
     # 2. Pending approvals (dataclass objects — convert to dicts for template/JSON)
     approvals_raw = (state.pending_approvals or []) if state else []
@@ -439,6 +458,7 @@ def _build_attention_context() -> dict:
         "warning_count":          warning_count,
         "blocking_signals":       blocking_signals,
         "warning_signals":        warning_signals,
+        "info_notices":           info_notices,
         "approvals":              approvals,
         "learning_pending":       learning_pending,
         "platform_issues":        platform_issues,
@@ -3923,6 +3943,17 @@ def api_action_resolve_signal(signal_id):
         404 if result.get("code") == "not_found" else 400
     )
     return jsonify(result), http_status
+
+
+@app.route("/api/action/resolve-notices", methods=["POST"])
+def api_action_resolve_notices():
+    """Clear every informational / already-published-episode signal at once."""
+    try:
+        from hypogeum.signal_digest import auto_resolve_stale_signals
+        n = auto_resolve_stale_signals(db_path=_db_path())
+        return jsonify({"ok": True, "resolved": n})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(exc)}), 400
 
 
 # ===========================================================================

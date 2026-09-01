@@ -247,13 +247,27 @@ DELIVERABLE_RESOLUTION_POLICY: Dict[str, Tuple[int, int]] = {
 }
 
 
-def required_source_resolution(source_type: Optional[str]) -> Tuple[int, int]:
+def required_source_resolution(
+    source_type: Optional[str], *, short_native: bool = False,
+) -> Tuple[int, int]:
     """
     Canonical (required_width, required_height) for a deliverable, derived
     from DELIVERABLE_RESOLUTION_POLICY by its source_type. An unrecognized
     or missing source_type falls back to the policy's own "main_episode"
     entry, read live from the table rather than a separate literal.
+
+    `short_native` (2026-09-01): a shorts-only channel's single vertical
+    deliverable is still tagged source_type="main_episode" (it IS the
+    episode — there is no separate "short" alongside it), but its real shape
+    is portrait, not the landscape "main_episode" policy assumes. Passing
+    short_native=True (config.SHORT_NATIVE_MODE) routes "main_episode" to
+    the SAME portrait policy as "short" here, so every clip for that channel
+    is qualified against the resolution it will actually be produced at —
+    without a source_type value ever needing to change. Never affects a
+    channel whose "main_episode" really is long-form landscape.
     """
+    if short_native and source_type == "main_episode":
+        return DELIVERABLE_RESOLUTION_POLICY["short"]
     return DELIVERABLE_RESOLUTION_POLICY.get(
         source_type, DELIVERABLE_RESOLUTION_POLICY["main_episode"]
     )
@@ -557,7 +571,9 @@ def evaluate_source_enhancement_compatibility(
             f"tier {tier_used} currently maps to {current_model!r}"
         )
 
-    required_width, required_height = required_source_resolution(source_type)
+    required_width, required_height = required_source_resolution(
+        source_type, short_native=bool(getattr(config, "SHORT_NATIVE_MODE", False)),
+    )
     if se.get("required_width") != required_width or se.get("required_height") != required_height:
         reasons.append(
             f"required source resolution policy changed: recorded "

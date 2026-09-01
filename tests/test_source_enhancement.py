@@ -678,6 +678,41 @@ class TestVersionChange:
         assert se["enhanced_resolution"] == "1080x1920"
         assert probe_resolution(clip_path) == (1080, 1920)
 
+    def test_short_native_main_episode_uses_portrait_resolution(self, tmp_path):
+        """Real production bug found running a shorts-only channel end to
+        end: a short-native channel's single deliverable is tagged
+        source_type='main_episode' (it IS the episode, there is no separate
+        Short alongside it), so this stage judged its correct portrait clips
+        against the landscape (1920x1080) requirement and rejected every
+        one, even though the clip's real shape (e.g. 1092x1902) was exactly
+        what SHORT_NATIVE_MODE produces. config.SHORT_NATIVE_MODE=True must
+        route 'main_episode' to the same portrait policy as a real Short."""
+        episode_id = "ep_enh_short_native"
+        ep_dir = tmp_path
+        clip_path = ep_dir / "video" / "sc_s01.mp4"
+        _make_clip(clip_path, 720, 1280)
+
+        provider = FakeEnhancementProvider(produce_width=1080, produce_height=1920)
+        register_provider("fake_portrait_native", lambda: provider)
+        config = _make_config(ENHANCEMENT_PROVIDER="fake_portrait_native",
+                              SHORT_NATIVE_MODE=True)
+        vp = {
+            "scenes": [{"scene_id": "s01", "source_type": "main_episode"}],
+            "asset_manifest": {"assets": [{
+                "scene_id": "s01",
+                "asset_id": f"episodes/{episode_id}/video/sc_s01",
+                "model": "veo3.1-lite-text-to-video", "tier_used": 2,
+            }]},
+        }
+
+        result_vp = run_source_enhancement(vp, config, episode_id, output_dir=ep_dir)
+
+        asset = result_vp["asset_manifest"]["assets"][0]
+        se = asset["source_enhancement"]
+        assert se["validation_result"] == "passed"
+        assert se["required_width"] == 1080
+        assert se["required_height"] == 1920
+
 
 # ---------------------------------------------------------------------------
 # evaluate_source_enhancement_compatibility() -- direct unit coverage

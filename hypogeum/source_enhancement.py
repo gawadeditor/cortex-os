@@ -518,7 +518,9 @@ def qualify_asset(
     Returns True if `asset["source_enhancement"]` was set or changed (the
     caller should persist), False if nothing needed to change.
     """
-    required_width, required_height = required_source_resolution(source_type)
+    required_width, required_height = required_source_resolution(
+        source_type, short_native=bool(getattr(config, "SHORT_NATIVE_MODE", False)),
+    )
     scene_id = asset.get("scene_id", "")
 
     # --- Idempotent resume: is a prior decision for THIS asset still valid? ---

@@ -549,6 +549,21 @@ class TestRequiredSourceResolution:
         from hypogeum.artifact_compatibility import required_source_resolution
         assert required_source_resolution("short") == (1080, 1920)
 
+    def test_main_episode_is_landscape_unless_short_native(self):
+        from hypogeum.artifact_compatibility import required_source_resolution
+        assert required_source_resolution("main_episode") == (1920, 1080)
+        assert required_source_resolution("main_episode", short_native=False) == (1920, 1080)
+
+    def test_short_native_main_episode_resolves_to_portrait(self):
+        """A shorts-only channel's single deliverable is tagged
+        source_type='main_episode' (it IS the episode) but its real shape is
+        portrait — short_native=True must route it to the same policy as
+        'short', not the landscape default."""
+        from hypogeum.artifact_compatibility import required_source_resolution
+        assert required_source_resolution("main_episode", short_native=True) == (1080, 1920)
+        # a genuine short is unaffected either way
+        assert required_source_resolution("short", short_native=True) == (1080, 1920)
+
     def test_unrecognized_source_type_falls_back_to_main_episode(self):
         from hypogeum.artifact_compatibility import (
             REQUIRED_SOURCE_HEIGHT,

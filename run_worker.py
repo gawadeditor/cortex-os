@@ -1177,6 +1177,18 @@ def run_iteration(
         except Exception as exc:  # noqa: BLE001
             log.error("model_registry_sweep_error error=%s", exc)
 
+    # Queue/run janitor — keep run_queue / runs to a working window. Same
+    # cadence as the model registry sync (~4h); light and conservative.
+    if not dry_run and iteration % _MODEL_REGISTRY_SYNC_EVERY_N == 0:
+        try:
+            from hypogeum.queue_janitor import prune_terminal_rows
+            _jn = prune_terminal_rows(db_path=db_path)
+            if _jn["queue_pruned"] or _jn["runs_pruned"]:
+                log.info("queue_janitor_sweep queue=%d runs=%d",
+                         _jn["queue_pruned"], _jn["runs_pruned"])
+        except Exception as exc:  # noqa: BLE001
+            log.error("queue_janitor_sweep_error error=%s", exc)
+
     # Step 4: background analytics sync — every _ANALYTICS_SYNC_EVERY_N iterations
     analytics_synced = False
     scheduling_evidence_result: dict = {}

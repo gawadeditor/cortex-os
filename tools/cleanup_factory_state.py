@@ -64,8 +64,14 @@ _PROTECTED_TABLES = {
     "factory_settings", "worker_control", "schedules",
 }
 
-_CATEGORIES = ["stale-episodes", "dead-runs", "topics", "dup-grants",
-               "dead-schedules", "stale-sync-log", "local-files", "logs"]
+# The asset catalog is episode-scoped: only remove rows when the EPISODE is
+# being removed, never merely because a failed run that produced (a version
+# of) the asset is being cleaned. A kept episode keeps its whole catalog.
+_EPISODE_ONLY_TABLES = {"archive_index", "assets", "asset_versions"}
+
+_CATEGORIES = ["stale-episodes", "dead-runs", "superseded-runs", "dead-queue",
+               "topics", "dup-grants", "dead-schedules", "stale-sync-log",
+               "local-files", "logs"]
 
 _DEAD_RUN_STATES = ("failed", "cancelled", "orphaned", "paused")
 _DEAD_TOPIC_STATES = ("cancelled", "skipped")
@@ -154,6 +160,23 @@ def main(argv: list[str] | None = None) -> int:
             f"AND (episode_id IS NULL OR episode_id NOT IN {keep_clause})",
             list(_DEAD_RUN_STATES) + keep_params)}
         run_ids |= dead
+    superseded_ids: set[str] = set()
+    if not args.skip_superseded_runs:
+        # failed/cancelled runs whose episode was later completed / published:
+        # pure history, the episode succeeded — safe to drop with its children.
+        superseded_ids = {r[0] for r in conn.execute(
+            """
+            SELECT r.run_id FROM runs r
+            WHERE r.status IN ('failed','cancelled') AND r.run_id IS NOT NULL
+              AND (
+                r.episode_id IN (SELECT episode_id FROM episodes
+                                 WHERE status IN ('complete','completed','published'))
+                OR r.episode_id IN (SELECT DISTINCT episode_id FROM publication_intents
+                                    WHERE status = 'succeeded')
+              )
+            """
+        )}
+        run_ids |= superseded_ids
     run_ids = {r for r in run_ids if r}
 
     # ---- plan the generic cascade --------------------------------------
@@ -166,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
         if "episode_id" in c and ep_targets:
             cl, p = _in_clause(sorted(ep_targets))
             conds.append(f"episode_id IN {cl}"); params += p
-        if "run_id" in c and run_ids:
+        if "run_id" in c and run_ids and t not in _EPISODE_ONLY_TABLES:
             cl, p = _in_clause(sorted(run_ids))
             conds.append(f"run_id IN {cl}"); params += p
         if not conds:
@@ -197,13 +220,25 @@ def main(argv: list[str] | None = None) -> int:
             f"SELECT COUNT(*) FROM budget_reservations "
             f"WHERE scope_kind != 'channel_weekly' AND scope_ref IN {cl}", p).fetchone()[0]
 
-    print("=== stale-episodes + dead-runs cascade ===")
-    print(f"  run_ids removed: {len(run_ids)}")
+    print("=== stale/dead/superseded runs cascade ===")
+    print(f"  run_ids removed: {len(run_ids)}  "
+          f"(of which superseded — failed run of a published episode: {len(superseded_ids)})")
     for t, n in sorted(plan.items()):
         print(f"  {t:<40} {n}")
     if br_n:
         print(f"  {'budget_reservations (run/ep scoped)':<40} {br_n}")
     print()
+
+    # ---- dead run_queue rows ----------------------------------------
+    dq_n = 0
+    if not args.skip_dead_queue:
+        try:
+            dq_n = conn.execute(
+                "SELECT COUNT(*) FROM run_queue WHERE status IN ('failed','cancelled')"
+            ).fetchone()[0]
+        except Exception:  # noqa: BLE001
+            dq_n = 0
+        print(f"=== dead-queue ===\n  run_queue rows status in (failed, cancelled): {dq_n}\n")
 
     # ---- topics -------------------------------------------------------
     topic_n = 0
@@ -315,8 +350,10 @@ def main(argv: list[str] | None = None) -> int:
             conds, params = [], []
             if "episode_id" in c and ep_targets:
                 cl, p = _in_clause(sorted(ep_targets)); conds.append(f"episode_id IN {cl}"); params += p
-            if "run_id" in c and run_ids:
+            if "run_id" in c and run_ids and t not in _EPISODE_ONLY_TABLES:
                 cl, p = _in_clause(sorted(run_ids)); conds.append(f"run_id IN {cl}"); params += p
+            if not conds:
+                continue
             conn.execute(f"DELETE FROM {t} WHERE {' OR '.join(conds)}", params)
         if recpt_n:
             acl, ap_ = _in_clause(sorted(ep_targets))
@@ -346,6 +383,8 @@ def main(argv: list[str] | None = None) -> int:
             conn.execute(f"DELETE FROM schedules WHERE schedule_id IN {cl}", p)
         if not args.skip_stale_sync_log and synclog_n:
             conn.execute("DELETE FROM platform_sync_log WHERE channel_id IS NULL")
+        if not args.skip_dead_queue and dq_n:
+            conn.execute("DELETE FROM run_queue WHERE status IN ('failed','cancelled')")
         conn.commit()
         print("  DB writes committed.")
     finally:

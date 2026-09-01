@@ -44,38 +44,84 @@ _BAKEOFF_ROOT = _PROJECT_ROOT / ".hypogeum-assets" / "video_bakeoffs"
 # Model catalogue
 # ---------------------------------------------------------------------------
 
-def list_video_models(config=None) -> list[dict]:
-    """Every text-to-video model MUAPI exposes a price for, cheapest first."""
-    from hypogeum.muapi import (
-        MODEL_CREDIT_COSTS, _VEO3_MODELS, _VEO3_1_MODELS, _RUNWAY_MODELS,
-    )
-    _NOTES = {
-        "veo3-text-to-video":        "Premium — highest fidelity; reserve for hero / opening shots.",
-        "veo3.1-lite-text-to-video": "Current primary production model. 1080p, 8s.",
-        "veo3.1-fast-text-to-video": "Costs more than lite; ignores the resolution parameter.",
-        "runway-text-to-video":      "Cheapest. Lower fidelity and motion range.",
-    }
-    text_to_video = {
-        m for m in (_VEO3_MODELS | _VEO3_1_MODELS | _RUNWAY_MODELS)
-        if "image-to-video" not in m
-    }
-    out = []
-    for model in sorted(text_to_video, key=lambda m: MODEL_CREDIT_COSTS.get(m, 99)):
-        if model not in MODEL_CREDIT_COSTS:
-            continue
-        family = ("veo3.1" if model in _VEO3_1_MODELS
-                  else "veo3" if model in _VEO3_MODELS else "runway")
-        out.append({
-            "id":         model,
-            "price_usd":  round(float(MODEL_CREDIT_COSTS[model]), 4),
-            "family":     family,
-            "notes":      _NOTES.get(model, ""),
-        })
-    return out
+# Cache the MUAPI model catalogue so we don't re-fetch on every page load.
+_MODELS_CACHE: dict = {"at": 0.0, "models": None}
+_MODELS_TTL = 900  # seconds
+
+
+def _fallback_models() -> list[dict]:
+    """Used only when the live MUAPI catalogue can't be reached."""
+    from hypogeum.muapi import MODEL_CREDIT_COSTS
+    ids = ["runway-text-to-video", "veo3.1-lite-text-to-video",
+           "veo3-fast-text-to-video", "veo3.1-fast-text-to-video", "veo3-text-to-video"]
+    return [{"id": i, "price_usd": round(float(MODEL_CREDIT_COSTS.get(i, 2.5)), 4),
+             "family": i.split("-")[0], "notes": "", "dynamic_pricing": False}
+            for i in ids if i in MODEL_CREDIT_COSTS]
+
+
+def _fetch_muapi_models(config) -> Optional[list[dict]]:
+    """GET the MUAPI model catalogue (all categories). Returns raw model dicts
+    or None on any failure. No generation, no spend."""
+    import requests
+    try:
+        base = getattr(config, "MUAPI_BASE_URL", "https://api.muapi.ai/api/v1")
+        key = getattr(config, "MUAPI_API_KEY", "") or ""
+        r = requests.get(f"{base}/models", headers={"x-api-key": key}, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+        return data.get("models") if isinstance(data, dict) else data
+    except Exception as exc:  # noqa: BLE001
+        log.error("video_bakeoff_model_fetch_failed", error=str(exc))
+        return None
+
+
+def list_video_models(config=None, *, force_refresh: bool = False) -> list[dict]:
+    """Every MUAPI text-to-video model with its live price, cheapest first.
+    Cached for 15 min; falls back to a small built-in list if MUAPI is
+    unreachable."""
+    if config is None:
+        from hypogeum.config import Config
+        config = Config()
+
+    now = time.monotonic()
+    if (not force_refresh and _MODELS_CACHE["models"] is not None
+            and now - _MODELS_CACHE["at"] < _MODELS_TTL):
+        return _MODELS_CACHE["models"]
+
+    raw = _fetch_muapi_models(config)
+    if not raw:
+        models = _fallback_models()
+    else:
+        models = []
+        for m in raw:
+            if (m.get("category") or "").strip().lower() != "text to video":
+                continue
+            try:
+                price = round(float(m.get("cost")), 4)
+            except (TypeError, ValueError):
+                continue
+            models.append({
+                "id":              m.get("name", ""),
+                "price_usd":       price,
+                "family":          m.get("family", "") or "",
+                "notes":           (m.get("description") or "")[:140],
+                "dynamic_pricing": bool(m.get("dynamic_pricing")),
+            })
+        models = [m for m in models if m["id"]]
+        models.sort(key=lambda m: m["price_usd"])
+        if not models:
+            models = _fallback_models()
+
+    _MODELS_CACHE.update(at=now, models=models)
+    return models
+
+
+def _model_price_map(config=None) -> dict:
+    return {m["id"]: m["price_usd"] for m in list_video_models(config)}
 
 
 def _valid_model_ids(config=None) -> set:
-    return {m["id"] for m in list_video_models(config)}
+    return set(_model_price_map(config))
 
 
 # ---------------------------------------------------------------------------
@@ -169,17 +215,23 @@ def build_channel_scene_prompt(
 # Cost preview
 # ---------------------------------------------------------------------------
 
-def estimate_cost(models: list) -> dict:
-    """{lines: [{model, price_usd}], total_usd} for the selected models
-    (one clip each)."""
-    from hypogeum.muapi import MODEL_CREDIT_COSTS, _DEFAULT_UNKNOWN_MODEL_COST
-    lines = []
-    total = 0.0
+def estimate_cost(models: list, config=None) -> dict:
+    """{lines, total_usd, clip_count, any_dynamic} for the selected models
+    (one clip each). Prices come from the live MUAPI catalogue."""
+    catalogue = {m["id"]: m for m in list_video_models(config)}
+    lines, total = [], 0.0
     for m in models:
-        price = round(float(MODEL_CREDIT_COSTS.get(m, _DEFAULT_UNKNOWN_MODEL_COST)), 4)
-        lines.append({"model": m, "price_usd": price})
+        cm = catalogue.get(m, {})
+        price = round(float(cm.get("price_usd", 2.5)), 4)
+        lines.append({"model": m, "price_usd": price,
+                      "dynamic": bool(cm.get("dynamic_pricing"))})
         total += price
-    return {"lines": lines, "total_usd": round(total, 4), "clip_count": len(models)}
+    return {
+        "lines": lines,
+        "total_usd": round(total, 4),
+        "clip_count": len(models),
+        "any_dynamic": any(l["dynamic"] for l in lines),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -235,15 +287,15 @@ def _probe_duration(path: Path) -> Optional[float]:
 
 
 def _generate_one(prompt: str, model: str, aspect_ratio: str, dest: Path,
-                  config, req_dur: float) -> dict:
+                  config, req_dur: float, price: float) -> dict:
     """Submit → poll → download one clip for `model`. Returns a result dict.
     Never raises."""
     from hypogeum.muapi import (
-        MODEL_CREDIT_COSTS, _DEFAULT_UNKNOWN_MODEL_COST, _build_job_payload,
-        _submit_http, _poll_until_complete, _download_file, _validate_video_file,
-        _DRY_RUN_REQUEST_ID_PREFIX, _generate_dry_run_placeholder_clip,
+        _build_job_payload, _submit_http, _poll_until_complete, _download_file,
+        _validate_video_file, _DRY_RUN_REQUEST_ID_PREFIX,
+        _generate_dry_run_placeholder_clip,
     )
-    price = round(float(MODEL_CREDIT_COSTS.get(model, _DEFAULT_UNKNOWN_MODEL_COST)), 4)
+    price = round(float(price), 4)
     started = time.monotonic()
     base = {"model": model, "price_usd": price, "ok": False, "error": None,
             "clip_file": None, "latency_s": None, "duration_s": None,
@@ -318,8 +370,8 @@ def run_bakeoff(
         from hypogeum.config import Config
         config = Config()
 
-    valid = _valid_model_ids(config)
-    models = [m for m in dict.fromkeys(models) if m in valid]
+    price_map = _model_price_map(config)
+    models = [m for m in dict.fromkeys(models) if m in price_map]
     if not models:
         raise ValueError("no valid video models selected")
     if not (prompt or "").strip():
@@ -335,6 +387,7 @@ def run_bakeoff(
         log.info("video_bakeoff_model_start", run_id=run_id, model=model, channel_id=channel_id)
         results.append(_generate_one(
             prompt, model, aspect_ratio, run_dir / f"{_safe(model)}.mp4", config, req_dur,
+            price_map.get(model, 2.5),
         ))
 
     manifest = {

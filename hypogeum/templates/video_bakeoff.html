@@ -95,27 +95,31 @@
   </div>
 
   <div>
-    <span class="bo-label">Models to compare</span>
-    <div class="model-list">
-      {% for m in models %}
-      <label class="model-opt" data-price="{{ m.price_usd }}">
-        <input type="checkbox" name="models" value="{{ m.id }}"
-               {{ 'checked' if m.id == current_model }} onchange="recost()">
-        <span>
-          {{ m.id }}
-          <span class="note">{{ m.notes }}</span>
-        </span>
-        <span class="price">${{ '%.2f' | format(m.price_usd) }}</span>
-      </label>
-      {% endfor %}
+    <span class="bo-label">Models to compare — {{ models | length }} MUAPI text-to-video models, live pricing</span>
+    <div class="bo-row">
+      <input type="text" id="model-filter" placeholder="filter (kling, sora, cheap…)"
+             oninput="filterModels()" style="flex:1; min-width:180px;">
+      <select id="model-pick" style="flex:2; min-width:220px;">
+        {% for m in models %}
+        <option value="{{ m.id }}" data-price="{{ m.price_usd }}" data-family="{{ m.family }}"
+                data-dyn="{{ 1 if m.dynamic_pricing else 0 }}"
+                data-note="{{ m.notes }}">
+          {{ m.id }} — ${{ '%.2f' | format(m.price_usd) }}
+        </option>
+        {% endfor %}
+      </select>
+      <button type="button" class="btn" onclick="addModel()">+ Add</button>
     </div>
+    <div id="chosen" style="display:flex; flex-wrap:wrap; gap:6px; margin-top:8px;"></div>
   </div>
 
   <div class="cost-box" id="cost-box">
     <div>Estimated cost for this run (1 clip per model):</div>
     <div class="cost-total" id="cost-total">$0.00</div>
     <div class="muted" id="cost-detail" style="font-size:11px;"></div>
+    <div class="muted" id="cost-dyn" style="font-size:11px; margin-top:2px;"></div>
   </div>
+  <div id="models-inputs"></div>
 
   <div>
     <button type="submit" class="btn btn-save" id="run-btn" disabled>Run bake-off</button>
@@ -189,30 +193,73 @@
 
 </div><!-- /.container -->
 <script>
-function recost() {
-  var boxes = document.querySelectorAll('.model-opt input:checked');
-  var total = 0, names = [];
-  document.querySelectorAll('.model-opt').forEach(function(l) {
-    var cb = l.querySelector('input');
-    l.classList.toggle('on', cb.checked);
-    if (cb.checked) { total += parseFloat(l.dataset.price); names.push(cb.value + ' $' + parseFloat(l.dataset.price).toFixed(2)); }
+var CHOSEN = {};   // id -> {price, dyn}
+var CURRENT_MODEL = {{ (current_model | tojson) if current_model else 'null' }};
+
+function filterModels() {
+  var q = document.getElementById('model-filter').value.toLowerCase().trim();
+  var cheap = q === 'cheap' || q === 'cheapest';
+  document.querySelectorAll('#model-pick option').forEach(function(o) {
+    var hay = (o.value + ' ' + o.dataset.family + ' ' + o.dataset.note).toLowerCase();
+    var show = !q || hay.indexOf(q) !== -1 || (cheap && parseFloat(o.dataset.price) <= 0.20);
+    o.hidden = !show;
+  });
+  var firstVisible = document.querySelector('#model-pick option:not([hidden])');
+  if (firstVisible) document.getElementById('model-pick').value = firstVisible.value;
+}
+
+function addModel() {
+  var sel = document.getElementById('model-pick');
+  var o = sel.options[sel.selectedIndex];
+  if (!o || CHOSEN[o.value]) return;
+  CHOSEN[o.value] = { price: parseFloat(o.dataset.price), dyn: o.dataset.dyn === '1' };
+  render();
+}
+function removeModel(id) { delete CHOSEN[id]; render(); }
+
+function render() {
+  var box = document.getElementById('chosen');
+  var inputs = document.getElementById('models-inputs');
+  box.innerHTML = ''; inputs.innerHTML = '';
+  var total = 0, names = [], anyDyn = false;
+  Object.keys(CHOSEN).forEach(function(id) {
+    var c = CHOSEN[id]; total += c.price; if (c.dyn) anyDyn = true;
+    names.push(id + ' $' + c.price.toFixed(2));
+    var chip = document.createElement('span');
+    chip.className = 'badge';
+    chip.style.cssText = 'background:var(--raised); display:inline-flex; gap:6px; align-items:center; font-size:11px;';
+    chip.innerHTML = id + ' <b>$' + c.price.toFixed(2) + '</b> ' +
+      '<a href="#" onclick="removeModel(\'' + id + '\');return false;" style="color:var(--critical);">✕</a>';
+    box.appendChild(chip);
+    var hid = document.createElement('input');
+    hid.type = 'hidden'; hid.name = 'models'; hid.value = id;
+    inputs.appendChild(hid);
   });
   document.getElementById('cost-total').textContent = '$' + total.toFixed(2);
   document.getElementById('cost-detail').textContent = names.join('  +  ');
+  document.getElementById('cost-dyn').textContent = anyDyn
+    ? 'Some prices are dynamic — the final charge can vary slightly with resolution / duration.' : '';
   document.getElementById('run-btn').disabled = names.length === 0;
 }
+
 function confirmRun(e) {
-  var n = document.querySelectorAll('.model-opt input:checked').length;
+  var n = Object.keys(CHOSEN).length;
   var total = document.getElementById('cost-total').textContent;
   if (!n) { e.preventDefault(); return false; }
-  if (!confirm('Generate ' + n + ' clip' + (n > 1 ? 's' : '') + ' now for ' + total + '? This spends real credits.')) {
+  if (!confirm('Generate ' + n + ' clip' + (n > 1 ? 's' : '') + ' now for about ' + total + '? This spends real MUAPI credits.')) {
     e.preventDefault(); return false;
   }
   document.getElementById('run-btn').disabled = true;
-  document.getElementById('run-btn').textContent = 'Generating… (this can take a minute per model)';
+  document.getElementById('run-btn').textContent = 'Generating… (up to a minute or two per model — keep this tab open)';
   return true;
 }
-recost();
+
+// Preselect the channel's current model, if any.
+if (CURRENT_MODEL) {
+  var o = document.querySelector('#model-pick option[value="' + CURRENT_MODEL + '"]');
+  if (o) { CHOSEN[CURRENT_MODEL] = { price: parseFloat(o.dataset.price), dyn: o.dataset.dyn === '1' }; }
+}
+render();
 </script>
 </body>
 </html>

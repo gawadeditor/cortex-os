@@ -14,20 +14,46 @@ from hypogeum.channel_config import (
 )
 
 
-def test_model_catalogue_has_prices_cheapest_first():
-    models = bo.list_video_models()
-    assert models, "expected MUAPI video models"
-    prices = [m["price_usd"] for m in models]
-    assert prices == sorted(prices)
-    ids = {m["id"] for m in models}
-    assert "veo3.1-lite-text-to-video" in ids
-    assert all("image-to-video" not in i for i in ids)
+_FAKE_CATALOGUE = [
+    {"id": "cheap-t2v", "price_usd": 0.10, "family": "x", "notes": "", "dynamic_pricing": False},
+    {"id": "mid-t2v", "price_usd": 0.40, "family": "y", "notes": "", "dynamic_pricing": True},
+    {"id": "premium-t2v", "price_usd": 2.50, "family": "z", "notes": "", "dynamic_pricing": False},
+]
 
 
-def test_estimate_cost_sums_selected_models():
-    est = bo.estimate_cost(["veo3.1-lite-text-to-video", "runway-text-to-video"])
+@pytest.fixture
+def stub_catalogue(monkeypatch):
+    monkeypatch.setattr(bo, "list_video_models", lambda *a, **k: list(_FAKE_CATALOGUE))
+
+
+def test_live_catalogue_filters_to_text_to_video(monkeypatch):
+    raw = [
+        {"name": "kling-x", "category": "Text to Video", "cost": 0.72, "family": "kling",
+         "description": "d", "dynamic_pricing": True},
+        {"name": "thumb-x", "category": "Text to Image", "cost": 0.01},
+        {"name": "bad-cost", "category": "Text to Video", "cost": None},
+        {"name": "cheap-x", "category": "Text to Video", "cost": 0.05, "family": "z"},
+    ]
+    monkeypatch.setattr(bo, "_fetch_muapi_models", lambda cfg: raw)
+    bo._MODELS_CACHE.update(at=0.0, models=None)
+    models = bo.list_video_models(force_refresh=True)
+    bo._MODELS_CACHE.update(at=0.0, models=None)  # don't leak into other tests
+    assert [m["id"] for m in models] == ["cheap-x", "kling-x"]  # cheapest first, bad-cost dropped
+
+
+def test_live_catalogue_falls_back_when_api_down(monkeypatch):
+    monkeypatch.setattr(bo, "_fetch_muapi_models", lambda cfg: None)
+    bo._MODELS_CACHE.update(at=0.0, models=None)
+    models = bo.list_video_models(force_refresh=True)
+    bo._MODELS_CACHE.update(at=0.0, models=None)
+    assert any(m["id"] == "veo3.1-lite-text-to-video" for m in models)
+
+
+def test_estimate_cost_sums_selected_models(stub_catalogue):
+    est = bo.estimate_cost(["cheap-t2v", "mid-t2v"])
     assert est["clip_count"] == 2
-    assert est["total_usd"] == pytest.approx(0.54, abs=0.01)
+    assert est["total_usd"] == pytest.approx(0.50, abs=0.001)
+    assert est["any_dynamic"] is True
 
 
 def test_build_prompt_is_channel_specific(tmp_path):
@@ -50,7 +76,7 @@ def test_build_prompt_is_channel_specific(tmp_path):
     assert p_kids["aspect_ratio"] == "9:16"
 
 
-def test_run_bakeoff_dry_run_produces_one_clip_per_model(tmp_path, monkeypatch):
+def test_run_bakeoff_dry_run_produces_one_clip_per_model(tmp_path, monkeypatch, stub_catalogue):
     monkeypatch.setattr(bo, "_BAKEOFF_ROOT", tmp_path / "bakeoffs")
     from hypogeum.config import Config
     cfg = Config()
@@ -58,25 +84,25 @@ def test_run_bakeoff_dry_run_produces_one_clip_per_model(tmp_path, monkeypatch):
 
     manifest = bo.run_bakeoff(
         "hypogeum", "Scene: a lit stone chamber.",
-        ["veo3.1-lite-text-to-video", "runway-text-to-video"],
+        ["cheap-t2v", "mid-t2v"],
         aspect_ratio="16:9", config=cfg,
     )
     assert manifest["dry_run"] is True
     assert manifest["spent_cost_usd"] == 0.0
     assert len(manifest["results"]) == 2
     assert all(r["ok"] for r in manifest["results"])
-    assert bo.clip_path(manifest["run_id"], "veo3.1-lite-text-to-video") is not None
+    assert bo.clip_path(manifest["run_id"], "cheap-t2v") is not None
     assert bo.get_bakeoff(manifest["run_id"])["run_id"] == manifest["run_id"]
 
 
-def test_run_bakeoff_rejects_unknown_and_empty(tmp_path, monkeypatch):
+def test_run_bakeoff_rejects_unknown_and_empty(tmp_path, monkeypatch, stub_catalogue):
     monkeypatch.setattr(bo, "_BAKEOFF_ROOT", tmp_path / "b")
     from hypogeum.config import Config
     cfg = Config(); cfg.MUAPI_DRY_RUN = True
     with pytest.raises(ValueError):
         bo.run_bakeoff("c", "prompt", ["not-a-real-model"], config=cfg)
     with pytest.raises(ValueError):
-        bo.run_bakeoff("c", "   ", ["veo3.1-lite-text-to-video"], config=cfg)
+        bo.run_bakeoff("c", "   ", ["cheap-t2v"], config=cfg)
 
 
 def test_adopt_writes_video_model_to_channel(tmp_path):

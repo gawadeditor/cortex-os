@@ -2946,3 +2946,52 @@ class TestCompliantCostPreflight:
         )
         assert decision["authorized"] is True
         assert decision["shortfall_usd"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Short-native aspect forcing on repair / coverage-fill submissions
+# (regression: a repair/fill clip built by build_scene_spec() inherited the
+#  "16:9" default -> provider generated landscape -> failed the portrait
+#  source-resolution qualifier on every retry -> coverage-fill unresolvable)
+# ---------------------------------------------------------------------------
+
+class TestShortNativeAspectForced:
+    def _spec(self):
+        return {
+            "scene_id": "s01",
+            "visual_spec": {"aspect_ratio": "16:9", "duration_seconds": 8.0},
+            "production_spec": {"primary_prompt": "x", "aspect_ratio": "16:9"},
+        }
+
+    def test_forces_portrait_when_short_native(self):
+        from types import SimpleNamespace
+        from hypogeum.agents.clip_repair_agent import _force_short_native_aspect
+        spec = self._spec()
+        _force_short_native_aspect(
+            spec, SimpleNamespace(SHORT_NATIVE_MODE=True, SHORT_NATIVE_ASPECT_RATIO="9:16"),
+        )
+        assert spec["visual_spec"]["aspect_ratio"] == "9:16"
+        assert spec["production_spec"]["aspect_ratio"] == "9:16"
+
+    def test_noop_when_not_short_native(self):
+        from types import SimpleNamespace
+        from hypogeum.agents.clip_repair_agent import _force_short_native_aspect
+        spec = self._spec()
+        _force_short_native_aspect(spec, SimpleNamespace(SHORT_NATIVE_MODE=False))
+        assert spec["visual_spec"]["aspect_ratio"] == "16:9"
+
+    def test_mock_config_is_not_treated_as_short_native(self):
+        """A MagicMock config must not accidentally force portrait — the check
+        is `is True`, not truthiness (cf. the SHORT_NATIVE_MODE Mock-safety
+        fix in source_enhancement)."""
+        from hypogeum.agents.clip_repair_agent import _force_short_native_aspect
+        spec = self._spec()
+        _force_short_native_aspect(spec, MagicMock())
+        assert spec["visual_spec"]["aspect_ratio"] == "16:9"
+
+    def test_default_aspect_ratio_when_config_omits_it(self):
+        from types import SimpleNamespace
+        from hypogeum.agents.clip_repair_agent import _force_short_native_aspect
+        spec = self._spec()
+        _force_short_native_aspect(spec, SimpleNamespace(SHORT_NATIVE_MODE=True))
+        assert spec["visual_spec"]["aspect_ratio"] == "9:16"

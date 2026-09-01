@@ -65,6 +65,30 @@ from hypogeum.config import Config
 from hypogeum.logger import get_logger
 
 
+def _force_short_native_aspect(scene_spec: dict, config) -> None:
+    """Deterministically pin a repair/coverage-fill clip to the deliverable's
+    portrait aspect when the episode is short-native.
+
+    scene_planner.order_and_filter_scenes() forces production_spec.aspect_ratio
+    to 9:16 for every VPD scene, but that forced value is not always persisted
+    onto the scene dicts this agent later reads from the visual_package — so a
+    repair or coverage-fill clip built by build_scene_spec() inherits the "16:9"
+    default and the provider generates a landscape clip that then fails the
+    portrait source-resolution qualifier (>=1080x1920) on every retry. This is
+    the same single deterministic guarantee scene_planner applies, at this
+    agent's submit_scene() call sites. No-op unless SHORT_NATIVE_MODE.
+    """
+    if getattr(config, "SHORT_NATIVE_MODE", False) is not True:
+        return
+    want = getattr(config, "SHORT_NATIVE_ASPECT_RATIO", "9:16") or "9:16"
+    vs = scene_spec.get("visual_spec")
+    if isinstance(vs, dict):
+        vs["aspect_ratio"] = want
+    ps = scene_spec.get("production_spec")
+    if isinstance(ps, dict):
+        ps["aspect_ratio"] = want
+
+
 # ---------------------------------------------------------------------------
 # Result type
 # ---------------------------------------------------------------------------
@@ -303,6 +327,7 @@ def run_clip_repair(
                 # limitation (this path never worked at all before this
                 # fix), not a new regression.
                 submit_spec = build_scene_spec(missing_scene, entity_hosted_urls={})
+                _force_short_native_aspect(submit_spec, config)
 
                 # channel_id is included only when not None, so every
                 # existing caller's exact prior submit_scene() kwarg set
@@ -708,6 +733,7 @@ def fill_coverage_deficits(
                     # the shot) — never a shot-modified copy.
                     extra_scene_spec = build_scene_spec(scene, entity_hosted_urls={})
                     extra_scene_spec["scene_id"] = extra_scene_id
+                    _force_short_native_aspect(extra_scene_spec, config)
                     if planned_shot is not None:
                         # Selection, not construction (2026-08-07 refactor):
                         # swap in the shot's own pre-rendered prompt — the
@@ -1250,6 +1276,7 @@ def fill_confirmed_missing_shots(
 
             scene_spec = build_scene_spec(scene, entity_hosted_urls={})
             scene_spec["scene_id"] = extra_scene_id
+            _force_short_native_aspect(scene_spec, config)
             scene_spec["production_spec"]["primary_prompt"] = planned_shot.get("primary_prompt", "")
             scene_spec["production_spec"]["fallback_prompt"] = (
                 planned_shot.get("fallback_prompt") or planned_shot.get("primary_prompt", "")

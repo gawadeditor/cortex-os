@@ -3775,13 +3775,20 @@ def _submit_http(
 
         # Hard failures for this attempt — no retry within this attempt, but Attempt 2 possible
         if resp.status_code in _ATTEMPT_HARD_FAIL_CODES:
+            # Carry the provider's own error body — a 400/422 almost always
+            # names the exact bad/missing field (e.g. a model whose I2V
+            # reference field is image_url, not images_list). Without it the
+            # operator sees only "http_422" and cannot act.
+            _body = (resp.text or "")[:400]
             log.error(
                 "muapi_hard_failure",
                 scene_id=scene_id,
                 http_status=resp.status_code,
                 error_type=f"http_{resp.status_code}",
+                endpoint=endpoint,
+                response_body=_body,
             )
-            return None, f"http_{resp.status_code}"
+            return None, f"http_{resp.status_code}: {_body}"
 
         # Success — any 200/202
         if resp.status_code in (200, 202):
@@ -4306,9 +4313,9 @@ def _build_job_payload(
 
     I2V conditioning — field names differ by provider:
       - Veo3 / Veo3.1 I2V:  images_list = [url]  (array)
-      - Seedance I2V:        images_list = [url]  (array; 2026-06-06 benchmark)
-      - Runway I2V:          image_url   = url    (single string; confirmed 2026-06-06 live probe:
-                            422 body {"loc":["body","image_url"],"msg":"Field required"})
+      - Runway I2V:          image_url   = url    (single string)
+      - Seedance I2V:        image_url   = url    (single string; 2026-09-01 live probe
+                            of seedance-pro-i2v-fast — 422 without it, HTTP 200 with it)
       - Only included when reference_image_url is non-empty
     """
     payload: dict = {
@@ -4345,11 +4352,14 @@ def _build_job_payload(
         # seedance-lite-i2v, seedance-2-mini-*, ...). Substring-matched so a
         # channel can adopt any current Seedance variant via the bake-off
         # without this file changing. Duration is left to the provider default
-        # (~5s, ffprobe-confirmed 2026-09-01); the I2V variants take the
-        # reference image as images_list = [url] (array), same as Veo3 —
-        # confirmed in the 2026-06-06 Seedance benchmark.
+        # (~5s, ffprobe-confirmed 2026-09-01). The I2V variants take the
+        # reference image as image_url = "<url>" (single string) — NOT
+        # images_list (array); confirmed 2026-09-01 by a live probe of
+        # seedance-pro-i2v-fast (422 body: {"loc":["body","image_url"],
+        # "msg":"Field required"}; image_url -> HTTP 200). Same field name as
+        # Runway I2V, different from Veo3/Veo3.1 (images_list).
         if reference_image_url:
-            payload["images_list"] = [reference_image_url]
+            payload["image_url"] = reference_image_url
 
     # For image models: no duration or images_list
     return payload

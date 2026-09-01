@@ -1560,15 +1560,17 @@ class TestInternalHelpers:
         )
         assert payload["duration"] == 8
 
-    def test_seedance_i2v_payload_uses_images_list_and_no_duration(self):
+    def test_seedance_i2v_payload_uses_image_url_string_and_no_duration(self):
         # Seedance family is substring-matched: any current variant (t2v-fast,
         # i2v-fast, lite-i2v, 2-mini-*) an operator adopts via the bake-off.
+        # 2026-09-01 live probe: seedance-pro-i2v-fast wants image_url (string),
+        # NOT images_list (array) — same field name as Runway, unlike Veo3.
         payload = _build_job_payload(
             "prompt", "seedance-pro-i2v-fast", "9:16", 8.0, "http://ref.png"
         )
-        assert payload["images_list"] == ["http://ref.png"]
-        assert "image_url" not in payload   # NOT the runway single-string field
-        assert "duration" not in payload    # provider default (~5s)
+        assert payload["image_url"] == "http://ref.png"
+        assert "images_list" not in payload  # NOT the Veo3 array field
+        assert "duration" not in payload     # provider default (~5s)
 
     def test_seedance_t2v_payload_is_bare_prompt_and_aspect(self):
         payload = _build_job_payload(

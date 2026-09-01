@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Optional
 
 from hypogeum.agent import run_agent
+from hypogeum.channel_creative_brief import channel_brief_for
 from hypogeum.config import Config
 from hypogeum.humanizer import humanize_beats
 from hypogeum.logger import get_logger
@@ -138,6 +139,7 @@ def run_script_engine(
     _input_package: dict = {
         "task": "write_script",
         "narrative_package": narrative_package,
+        "channel_brief": channel_brief_for(channel_id),
     }
     if (getattr(config, "SHORT_NATIVE_MODE", False) is True):
         _max_words = int(getattr(config, "SHORT_NATIVE_MAX_NARRATION_WORDS", 150) or 150)

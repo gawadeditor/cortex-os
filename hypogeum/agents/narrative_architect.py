@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Optional
 
 from hypogeum.agent import run_agent
+from hypogeum.channel_creative_brief import channel_brief_for
 from hypogeum.config import Config
 from hypogeum.logger import get_logger
 from hypogeum.prompt_loader import load_prompt
@@ -109,6 +110,7 @@ def run_narrative_architect(
     _input_package: dict = {
         "task": "build_narrative",
         "research_package": research_package,
+        "channel_brief": channel_brief_for(channel_id),
     }
     if (getattr(config, "SHORT_NATIVE_MODE", False) is True):
         _input_package["production_mode"] = "short_native"

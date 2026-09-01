@@ -15,6 +15,7 @@ operations profile.
 
 Public API:
     build_creative_brief(channel_id, *, db_path=None) -> dict
+    channel_brief_for(channel_id) -> dict   # convenience for agents; tolerates None
 """
 
 from __future__ import annotations
@@ -170,3 +171,9 @@ def build_creative_brief(channel_id: str, *, db_path: Optional[Path] = None) -> 
     except Exception as exc:  # noqa: BLE001
         log.error("channel_creative_brief_error", channel_id=channel_id, error=str(exc))
         return {**_FALLBACK, "channel_id": channel_id}
+
+
+def channel_brief_for(channel_id: Optional[str]) -> dict:
+    """Convenience for agents: the brief for `channel_id`, or the fallback
+    brief when channel_id is falsy. Never raises."""
+    return build_creative_brief(channel_id or "")

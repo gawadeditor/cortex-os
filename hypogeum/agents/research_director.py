@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Optional
 
 from hypogeum.agent import run_agent
+from hypogeum.channel_creative_brief import channel_brief_for
 from hypogeum.config import Config
 from hypogeum.logger import get_logger
 from hypogeum.prompt_loader import load_prompt
@@ -345,6 +346,7 @@ def run_research_director(
             "perplexity_results": raw_results,
             "query_failures": query_failures,
             "source_registry": source_registry,
+            "channel_brief": channel_brief_for(channel_id),
         },
         output_schema="research_package",
         episode_id=episode_id,

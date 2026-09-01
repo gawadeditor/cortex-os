@@ -60,6 +60,30 @@
       {% else %}<p class="page-meta">No publishing profile.</p>{% endif %}
     </div>
 
+    <div class="card {{ 'is-good' if grant and grant.active else 'is-warn' }}">
+      <div class="card-title">Operating Grant</div>
+      {% if grant and grant.active %}
+      <div class="cs-fr"><span class="k">Status</span><span class="v" style="color:var(--good);">active · {{ grant.days_left }}d left</span></div>
+      <div class="cs-fr"><span class="k">Weekly ceiling</span><span class="v">${{ grant.weekly_exposure_ceiling_usd }}</span></div>
+      {% if grant.ceiling_matches_config is false %}
+      <div class="cs-fr"><span class="k">Note</span><span class="v miss">ceiling ≠ current budget — re-sign</span></div>
+      {% endif %}
+      {% else %}
+      <div class="cs-fr"><span class="k">Status</span><span class="v miss">not signed — autonomous production is blocked</span></div>
+      {% endif %}
+      <p style="font-size:11.5px; color:var(--muted); margin:8px 0 0; line-height:1.5;">
+        Authorizes the daily scheduler to produce for this channel without
+        per-episode approval, up to the weekly budget.
+      </p>
+      {% if grant_dashboard_signing %}
+      <a href="/channel/{{ channel.channel_id }}/operating-grant?scope={{ channel.channel_id }}" class="btn btn-primary" style="margin-top:10px;">
+        {{ icon('lock') }} {{ 'Re-sign grant' if grant and grant.active else 'Sign grant' }}
+      </a>
+      {% else %}
+      <a href="/channel/{{ channel.channel_id }}/operating-grant?scope={{ channel.channel_id }}" class="btn" style="margin-top:10px;">Signing instructions →</a>
+      {% endif %}
+    </div>
+
     <div class="card">
       <div class="card-title">Production plan</div>
       {% if ops %}

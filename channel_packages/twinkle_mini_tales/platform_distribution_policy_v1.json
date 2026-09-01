@@ -1,0 +1,48 @@
+{
+  "channel_id": "hypogeum",
+  "policy_id": "hypogeum_platform_distribution_policy_v1",
+  "policy_version": "1.3.0",
+  "created_at": "2026-08-22",
+  "updated_at": "2026-08-24",
+  "status": "installed",
+  "default_privacy_state": "public",
+  "default_privacy_state_source": "Operator decision, 2026-08-24: hypogeum's normal scheduled YouTube releases are public content, not permanently private uploads -- 'private' was a leftover placeholder from early bootstrap defaults, never a deliberate editorial choice for this channel's real releases. Factory Core never hardcodes this value (see hypogeum.channel_config._SUPPORTED_PRIVACY_STATES for the generic, channel-agnostic enum); it is read from this versioned Channel Package field alone.",
+  "rationale": "Zernio was introduced primarily to reach TikTok, Instagram, and Facebook -- platforms the prior YouTube-only direct adapter never covered. The main long-form episode is a documentary-style YouTube asset; it is not edited for the short-form-native platforms and has no approved editorial plan for Facebook long-form distribution. Shorts are already produced as 9:16 short-form content and are the natural fit for all four platforms. Facebook is deliberately excluded for the main episode pending a separate editorial/distribution decision -- this is NOT because Facebook lacks technical video support.",
+  "tiktok_privacy_value_source": "docs.zernio.com/platforms/tiktok, live-fetched 2026-08-22 -- the documented tiktokSettings.privacy_level enum is exactly {PUBLIC_TO_EVERYONE, MUTUAL_FOLLOW_FRIENDS, FOLLOWER_OF_CREATOR, SELF_ONLY}. PUBLIC_TO_EVERYONE is the value matching Hypogeum's intended public-distribution policy -- never invented, this exact string is the documented enum member.",
+  "youtube_category_source": "Operator decision, 2026-08-23: categoryId=\"27\" (Education) -- Hypogeum's documentary/archaeology-mystery content is editorially Education, not the Zernio-default \"22\" (People & Blogs) that shipped unconfigured on ep_f3619022. Applies to every YouTube deliverable class this channel publishes (main_episode and shorts) -- a categoryId is a per-video editorial classification, not a main-episode-only concept.",
+  "ai_disclosure_source": "Operator decision, 2026-08-23: this channel's videos use AI-assisted narration/visuals throughout production, so containsSyntheticMedia=true is the honest disclosure for every YouTube deliverable class, not a main-episode-only concept. Never a Factory Core default -- see hypogeum.publishing.canonical_metadata.validate_canonical_platform_metadata(), which fails closed if a policy declares no value at all.",
+  "platform_deliverable_policy": {
+    "youtube": {
+      "main_episode": {"enabled": true, "categoryId": "27", "ai_disclosure": true},
+      "shorts": {"enabled": true, "categoryId": "27", "ai_disclosure": true}
+    },
+    "tiktok": {
+      "main_episode": {"enabled": false},
+      "shorts": {
+        "enabled": true,
+        "privacy": "PUBLIC_TO_EVERYONE",
+        "content_preview_confirmed": true,
+        "express_consent_given": true,
+        "allow_comment": true,
+        "allow_duet": true,
+        "allow_stitch": true
+      }
+    },
+    "instagram": {
+      "main_episode": {"enabled": false},
+      "shorts": {"enabled": true}
+    },
+    "facebook": {
+      "main_episode": {"enabled": false},
+      "shorts": {"enabled": true}
+    }
+  },
+  "known_gaps": [
+    "Facebook main_episode=false is a deliberate scope decision for this policy version, not a technical limitation -- see rationale.",
+    "This policy only declares WHICH platform/deliverable-class combinations are permitted and their per-platform policy fields. It does not itself declare per-platform schedule times (see scheduling_policy_v1.json's bundle_cycle_policy) or canonical captions/titles (see hypogeum.publishing.canonical_metadata -- generated per episode, not policy-declared).",
+    "v1.2.0 adds youtube.main_episode/shorts.categoryId=\"27\" and ai_disclosure=true (operator decision, 2026-08-23 -- the ep_f3619022 incident shipped with both fields unconfigured, silently leaving Zernio's own default categoryId=\"22\" and no synthetic-media disclosure). Also folds in the tiktok.shorts consent fields (content_preview_confirmed/express_consent_given/allow_comment/allow_duet/allow_stitch) that v1.1.0 was missing but that were already live in the runtime database as of the 2026-08-23 TikTok addition -- this file is the authoritative source going forward; the database must never diverge from it silently again.",
+    "Instagram/Facebook have no documented AI-disclosure or category field verified yet -- see docs/operations/audits/ZERNIO_YOUTUBE_FIELD_MAPPING_2026-08-23.md. Only YouTube's categoryId/containsSyntheticMedia are wired into hypogeum.publishing.canonical_metadata.build_zernio_platform_specific_data().",
+    "v1.3.0 adds default_privacy_state=\"public\" (operator decision, 2026-08-24, closing the ep_f3619022 main-episode replacement's own scheduled-release-visibility gap -- the channel's real releases are public, 'private' was never a deliberate choice)."
+  ],
+  "installation": "Applied via hypogeum.channel_config.sync_platform_distribution_policy_to_runtime(channel_id='hypogeum') -- the sole sanctioned path from this versioned file into the runtime channel_operations_profiles row. That function verifies this file's live sha256 against channel_package_manifest.json's registered 'platform_distribution_policy' artifact entry (fails closed on drift) before compiling it into update_channel_operations_profile(). A direct update_channel_operations_profile(platform_deliverable_policy=...) call that bypasses this file is no longer the sanctioned way to change this channel's platform policy."
+}

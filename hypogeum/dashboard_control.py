@@ -675,9 +675,21 @@ def create_channel(
         except Exception:  # never fail channel creation on schedule wiring
             pass
 
+        # Scaffold the on-disk Channel Package (workflow + policies + manifest)
+        # from the hypogeum template so the channel can resolve a workflow
+        # binding / be granted an Operating Grant. Never fails channel creation.
+        package_scaffolded = False
+        try:
+            from hypogeum.channel_package_scaffold import scaffold_channel_package
+            _sc = scaffold_channel_package(channel_id, db_path=db_path)
+            package_scaffolded = bool(_sc.get("ok"))
+        except Exception:  # noqa: BLE001
+            pass
+
         return _ok(channel_id=channel_id, name=name,
                    operations_profile_created=ops_created, shorts_only=shorts_only,
-                   schedule_created=schedule_created)
+                   schedule_created=schedule_created,
+                   package_scaffolded=package_scaffolded)
     except ValueError as exc:
         return _err(str(exc), "invalid")
     except Exception as exc:

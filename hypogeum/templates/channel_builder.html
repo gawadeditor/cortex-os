@@ -365,10 +365,15 @@ function panel(){
       </div>
 
       <div class="card is-warn">
-        <div class="card-title">2 · Sign the Operating Grant <span class="muted" style="font-weight:400;text-transform:none;letter-spacing:0">— a money decision, signed offline</span></div>
-        <p class="cb-step-sub" style="margin-bottom:10px">This authorizes autonomous paid generation for this channel over a bounded period. The Ed25519 key never touches the dashboard — run this once in a terminal on this machine:</p>
-        <div class="cb-cmd"><code id="a-cmd">${esc(cmd)}</code><button class="btn btn-sm" id="a-copy">Copy</button></div>
-        <div class="btn-row" style="margin-top:10px"><button class="btn" id="a-recheck">↻ Re-check readiness</button></div>
+        <div class="card-title">2 · Sign the Operating Grant <span class="muted" style="font-weight:400;text-transform:none;letter-spacing:0">— a money decision</span></div>
+        <p class="cb-step-sub" style="margin-bottom:10px">This authorizes autonomous paid generation for this channel over a bounded period, up to the weekly budget.</p>
+        <div class="btn-row">
+          <a class="btn btn-primary" href="/channel/${esc(S.channel_id)}/operating-grant?scope=${esc(S.channel_id)}">🔒 Sign the grant</a>
+          <button class="btn" id="a-recheck">↻ Re-check readiness</button>
+        </div>
+        <details style="margin-top:10px"><summary class="muted" style="font-size:12px;cursor:pointer">or sign from a terminal</summary>
+          <div class="cb-cmd" style="margin-top:8px"><code id="a-cmd">${esc(cmd)}</code><button class="btn btn-sm" id="a-copy">Copy</button></div>
+        </details>
       </div>
 
       <div class="card">

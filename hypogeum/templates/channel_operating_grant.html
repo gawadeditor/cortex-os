@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{{ channel.name }} — Operating Grant</title>
+  {% include '_base_style.html' %}
+  {% from '_icons.html' import icon %}
+  <style>
+    .og-warn { border: 1px solid var(--warn); background: var(--warn-bg, var(--raised));
+      border-radius: var(--radius); padding: 16px 18px; margin-bottom: var(--gap); }
+    .og-warn strong { color: var(--warn); }
+    .og-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px,1fr)); gap: 12px 20px; }
+    .og-k { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--faint); }
+    .og-v { font-size: 14px; font-weight: 600; margin-top: 3px; }
+    .og-confirm { margin-top: 16px; display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+    .og-confirm label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+    .og-confirm input { padding: 9px 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+      background: var(--surface); color: var(--text); font: inherit; font-size: 15px; width: 160px;
+      font-variant-numeric: tabular-nums; }
+    .og-cmd { font-family: var(--font-mono, monospace); font-size: 12px; background: var(--raised);
+      border-radius: var(--radius-sm); padding: 12px 14px; overflow-x: auto; white-space: pre; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+
+<div class="container">
+  <div class="page-header">
+    <span class="eyebrow"><a href="/channel/{{ channel.channel_id }}/settings?scope={{ channel.channel_id }}">← {{ channel.name }} settings</a></span>
+    <h1>Channel Operating Grant</h1>
+  </div>
+
+  {% if error %}<div class="flash flash-err">{{ error }}</div>{% endif %}
+
+  {% if grant and grant.active %}
+  <div class="flash flash-ok">
+    Active grant — {{ grant.days_left }} days left, ${{ grant.weekly_exposure_ceiling_usd }}/week.
+    {% if grant.ceiling_matches_config is false %}<strong> · ceiling no longer matches the budget — re-sign.</strong>{% endif %}
+  </div>
+  {% endif %}
+
+  {% if not preview.ok %}
+  <div class="card"><p>Can't prepare the grant: {{ preview.error }}</p></div>
+  {% elif not can_sign %}
+  <div class="card">
+    <div class="card-title">Sign from a terminal</div>
+    <p style="font-size:12.5px; color:var(--muted); margin-bottom:10px;">
+      Dashboard signing is off (the Ed25519 private key isn't on this machine).
+      Run this on the server:
+    </p>
+    <div class="og-cmd">python3 tools/configure_channel_operating_grant.py --channel {{ channel.channel_id }} --apply --db .hypogeum-assets/hypogeum.db --i-understand-this-is-production --private-key approval_ed25519_private_key.pem</div>
+  </div>
+  {% else %}
+
+  <div class="og-warn">
+    <strong>This authorizes autonomous paid production.</strong>
+    Once signed, the daily scheduler can produce episodes for
+    <strong>{{ channel.name }}</strong> without any further approval, up to
+    <strong>${{ preview.weekly_ceiling_usd }}/week</strong>, for
+    <strong>{{ preview.valid_days }} days</strong>. The weekly ledger stays the
+    hard spend cap; this is a ceiling, not budget. Changing the channel's
+    weekly budget later invalidates the grant (you re-sign).
+  </div>
+
+  <div class="card">
+    <div class="card-title">What gets signed</div>
+    <div class="og-grid">
+      <div><div class="og-k">Weekly ceiling</div><div class="og-v">${{ preview.weekly_ceiling_usd }} {{ preview.currency }}</div></div>
+      <div><div class="og-k">Valid</div><div class="og-v">{{ preview.valid_days }} days</div></div>
+      <div><div class="og-k">Expires</div><div class="og-v">{{ preview.expires_at[:10] }}</div></div>
+      <div><div class="og-k">Workflow</div><div class="og-v" style="font-family:var(--font-mono,monospace); font-size:12px;">{{ preview.workflow }}</div></div>
+      <div><div class="og-k">Provider domains</div><div class="og-v" style="font-size:12px;">{{ preview.domains | length }}</div></div>
+      <div><div class="og-k">Bindings</div><div class="og-v">{{ preview.binding_count }}</div></div>
+    </div>
+
+    <form method="post" class="og-confirm">
+      <div>
+        <label for="confirm_ceiling">Type the weekly ceiling to confirm</label>
+        <input type="text" id="confirm_ceiling" name="confirm_ceiling"
+               inputmode="decimal" autocomplete="off" placeholder="{{ preview.weekly_ceiling_usd }}">
+      </div>
+      <button type="submit" class="btn btn-primary">{{ icon('lock') }} Sign the grant</button>
+    </form>
+  </div>
+  {% endif %}
+</div>
+</body>
+</html>

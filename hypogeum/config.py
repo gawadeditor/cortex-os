@@ -707,6 +707,16 @@ class Config:
         # A public key is safe to store in ordinary deployment config: it
         # can verify a signature but cannot forge one.
         self.AUTHORIZATION_APPROVAL_PUBLIC_KEY = _get_optional("AUTHORIZATION_APPROVAL_PUBLIC_KEY")
+        # Path to the Ed25519 PRIVATE key PEM used to sign a Channel Operating
+        # Grant. Only ever read by a short-lived signing subprocess
+        # (tools/configure_channel_operating_grant.py) that the dashboard
+        # spawns and that then exits -- no long-running process (dashboard,
+        # worker, pipeline) imports the signer or holds the key. When the
+        # file is absent/unreadable, dashboard signing is unavailable and the
+        # operator is shown the CLI command instead (air-gapped deployments).
+        self.AUTHORIZATION_APPROVAL_PRIVATE_KEY_PATH = _get_optional(
+            "AUTHORIZATION_APPROVAL_PRIVATE_KEY_PATH",
+            default="approval_ed25519_private_key.pem")
 
         # --- ElevenLabs ---
         self.ELEVENLABS_API_KEY = _get_optional("ELEVENLABS_API_KEY")

@@ -6864,9 +6864,100 @@ def channel_settings_page(channel_id):
         ops = get_channel_operations_profile(channel_id, db_path=db)
     except Exception:  # noqa: BLE001
         ops = None
+    grant = {}
+    try:
+        from hypogeum.channel_runtime_status import get_channel_runtime_status
+        grant = (get_channel_runtime_status(channel_id, db_path=db) or {}).get("operating_grant") or {}
+    except Exception:  # noqa: BLE001
+        grant = {}
+    try:
+        from hypogeum.grant_signing import can_sign_from_dashboard
+        grant_dashboard_signing = can_sign_from_dashboard()
+    except Exception:  # noqa: BLE001
+        grant_dashboard_signing = False
     return render_template("channel_settings.html",
                            channel=channel, brand=brand, model=model,
-                           publishing=publishing, ops=ops)
+                           publishing=publishing, ops=ops, grant=grant,
+                           grant_dashboard_signing=grant_dashboard_signing)
+
+
+@app.route("/channel/<channel_id>/operating-grant", methods=["GET", "POST"])
+def channel_operating_grant_page(channel_id):
+    """Sign / re-sign this channel's ADR-016 Operating Grant from the
+    dashboard. The signing itself is a short-lived subprocess that reads
+    the offline key and exits — see hypogeum.grant_signing."""
+    db = _db_path()
+    channel = get_channel_detail(channel_id, db_path=db)
+    if channel is None:
+        return render_template("not_found.html", kind="Channel", id=channel_id), 404
+
+    from hypogeum.grant_signing import (
+        can_sign_from_dashboard, preview_channel_operating_grant,
+        sign_channel_operating_grant,
+    )
+    from hypogeum.channel_package_scaffold import channel_package_exists, scaffold_channel_package
+
+    if request.method == "POST":
+        if not can_sign_from_dashboard():
+            return redirect(url_for("channel_operating_grant_page",
+                                    channel_id=channel_id, scope=channel_id))
+        # confirm friction: the operator must type the weekly ceiling
+        try:
+            from hypogeum.channel_budget_policy import resolve_configured_weekly_limit
+            from hypogeum.db import get_connection as _gc
+            _c = _gc(db)
+            try:
+                _tz, weekly_limit, _ref = resolve_configured_weekly_limit(channel_id, conn=_c)
+            finally:
+                _c.close()
+        except Exception:  # noqa: BLE001
+            weekly_limit = None
+        typed = (request.form.get("confirm_ceiling") or "").strip().lstrip("$").replace(",", "")
+        try:
+            ok_amount = weekly_limit is not None and abs(float(typed) - float(weekly_limit)) < 0.005
+        except ValueError:
+            ok_amount = False
+        if not ok_amount:
+            return render_template("channel_operating_grant.html",
+                                   channel=channel, can_sign=True,
+                                   preview=preview_channel_operating_grant(channel_id, db),
+                                   grant=_grant_status(channel_id, db),
+                                   error="the amount you typed doesn't match this "
+                                         "channel's weekly budget — nothing signed"), 422
+
+        if not channel_package_exists(channel_id):
+            scaffold_channel_package(channel_id, db_path=db)
+        res = sign_channel_operating_grant(
+            channel_id,
+            approver_identity=f"dashboard:{request.remote_addr or 'local'}",
+        )
+        try:
+            _audit_note(f"operating_grant_signed channel={channel_id} "
+                        f"ok={res['ok']} grant={res.get('grant_id')}")
+        except Exception:  # noqa: BLE001
+            pass
+        return redirect(url_for("channel_detail", channel_id=channel_id)
+                        + f"?scope={channel_id}&grant="
+                        + ("signed" if res["ok"] else "failed"))
+
+    return render_template("channel_operating_grant.html",
+                           channel=channel,
+                           can_sign=can_sign_from_dashboard(),
+                           preview=preview_channel_operating_grant(channel_id, db),
+                           grant=_grant_status(channel_id, db),
+                           error=None)
+
+
+def _grant_status(channel_id, db):
+    try:
+        from hypogeum.channel_runtime_status import get_channel_runtime_status
+        return (get_channel_runtime_status(channel_id, db_path=db) or {}).get("operating_grant") or {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _audit_note(msg: str):
+    app.logger.info("AUDIT %s", msg)
 
 
 # ── Brand profile edit ─────────────────────────────────────────────────────

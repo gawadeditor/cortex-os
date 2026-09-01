@@ -73,24 +73,32 @@ def get_channel_readiness(channel_id: str, db_path: Optional[Path] = None) -> di
 
     grant = rt.get("operating_grant") or {}
     ops = rt.get("operations") or {}
+    try:
+        from hypogeum.grant_signing import can_sign_from_dashboard  # noqa: PLC0415
+        _dash_sign = can_sign_from_dashboard()
+    except Exception:  # noqa: BLE001
+        _dash_sign = False
+    _dash_fix = (f"Sign it on the channel's Settings → Operating Grant "
+                 f"(/channel/{channel_id}/operating-grant).")
+    _cli_fix = ("Run in a terminal on the server:  python3 "
+                "tools/configure_channel_operating_grant.py --channel "
+                f"{channel_id} --apply --db .hypogeum-assets/hypogeum.db "
+                "--i-understand-this-is-production --private-key "
+                "approval_ed25519_private_key.pem")
     if ops.get("operator_enabled"):
         if not grant.get("active"):
             items.append(_item(
                 "grant.active", "blocker", "Channel Operating Grant",
                 "no active grant — autonomous paid work cannot be authorized. "
-                "This is a deliberate money decision that is signed offline, "
-                "never from the dashboard.",
-                "Run in a terminal on this machine:  python3 "
-                "tools/configure_channel_operating_grant.py --channel "
-                f"{channel_id} --apply --db .hypogeum-assets/hypogeum.db "
-                "--i-understand-this-is-production --private-key "
-                "approval_ed25519_private_key.pem",
+                "This is a deliberate money decision.",
+                _dash_fix if _dash_sign else _cli_fix,
             ))
         elif grant.get("ceiling_matches_config") is False:
             items.append(_item(
                 "grant.ceiling", "blocker", "Channel Operating Grant",
                 "grant weekly ceiling no longer matches the configured budget.",
-                "Re-sign the grant after the budget change.",
+                (_dash_fix if _dash_sign else _cli_fix)
+                + "  Re-sign after the budget change.",
             ))
         else:
             items.append(_item(

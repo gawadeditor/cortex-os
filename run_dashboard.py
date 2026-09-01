@@ -2464,6 +2464,12 @@ def legacy_dashboard():
     except Exception:
         attention_summary = {"total": 0, "blocking": 0, "action_required": 0, "warnings": 0}
 
+    try:
+        from hypogeum.dashboard_rollup import get_factory_rollup
+        rollup = get_factory_rollup(db_path=_db_path())
+    except Exception:  # noqa: BLE001
+        rollup = None
+
     return render_template(
         "exec_dashboard.html",
         state=state,
@@ -2474,6 +2480,7 @@ def legacy_dashboard():
         recent_episodes=db_episodes,
         next_action=next_action,
         attention_summary=attention_summary,
+        rollup=rollup,
     )
 
 
@@ -6493,9 +6500,19 @@ def channel_detail(channel_id):
         readiness = get_channel_readiness(channel_id, db_path=db)
     except Exception:
         readiness = None
+    try:
+        from hypogeum.dashboard_rollup import get_channel_rollup
+        rollup = get_channel_rollup(channel_id, db_path=db)
+    except Exception:  # noqa: BLE001
+        rollup = None
+    try:
+        recent_runs = list_runs(db_path=db, channel_id=channel_id, limit=6)
+    except Exception:  # noqa: BLE001
+        recent_runs = []
     return render_template("channel_detail.html",
                            channel=channel, brand=brand, model=model, publishing=publishing,
-                           runtime=runtime, recommendations=recommendations, readiness=readiness)
+                           runtime=runtime, recommendations=recommendations, readiness=readiness,
+                           rollup=rollup, recent_runs=recent_runs)
 
 
 @app.route("/channel/<channel_id>/edit", methods=["GET", "POST"])

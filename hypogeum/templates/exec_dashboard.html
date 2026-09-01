@@ -247,6 +247,59 @@
 </div>
 </div><!-- /.home-hero -->
 
+{% macro big(n) -%}
+{%- if n is none -%}—
+{%- elif n >= 1000000 -%}{{ '%.1f'|format(n/1000000) }}M
+{%- elif n >= 1000 -%}{{ '%.1f'|format(n/1000) }}K
+{%- else -%}{{ n|int }}{%- endif -%}
+{%- endmacro %}
+
+{% if rollup %}
+<div class="page-header" style="margin:6px 0 10px;">
+  <div><span class="eyebrow">Factory</span><h2 style="font-size:16px;">Across all channels</h2></div>
+</div>
+<div class="t1 skin-stagger" style="grid-template-columns:repeat(5,1fr);">
+  <div class="t1-card is-accent">
+    <div class="t1-val" {% if rollup.views is not none %}data-countup="{{ rollup.views }}"{% endif %}>{{ big(rollup.views) }}</div>
+    <div class="t1-lbl">Total views</div>
+  </div>
+  <div class="t1-card">
+    <div class="t1-val">{% if rollup.watch_time_s is not none %}{{ big((rollup.watch_time_s/3600)|round(1)) }}h{% else %}—{% endif %}</div>
+    <div class="t1-lbl">Watch time</div>
+  </div>
+  <div class="t1-card">
+    <div class="t1-val" data-countup="{{ rollup.episodes_published }}">{{ rollup.episodes_published }}</div>
+    <div class="t1-lbl">Episodes published</div>
+  </div>
+  <div class="t1-card">
+    <div class="t1-val">{% if rollup.spend_30d_usd is not none %}${{ big(rollup.spend_30d_usd) }}{% else %}—{% endif %}</div>
+    <div class="t1-lbl">Spend · 30 days</div>
+    <div class="t1-sub">{% if rollup.spend_all_usd is not none %}${{ big(rollup.spend_all_usd) }} all-time{% endif %}</div>
+  </div>
+  <div class="t1-card">
+    <div class="t1-val">{% if rollup.revenue_est_usd is not none %}${{ big(rollup.revenue_est_usd) }}{% else %}—{% endif %}</div>
+    <div class="t1-lbl">Revenue (est.)</div>
+    <div class="t1-sub">{% if rollup.revenue_est_usd is none %}no platform revenue data{% endif %}</div>
+  </div>
+</div>
+
+{% if rollup.by_channel %}
+<div class="grid-auto" style="margin-bottom:var(--gap);">
+  {% for ch in rollup.by_channel %}
+  <a class="card" href="/channel/{{ ch.channel_id }}?scope={{ ch.channel_id }}" style="display:block;">
+    <div class="card-title" style="margin-bottom:8px;">{{ ch.name }}</div>
+    <div style="display:flex; gap:18px; flex-wrap:wrap; font-size:12.5px;">
+      <span><strong style="font-size:15px;">{{ big(ch.views) }}</strong><br><span style="color:var(--faint)">views</span></span>
+      <span><strong style="font-size:15px;">{{ ch.episodes_published }}</strong><br><span style="color:var(--faint)">published</span></span>
+      <span><strong style="font-size:15px;">{% if ch.spend_all_usd is not none %}${{ big(ch.spend_all_usd) }}{% else %}—{% endif %}</strong><br><span style="color:var(--faint)">spend</span></span>
+      {% if ch.active_runs %}<span style="color:var(--accent)">● {{ ch.active_runs }} running</span>{% endif %}
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% endif %}
+{% endif %}
+
 {% if attention_summary and attention_summary.total > 0 %}
 <div class="action-banner">
   <div class="action-banner-body">

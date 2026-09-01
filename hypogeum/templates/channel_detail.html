@@ -49,6 +49,45 @@
   <div class="flash flash-ok">✓ Production plan saved — {{ request.args.get('ops_saved') }}</div>
   {% endif %}
 
+  {% macro big(n) -%}
+  {%- if n is none -%}—
+  {%- elif n >= 1000000 -%}{{ '%.1f'|format(n/1000000) }}M
+  {%- elif n >= 1000 -%}{{ '%.1f'|format(n/1000) }}K
+  {%- else -%}{{ n|int }}{%- endif -%}
+  {%- endmacro %}
+  {% if rollup %}
+  <div class="kpi-strip" style="grid-template-columns:repeat(4,1fr);">
+    <div class="kpi-card">
+      <div class="kpi-val" {% if rollup.views is not none %}data-countup="{{ rollup.views }}"{% endif %}>{{ big(rollup.views) }}</div>
+      <div class="kpi-lbl" style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--faint);margin-top:6px;">Views</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-val">{% if rollup.watch_time_s is not none %}{{ big((rollup.watch_time_s/3600)|round(1)) }}h{% else %}—{% endif %}</div>
+      <div class="kpi-lbl" style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--faint);margin-top:6px;">Watch time</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-val" data-countup="{{ rollup.episodes_published }}">{{ rollup.episodes_published }}</div>
+      <div class="kpi-lbl" style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--faint);margin-top:6px;">Published</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-val">{% if rollup.spend_all_usd is not none %}${{ big(rollup.spend_all_usd) }}{% else %}—{% endif %}</div>
+      <div class="kpi-lbl" style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--faint);margin-top:6px;">Spend (all-time)</div>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if recent_runs %}
+  <div class="card">
+    <div class="card-title">Recent runs</div>
+    {% for r in recent_runs %}
+    <div style="display:flex; justify-content:space-between; gap:12px; font-size:12.5px; padding:5px 0; border-bottom:1px solid var(--hairline);">
+      <a href="/run/{{ r.run_id }}" class="mono">{{ r.episode_title or r.episode_id or r.run_id[:12] }}</a>
+      <span style="color:var(--muted)">{{ r.status }} · {{ (r.started_at or '')[:16] }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
   {# ── Readiness: can this channel run autonomously, and what's blocking it ── #}
   {% if readiness %}
   {% set c = readiness.counts %}

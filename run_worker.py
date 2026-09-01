@@ -98,6 +98,7 @@ _ANALYTICS_SYNC_EVERY_N = int(_os.environ.get("ANALYTICS_SYNC_EVERY_N_ITERATIONS
 # Logging
 # ---------------------------------------------------------------------------
 
+logging.Formatter.converter = time.gmtime  # %(asctime)s in real UTC, not local
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-7s  %(message)s",
@@ -599,6 +600,25 @@ def _refresh_scheduling_evidence_for_all_channels(db_path: Path) -> dict:
     return result
 
 
+def _topic_text_for_id(topic_id: str | None, db_path: Path) -> str | None:
+    """Human topic text for an episode_topics.topic_id, or None."""
+    if not topic_id:
+        return None
+    try:
+        from hypogeum.db import get_connection
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                "SELECT topic_text FROM episode_topics WHERE topic_id = ?",
+                (topic_id,),
+            ).fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _check_and_refill_queue(
     db_path: Path,
     threshold: int,
@@ -831,6 +851,32 @@ def _check_and_refill_queue(
             cycle.get("candidate_count", 0),
             cycle.get("selected_candidate_id"),
         )
+
+        # ── v2 Discovery Director already selected + routed the winner ────
+        # (it honours AUTO_DISCOVERY_AUTO_APPROVE itself). Report what it did
+        # and do NOT run the v1 approve path — that would double-enqueue.
+        if cycle.get("already_routed"):
+            if cycle.get("already_enqueued"):
+                topic_text = _topic_text_for_id(cycle.get("enqueued_topic_id"), db_path)
+                result["topics_enqueued"].append(topic_text or cycle.get("enqueued_topic_id"))
+                log.info(
+                    "discovery_auto_enqueued channel=%s topic=%r topic_id=%s",
+                    channel_id, topic_text, cycle.get("enqueued_topic_id"),
+                )
+            elif cycle.get("selected_candidate_id"):
+                log.info(
+                    "discovery_selected_pending_approval channel=%s cycle_id=%s "
+                    "opportunity=%s route=%s",
+                    channel_id, cycle_id, cycle.get("selected_candidate_id"),
+                    cycle.get("route_status", ""),
+                )
+            else:
+                log.info(
+                    "discovery_no_viable_candidate channel=%s cycle_id=%s "
+                    "(director found %d candidates, none cleared selection)",
+                    channel_id, cycle_id, cycle.get("candidate_count", 0),
+                )
+            continue
 
         # ── Auto-approve: enqueue top candidate without operator input ────
         if not auto_approve:

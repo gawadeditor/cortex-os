@@ -405,10 +405,18 @@ def _run_discovery_cycle_v2_stub(
     from hypogeum.agents.discovery_director import run as _director_run
     cfg = _build_v2_config()
     result = _director_run(channel_id, config=cfg, db_path=db_path)
-    # Patch in v1-compatible keys so existing consumers don't break on a
-    # partial dict (run_worker reads selected_candidate_id and candidates).
-    result.setdefault("selected_candidate_id", None)
+    # Map the v2 director's result onto the v1-shaped keys the worker reads.
+    # The v2 director does its OWN winner selection + routing/enqueue (honouring
+    # AUTO_DISCOVERY_AUTO_APPROVE) — so when it has already enqueued a topic,
+    # the worker must NOT try to approve a candidate a second time. Surface
+    # that explicitly instead of leaving selected_candidate_id=None, which the
+    # worker (correctly, for v1) treats as "nothing was selected".
+    enqueued_topic_id = result.get("topic_id_enqueued")
+    result.setdefault("selected_candidate_id", result.get("selected_opportunity_id"))
     result.setdefault("candidates", result.get("opportunities", []))
+    result["already_routed"] = True                       # v2 owns routing
+    result["already_enqueued"] = bool(enqueued_topic_id)
+    result["enqueued_topic_id"] = enqueued_topic_id
     return result
 
 

@@ -89,6 +89,12 @@ def run_executive_producer(
         SchemaError        — Response JSON failed schema validation.
         Any exception from hypogeum.openrouter that run_agent() propagates unchanged.
     """
+    # The channel's editorial identity — what this channel is, who it's for,
+    # and what makes a good topic FOR IT. The Core prompt describes only the
+    # role; the channel supplies the subject / audience / standard of quality.
+    from hypogeum.channel_creative_brief import build_creative_brief  # noqa: PLC0415
+    channel_brief = build_creative_brief(channel_id) if channel_id else build_creative_brief("")
+
     # -----------------------------------------------------------------------
     # Call 1: Validation Scorecard — always executed
     # -----------------------------------------------------------------------
@@ -96,7 +102,8 @@ def run_executive_producer(
         agent_name=_AGENT_NAME,
         model_slug=getattr(config, "EP_MODEL", _MODEL_SLUG),
         system_prompt=SYSTEM_PROMPT,
-        input_package={"task": "validate_topic", "topic": topic_input},
+        input_package={"task": "validate_topic", "topic": topic_input,
+                       "channel_brief": channel_brief},
         output_schema="validation_scorecard",
         episode_id=episode_id,
         max_tokens=_MAX_TOKENS,
@@ -127,6 +134,7 @@ def run_executive_producer(
             "task": "create_topic_brief",
             "topic": topic_input,
             "scorecard": scorecard,
+            "channel_brief": channel_brief,
         },
         output_schema="topic_brief",
         episode_id=episode_id,

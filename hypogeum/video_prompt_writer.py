@@ -850,6 +850,8 @@ def assemble_video_scene_prompt(
     lighting_forbidden_fn: Optional[Callable[[], list]] = None,
     historical_directive_fn: Optional[Callable[[], str]] = None,
     historical_forbidden_fn: Optional[Callable[[], list]] = None,
+    *,
+    channel_id: Optional[str] = None,
 ) -> str:
     """
     Assemble one video scene prompt in the fixed section order:
@@ -935,9 +937,17 @@ def assemble_video_scene_prompt(
         raise ValueError("scene_content must include non-empty 'scene' text")
 
     video_dna_fn = video_dna_directive_fn or video_dna.describe_video_dna_constraints
-    brand_fn = brand_directive_fn or (
-        lambda: visual_identity.build_visual_identity_directive(mode=brand_mode)
-    )
+    # Per-channel brand identity (hypogeum.brand.channel_identity) when a
+    # channel_id is supplied and that channel has its own brand profile;
+    # otherwise the canonical Hypogeum identity, byte-identical to before.
+    if brand_directive_fn is not None:
+        brand_fn = brand_directive_fn
+    elif channel_id:
+        from hypogeum.brand import channel_identity  # noqa: PLC0415
+        brand_fn = lambda: channel_identity.build_channel_visual_identity_directive(  # noqa: E731
+            channel_id, mode=brand_mode)
+    else:
+        brand_fn = lambda: visual_identity.build_visual_identity_directive(mode=brand_mode)  # noqa: E731
     motion_fn = motion_directive_fn or motion_dna.describe_motion_constraints
     camera_fn = camera_directive_fn or camera_dna.describe_camera_constraints
     lighting_fn = lighting_directive_fn or lighting_dna.describe_lighting_constraints
@@ -950,7 +960,14 @@ def assemble_video_scene_prompt(
         )
     )
     video_dna_forbidden = list((video_dna_forbidden_fn or video_dna.get_video_dna_forbidden_items)())
-    brand_forbidden = list((brand_forbidden_fn or visual_identity.get_adaptive_video_forbidden_items)())
+    if brand_forbidden_fn is not None:
+        brand_forbidden = list(brand_forbidden_fn())
+    elif channel_id:
+        from hypogeum.brand import channel_identity  # noqa: PLC0415
+        brand_forbidden = list(
+            channel_identity.get_channel_adaptive_video_forbidden_items(channel_id))
+    else:
+        brand_forbidden = list(visual_identity.get_adaptive_video_forbidden_items())
     composition_forbidden = list((composition_forbidden_fn or (lambda: []))())
     motion_forbidden = list((motion_forbidden_fn or motion_dna.get_motion_forbidden_items)())
     camera_forbidden = list((camera_forbidden_fn or camera_dna.get_camera_forbidden_items)())

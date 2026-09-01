@@ -1359,8 +1359,10 @@ def submit_scene(
     # hypogeum/video_prompt_writer.py. Never concatenate raw strings here;
     # any cinematic-quality change belongs in hypogeum/video_dna.py or
     # hypogeum/brand/visual_identity.py, not in this function.
-    primary_prompt = video_prompt_writer.assemble_video_scene_prompt(prod_spec["primary_prompt"])
-    fallback_prompt = video_prompt_writer.assemble_video_scene_prompt(prod_spec["fallback_prompt"])
+    primary_prompt = video_prompt_writer.assemble_video_scene_prompt(
+        prod_spec["primary_prompt"], channel_id=channel_id)
+    fallback_prompt = video_prompt_writer.assemble_video_scene_prompt(
+        prod_spec["fallback_prompt"], channel_id=channel_id)
 
     eid = episode_id_for_asset or episode_id
     log = get_logger(episode_id=episode_id, agent=agent or "muapi")

@@ -902,7 +902,7 @@ def compile_production_plan(
         # must be computed identically or every real submission would
         # mismatch its own declared plan.
         raw_primary_prompt = routing.get("primary_prompt", "") or ""
-        primary_prompt = assemble_video_scene_prompt(raw_primary_prompt)
+        primary_prompt = assemble_video_scene_prompt(raw_primary_prompt, channel_id=channel_id)
 
         # Required asset — this scene's own real primary submission.
         assets.append(PlannedAsset(
@@ -945,7 +945,7 @@ def compile_production_plan(
                 # populated every shot before this call; if one is still
                 # bare, the plan simply carries no contingency asset for it.
                 continue
-            shot_prompt = assemble_video_scene_prompt(raw_shot_prompt)
+            shot_prompt = assemble_video_scene_prompt(raw_shot_prompt, channel_id=channel_id)
             extra_scene_id = f"{scene_id}__extra{order - 1}"
             assets.append(PlannedAsset(
                 deliverable_id=deliverable_id, beat_id=beat_id,

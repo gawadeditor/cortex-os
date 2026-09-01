@@ -34,6 +34,21 @@ def channel_package_exists(channel_id: str, *, packages_root: Optional[Path] = N
     return (root / channel_id / "channel_package_manifest.json").is_file()
 
 
+def channel_outro_path(
+    channel_id: str, *, packages_root: Optional[Path] = None,
+) -> Optional[Path]:
+    """The channel's fixed branded outro clip (``channel_packages/<id>/outro.mp4``),
+    or None when the channel has none. Assembly appends it verbatim to the end
+    of every episode's main render — a per-channel sign-off (e.g. a gentle
+    "follow for a story tomorrow" for a bedtime channel). Opt-in purely by the
+    file's presence; no config, no code change per channel."""
+    if not channel_id:
+        return None
+    root = Path(packages_root) if packages_root is not None else _PACKAGES
+    p = root / channel_id / "outro.mp4"
+    return p if p.is_file() else None
+
+
 def scaffold_channel_package(channel_id: str, *, db_path: Optional[Path] = None,
                              template: str = "hypogeum",
                              packages_root: Optional[Path] = None) -> dict:

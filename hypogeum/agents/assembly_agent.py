@@ -135,6 +135,74 @@ class ShortIdentityLinkageError(AssemblyAgentError):
     """
 
 
+def _probe_seconds(path: "Path") -> float:
+    import subprocess  # noqa: PLC0415
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        return float(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else 0.0
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _append_channel_outro(
+    main_render_path: "Path", channel_id: Optional[str], width: int, height: int,
+    frame_rate: int, ffmpeg_binary: str, log,
+) -> float:
+    """Concatenate the channel's fixed branded outro (channel_packages/<id>/
+    outro.mp4) onto the end of the main render, in place. Returns the seconds
+    added (0.0 when the channel has no outro, or on any failure — the episode
+    ships without it rather than not at all). The outro is branding, not
+    narrated story content, so it is appended AFTER the coverage check /
+    narration-completeness gate and never participates in either."""
+    import subprocess  # noqa: PLC0415
+    from hypogeum.channel_package_scaffold import channel_outro_path  # noqa: PLC0415
+
+    outro = channel_outro_path(channel_id or "")
+    if outro is None or not main_render_path.exists():
+        return 0.0
+    added = _probe_seconds(outro)
+    tmp = main_render_path.with_suffix(".with_outro.mp4")
+    # Re-encode both segments to one timebase/fps/size so concat is seamless
+    # regardless of what the operator's outro.mp4 was encoded at.
+    fc = (
+        f"[0:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={frame_rate},settb=AVTB[v0];"
+        f"[1:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={frame_rate},settb=AVTB[v1];"
+        f"[0:a]aresample=48000[a0];[1:a]aresample=48000[a1];"
+        f"[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]"
+    )
+    cmd = [
+        ffmpeg_binary, "-y", "-i", str(main_render_path), "-i", str(outro),
+        "-filter_complex", fc, "-map", "[v]", "-map", "[a]",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", str(frame_rate),
+        "-c:a", "aac", "-b:a", "160k", "-ar", "48000",
+        "-movflags", "+faststart", str(tmp),
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if r.returncode != 0 or not tmp.exists():
+            log.warn("assembly_channel_outro_append_failed", channel_id=channel_id,
+                     stderr=(r.stderr or "")[-300:])
+            tmp.unlink(missing_ok=True)
+            return 0.0
+        tmp.replace(main_render_path)
+        log.info("assembly_channel_outro_appended", channel_id=channel_id,
+                 outro=str(outro), seconds_added=round(added, 2))
+        return added
+    except Exception as exc:  # noqa: BLE001
+        log.warn("assembly_channel_outro_append_error", channel_id=channel_id, error=str(exc))
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+        return 0.0
+
+
 def _persist_visual_package_checkpoint(
     visual_package: dict,
     episode_id: str,
@@ -898,6 +966,34 @@ def run_assembly_agent(
     render_status = render_manifest["render_status"]
 
     # ------------------------------------------------------------------
+    # E1. Channel branded outro (2026-09-01) — append the channel's fixed
+    # sign-off clip (channel_packages/<channel_id>/outro.mp4) to the main
+    # render, if it has one. Branding, not narrated content: this runs
+    # AFTER the coverage / narration-completeness gates and never affects
+    # them. Best-effort — a failed append ships the episode without the
+    # outro rather than not at all.
+    # ------------------------------------------------------------------
+    _outro_seconds = 0.0
+    if render_manifest.get("main_render", {}).get("file_exists"):
+        try:
+            _res = str(render_manifest.get("main_resolution") or "1080x1920").lower().split("x")
+            _w, _h = int(_res[0]), int(_res[1])
+        except Exception:  # noqa: BLE001
+            _w, _h = 1080, 1920
+        _outro_seconds = _append_channel_outro(
+            Path(render_manifest["main_render"]["file_path"]),
+            channel_id, _w, _h,
+            int(render_manifest.get("frame_rate") or FRAME_RATE),
+            config.FFMPEG_BINARY if isinstance(getattr(config, "FFMPEG_BINARY", None), str) else "ffmpeg",
+            log,
+        )
+        if _outro_seconds > 0:
+            render_manifest["main_render"]["file_size_bytes"] = (
+                Path(render_manifest["main_render"]["file_path"]).stat().st_size
+            )
+            render_manifest["channel_outro_seconds"] = round(_outro_seconds, 3)
+
+    # ------------------------------------------------------------------
     # F. Final Render Package generation
     # ------------------------------------------------------------------
     # Write manifest to disk (separate artifact from final_render_package)
@@ -947,7 +1043,7 @@ def run_assembly_agent(
     )
     episode_render = {
         "video_asset_id": main_video_asset_id,
-        "duration_seconds": sum_timeline_duration(main_timeline),
+        "duration_seconds": sum_timeline_duration(main_timeline) + _outro_seconds,
         "resolution": render_manifest["main_resolution"],
         "frame_rate": render_manifest["frame_rate"],
         "scene_count": len(main_timeline),

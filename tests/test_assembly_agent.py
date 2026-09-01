@@ -3365,3 +3365,44 @@ class TestNarrationCompletenessGate:
             "narration_beats_without_a_video_scene"
         cc = result.get("coverage_check_summary") or {}
         assert cc.get("narrated_beats") == cc.get("beats_checked")
+
+
+class TestChannelBrandedOutro:
+    """channel_packages/<id>/outro.mp4 is appended to every episode's main
+    render (a per-channel sign-off), opt-in purely by the file's presence."""
+
+    def _outro_clip(self, path):
+        import subprocess
+        subprocess.run([
+            "ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=black:s=1080x1920:d=2",
+            "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+            "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+            str(path),
+        ], check=True, capture_output=True)
+
+    def test_no_outro_file_adds_zero_seconds(self, tmp_path):
+        from hypogeum.agents.assembly_agent import _append_channel_outro
+        from hypogeum.logger import get_logger
+        main = tmp_path / "main.mp4"
+        self._outro_clip(main)
+        before = main.stat().st_size
+        added = _append_channel_outro(main, "no_such_channel", 1080, 1920, 30, "ffmpeg",
+                                      get_logger(episode_id="t", agent="t"))
+        assert added == 0.0
+        assert main.stat().st_size == before  # untouched
+
+    def test_outro_file_is_appended_and_returns_its_seconds(self, tmp_path, monkeypatch):
+        from hypogeum.agents.assembly_agent import _append_channel_outro, _probe_seconds
+        from hypogeum.logger import get_logger
+        pkgs = tmp_path / "channel_packages"
+        (pkgs / "ch1").mkdir(parents=True)
+        self._outro_clip(pkgs / "ch1" / "outro.mp4")
+        monkeypatch.setattr("hypogeum.channel_package_scaffold._PACKAGES", pkgs)
+
+        main = tmp_path / "main.mp4"
+        self._outro_clip(main)  # 2s
+        base = _probe_seconds(main)
+        added = _append_channel_outro(main, "ch1", 1080, 1920, 30, "ffmpeg",
+                                      get_logger(episode_id="t", agent="t"))
+        assert 1.5 < added < 2.5
+        assert _probe_seconds(main) > base + 1.5  # main grew by ~the outro length

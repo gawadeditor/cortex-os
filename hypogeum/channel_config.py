@@ -249,6 +249,16 @@ class ModelProfile:
     # is not in muapi.MODEL_CREDIT_COSTS (planning must know the real price).
     video_model:       Optional[str]   = None
     video_model_price_usd: Optional[float] = None
+    # The model's REAL delivered clip duration in seconds, measured (ffprobe)
+    # from an actual generated clip during the Video Model bake-off and
+    # captured at adoption time — the pipeline's shot-budget/coverage
+    # arithmetic (hypogeum.muapi.get_requested_clip_duration_seconds) needs
+    # this for a model outside the hardcoded veo3/veo3.1/runway family sets
+    # (e.g. seedance-pro-t2v-fast delivers ~5.04s, not the 8s default), or
+    # every beat is under-provisioned with shots and Assembly's coverage-fill
+    # fails downstream. None = no measurement on record yet; callers fall
+    # back to the 8s conservative default.
+    video_model_duration_seconds: Optional[float] = None
     created_at:        str            = ""
     metadata_version:  str            = METADATA_VERSION
 
@@ -615,6 +625,7 @@ _MODEL_PROFILE_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     # (hypogeum.video_bakeoff). NULL = use the global MUAPI tier config.
     ("video_model", "TEXT"),
     ("video_model_price_usd", "REAL"),
+    ("video_model_duration_seconds", "REAL"),
 ]
 
 
@@ -705,6 +716,9 @@ def _row_to_model(row) -> ModelProfile:
         video_model       = (row["video_model"] if "video_model" in row.keys() else None),
         video_model_price_usd = (
             row["video_model_price_usd"] if "video_model_price_usd" in row.keys() else None),
+        video_model_duration_seconds = (
+            row["video_model_duration_seconds"]
+            if "video_model_duration_seconds" in row.keys() else None),
         created_at        = row["created_at"],
         metadata_version  = row["metadata_version"],
     )
@@ -1147,6 +1161,7 @@ def update_model_profile(
         "name", "episode_producer", "research_director", "thumbnail_planner",
         "brand_guardian_p1", "brand_guardian_p2", "narration_voice_id",
         "image_provider", "video_provider", "video_model", "video_model_price_usd",
+        "video_model_duration_seconds",
     }
     try:
         assignments, params = [], []
@@ -1206,6 +1221,28 @@ def resolve_channel_video_model(
         return mp.video_model, mp.video_model_price_usd
     except Exception:  # noqa: BLE001
         return None, None
+
+
+def resolve_channel_video_duration(
+    channel_id: str, db_path: Optional[Path] = None,
+) -> Optional[float]:
+    """The REAL measured clip duration (seconds) of the video model `channel_id`
+    has adopted via the Video Model bake-off — captured from an actual
+    generated clip at adoption time (see ModelProfile.video_model_duration_seconds).
+    None when the channel has no adopted model or no measurement is on record
+    yet, in which case callers fall back to a family-based default (e.g.
+    hypogeum.muapi.get_requested_clip_duration_seconds's 8s default). Never
+    raises."""
+    try:
+        ch = get_channel_profile(channel_id, db_path=db_path)
+        if not ch or not ch.model_profile_id:
+            return None
+        mp = get_model_profile(ch.model_profile_id, db_path=db_path)
+        if not mp or not mp.video_model or not mp.video_model_duration_seconds:
+            return None
+        return float(mp.video_model_duration_seconds)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 # ===========================================================================

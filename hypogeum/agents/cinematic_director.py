@@ -327,7 +327,10 @@ def estimate_beat_duration_seconds(text: str, config: Config) -> float:
     return round((word_count / wpm) * 60.0, 3)
 
 
-def compute_shot_budget(narration_duration_seconds: float, config: Config) -> int:
+def compute_shot_budget(
+    narration_duration_seconds: float, config: Config,
+    channel_id: Optional[str] = None,
+) -> int:
     """
     Deterministic, zero-LLM-call shot-count budget for one beat (Phase 4).
 
@@ -342,7 +345,13 @@ def compute_shot_budget(narration_duration_seconds: float, config: Config) -> in
         speed factor (coverage_check.MAX_EDITORIAL_SPEED_FACTOR — the same
         ceiling Assembly's own coverage gate enforces, so planning can
         never under-provision relative to what Assembly will actually
-        require).
+        require). `channel_id` (optional) lets this resolve a per-channel
+        adopted video model's own MEASURED clip duration (Video Model
+        bake-off, ModelProfile.video_model_duration_seconds) instead of the
+        8s default assumed for veo3/veo3.1/runway — a channel on a model
+        that delivers shorter clips (e.g. 5s) is planned with enough shots
+        to actually cover each beat, rather than under-provisioning and
+        failing Assembly's coverage-fill later.
 
       editorial_minimum = ceil(duration / editorial_pacing_target)
         A directorial pacing preference (config.CINEMATIC_SECONDS_PER_SHOT,
@@ -369,7 +378,7 @@ def compute_shot_budget(narration_duration_seconds: float, config: Config) -> in
     max_shots = max(1, getattr(config, "CINEMATIC_MAX_SHOTS_PER_BEAT", 6))
     policy_minimum = max(1, getattr(config, "CINEMATIC_MIN_SHOTS_PER_BEAT", 1))
 
-    provider_clip_duration = get_requested_clip_duration_seconds(config)
+    provider_clip_duration = get_requested_clip_duration_seconds(config, channel_id)
     coverage_capacity_per_shot = max(0.1, provider_clip_duration * MAX_EDITORIAL_SPEED_FACTOR)
 
     coverage_minimum = math.ceil(duration / coverage_capacity_per_shot)
@@ -513,7 +522,7 @@ def run_cinematic_director(
         _underprovisioned = [
             beat_id for beat_id, dur in _measured.items()
             if len(_plans_by_beat.get(beat_id, {}).get("shots", []))
-            < compute_shot_budget(dur, config)
+            < compute_shot_budget(dur, config, channel_id)
         ]
         if not _underprovisioned:
             log.info("cinematic_director_resumed", path=str(ckpt_path), episode_id=episode_id)
@@ -1996,7 +2005,7 @@ def regenerate_cinematic_coverage_plan(
     beat_texts_by_id = authoritative_beat_texts(script_package)
     beat_classification = _classify_authoritative_beats(script_package)
 
-    provider_clip_duration = get_requested_clip_duration_seconds(config)
+    provider_clip_duration = get_requested_clip_duration_seconds(config, channel_id)
     coverage_capacity_per_shot = max(0.1, provider_clip_duration * MAX_EDITORIAL_SPEED_FACTOR)
 
     log.info(
@@ -2015,7 +2024,7 @@ def regenerate_cinematic_coverage_plan(
     scenes_by_beat_id: dict = {}
     for beat_id in authoritative:
         duration = measured_durations[beat_id]
-        expected_shot_budget_by_beat_id[beat_id] = compute_shot_budget(duration, config)
+        expected_shot_budget_by_beat_id[beat_id] = compute_shot_budget(duration, config, channel_id)
         scenes_by_beat_id[beat_id] = next(
             (s for s in visual_package.get("scenes", []) if s.get("narration_reference") == beat_id),
             {},

@@ -2510,9 +2510,23 @@ def video_bakeoff_adopt():
     # even though it is not in muapi.MODEL_CREDIT_COSTS.
     from hypogeum import video_bakeoff as _bo
     price = next((m["price_usd"] for m in _bo.list_video_models() if m["id"] == model), None)
+    # Capture the model's REAL delivered clip duration from its own bake-off
+    # evidence (video_bakeoff._execute_run ffprobes every generated clip and
+    # records duration_s via provider_evidence.record). Without this, the
+    # shot-budget/coverage arithmetic assumes 8s for any model outside the
+    # hardcoded veo3/veo3.1/runway families -- a shorter-clip model (e.g.
+    # seedance's ~5s) then under-provisions every beat and Assembly's
+    # coverage-fill fails downstream. None when no evidence exists yet (the
+    # model was adopted without ever running in a bake-off comparison here).
+    from hypogeum.provider_evidence import model_summary as _model_summary
+    duration = _model_summary(model, db_path=_db_path()).get("avg_duration_s")
     update_model_profile(mp_id, db_path=_db_path(),
-                         video_model=model, video_model_price_usd=price)
-    _audit_note(f"video model for {channel_id} set to {model} (${price}) via bake-off")
+                         video_model=model, video_model_price_usd=price,
+                         video_model_duration_seconds=duration)
+    _audit_note(
+        f"video model for {channel_id} set to {model} (${price}, "
+        f"~{duration}s/clip) via bake-off"
+    )
     return redirect(f"/providers/video-test?channel={channel_id}&flash=adopted+{model}")
 
 

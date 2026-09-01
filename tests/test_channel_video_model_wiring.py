@@ -199,3 +199,65 @@ def test_gate_unit_price_matches_plan_for_every_model(tmp_path):
         assert resolve_video_price(m, episode_id="ep") == MODEL_CREDIT_COSTS[m]
     finally:
         cc._resolve_db_path = orig
+
+
+# ── measured clip duration: channel model shot-budget symmetry ──
+
+def test_resolve_channel_video_duration(tmp_path):
+    db = tmp_path / "t.db"
+    mp = _channel_with_model(db, "ch1", "seedance-pro-t2v-fast", 0.06)
+    from hypogeum.channel_config import update_model_profile, resolve_channel_video_duration
+    assert resolve_channel_video_duration("ch1", db_path=db) is None
+    update_model_profile(mp.model_profile_id, db_path=db, video_model_duration_seconds=5.041667)
+    assert resolve_channel_video_duration("ch1", db_path=db) == 5.041667
+    assert resolve_channel_video_duration("nope", db_path=db) is None
+
+
+def test_get_requested_clip_duration_uses_channel_measured_value(monkeypatch):
+    from hypogeum.muapi import get_requested_clip_duration_seconds
+    c = _cfg()
+    monkeypatch.setattr(
+        "hypogeum.channel_config.resolve_channel_video_model",
+        lambda cid, db_path=None: ("seedance-pro-t2v-fast", 0.06),
+    )
+    monkeypatch.setattr(
+        "hypogeum.channel_config.resolve_channel_video_duration",
+        lambda cid, db_path=None: 5.041667,
+    )
+    assert get_requested_clip_duration_seconds(c, "twinkle") == 5.041667
+    # no channel_id -> unchanged global default
+    assert get_requested_clip_duration_seconds(c) == 8.0
+
+
+def test_get_requested_clip_duration_falls_back_without_measurement(monkeypatch):
+    from hypogeum.muapi import get_requested_clip_duration_seconds
+    c = _cfg()
+    monkeypatch.setattr(
+        "hypogeum.channel_config.resolve_channel_video_model",
+        lambda cid, db_path=None: ("seedance-pro-t2v-fast", 0.06),
+    )
+    monkeypatch.setattr(
+        "hypogeum.channel_config.resolve_channel_video_duration",
+        lambda cid, db_path=None: None,
+    )
+    # adopted model with no measurement on record -> conservative 8s default
+    assert get_requested_clip_duration_seconds(c, "twinkle") == 8.0
+
+
+def test_compute_shot_budget_plans_more_shots_for_short_clip_model(monkeypatch):
+    from hypogeum.agents.cinematic_director import compute_shot_budget
+    c = _cfg()
+    c.CINEMATIC_SECONDS_PER_SHOT = 100.0  # neutralize the editorial-pacing term
+    c.CINEMATIC_MAX_SHOTS_PER_BEAT = 10
+    monkeypatch.setattr(
+        "hypogeum.channel_config.resolve_channel_video_model",
+        lambda cid, db_path=None: ("seedance-pro-t2v-fast", 0.06),
+    )
+    monkeypatch.setattr(
+        "hypogeum.channel_config.resolve_channel_video_duration",
+        lambda cid, db_path=None: 5.041667,
+    )
+    # a 12s beat needs 3 shots at ~5s/shot but only 2 at the (wrong) 8s default
+    budget_with_channel = compute_shot_budget(12.0, c, "twinkle")
+    budget_without_channel = compute_shot_budget(12.0, c, None)
+    assert budget_with_channel > budget_without_channel

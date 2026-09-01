@@ -4209,12 +4209,25 @@ def _resolve_gate_unit_price(
     return float(_DEFAULT_UNKNOWN_MODEL_COST)
 
 
-def get_requested_clip_duration_seconds(config: Config) -> float:
+def get_requested_clip_duration_seconds(
+    config: Config, channel_id: Optional[str] = None,
+) -> float:
     """
     Return the clip duration a fresh generation request will actually
-    receive from the currently configured default-tier provider/model —
-    the normalized provider-capability input Cinematic Director's
-    shot-budget arithmetic needs (coverage_capacity_per_shot).
+    receive from the model that will actually be used — the normalized
+    provider-capability input Cinematic Director's shot-budget arithmetic
+    needs (coverage_capacity_per_shot).
+
+    `channel_id` (optional): when given and that channel has adopted a video
+    model via the Video Model bake-off (hypogeum.channel_config.
+    resolve_channel_video_model), that model — not the tier default — is what
+    submit_scene() will actually use, so its own MEASURED duration
+    (ModelProfile.video_model_duration_seconds, captured from real bake-off
+    clips via ffprobe) is authoritative when present. A channel with no
+    adopted model, or an adopted model with no measured duration on record
+    yet, falls through to the family-membership defaults below unchanged —
+    this is purely additive, never a behavior change for hypogeum or any
+    channel that hasn't adopted a model.
 
     Reuses the same model-family membership sets _build_job_payload() uses
     for the real request, so the two can never silently disagree about what
@@ -4222,6 +4235,19 @@ def get_requested_clip_duration_seconds(config: Config) -> float:
     name outside this module — callers only ever get a float back.
     """
     model = _tier_to_model(config.MUAPI_DEFAULT_TIER, None, config)
+    if channel_id:
+        try:
+            from hypogeum.channel_config import (  # noqa: PLC0415
+                resolve_channel_video_duration, resolve_channel_video_model,
+            )
+            ch_model, _ch_price = resolve_channel_video_model(channel_id)
+            if ch_model:
+                model = ch_model
+                ch_duration = resolve_channel_video_duration(channel_id)
+                if ch_duration and ch_duration > 0:
+                    return float(ch_duration)
+        except Exception:  # noqa: BLE001
+            pass
     if model in _VEO3_1_MODELS:
         return float(_VEO3_1_DEFAULT_DURATION)
     if model in _VEO3_MODELS:
@@ -4232,7 +4258,11 @@ def get_requested_clip_duration_seconds(config: Config) -> float:
         # (production_spec.duration_seconds), which rounds to 8 — see
         # _build_job_payload()'s own Runway branch.
         return 8.0
-    return 8.0  # unregistered model family — conservative default
+    # Unregistered model family with no measured duration on record — the
+    # conservative default. A channel that adopts such a model gets an
+    # under-provisioned plan until its measured duration is captured (see
+    # the bake-off "adopt" flow, which populates it automatically).
+    return 8.0
 
 
 def _build_job_payload(

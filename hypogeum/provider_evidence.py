@@ -91,7 +91,7 @@ def model_summary(model_id: str, *, since_days: int = 90,
     conn = get_connection(db_path)
     try:
         rows = conn.execute(
-            "SELECT ok, latency_s, cost_usd, quality_proxy FROM provider_evidence "
+            "SELECT ok, latency_s, cost_usd, quality_proxy, duration_s FROM provider_evidence "
             "WHERE model_id = ? AND recorded_at >= ?", (model_id, _since(since_days))
         ).fetchall()
     finally:
@@ -110,6 +110,7 @@ def model_summary(model_id: str, *, since_days: int = 90,
         "avg_latency_s":  _avg("latency_s", oks),
         "avg_cost_usd":   _avg("cost_usd", oks),
         "avg_quality":    _avg("quality_proxy", oks),
+        "avg_duration_s": _avg("duration_s", oks),
     }
 
 

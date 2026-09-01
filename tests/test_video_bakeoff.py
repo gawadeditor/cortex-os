@@ -95,6 +95,37 @@ def test_run_bakeoff_dry_run_produces_one_clip_per_model(tmp_path, monkeypatch, 
     assert bo.get_bakeoff(manifest["run_id"])["run_id"] == manifest["run_id"]
 
 
+def test_run_bakeoff_writes_progress_fields(tmp_path, monkeypatch, stub_catalogue):
+    monkeypatch.setattr(bo, "_BAKEOFF_ROOT", tmp_path / "bakeoffs")
+    from hypogeum.config import Config
+    cfg = Config(); cfg.MUAPI_DRY_RUN = True
+    manifest = bo.run_bakeoff("c", "Scene: x.", ["cheap-t2v", "mid-t2v", "premium-t2v"],
+                              config=cfg)
+    assert manifest["status"] == "complete"
+    assert manifest["done"] == 3 and manifest["total"] == 3
+    disk = bo.get_bakeoff(manifest["run_id"])
+    assert disk["status"] == "complete"
+    assert {"status", "done", "total", "now_running"} <= set(disk)
+
+
+def test_start_bakeoff_returns_immediately_and_finishes(tmp_path, monkeypatch, stub_catalogue):
+    monkeypatch.setattr(bo, "_BAKEOFF_ROOT", tmp_path / "bakeoffs")
+    from hypogeum.config import Config
+    cfg = Config(); cfg.MUAPI_DRY_RUN = True
+
+    run_id = bo.start_bakeoff("c", "Scene: x.", ["cheap-t2v", "mid-t2v"], config=cfg)
+    # manifest exists straight away, status running
+    m0 = bo.get_bakeoff(run_id)
+    assert m0 and m0["status"] == "running" and m0["total"] == 2
+
+    t = bo._ACTIVE.get(run_id)
+    if t:
+        t.join(timeout=30)
+    m1 = bo.get_bakeoff(run_id)
+    assert m1["status"] == "complete"
+    assert len(m1["results"]) == 2
+
+
 def test_run_bakeoff_rejects_unknown_and_empty(tmp_path, monkeypatch, stub_catalogue):
     monkeypatch.setattr(bo, "_BAKEOFF_ROOT", tmp_path / "b")
     from hypogeum.config import Config

@@ -140,9 +140,32 @@
   <span class="page-meta">
     {{ run.channel_id }} · {{ run.aspect_ratio }}
     {% if run.dry_run %}· <span class="warn">DRY RUN (no spend, placeholder clips)</span>
-    {% else %}· spent ${{ '%.2f' | format(run.spent_cost_usd) }}{% endif %}
+    {% else %}· spent ${{ '%.2f' | format(run.spent_cost_usd or 0) }}{% endif %}
   </span>
 </div>
+
+{% if run.status == 'running' %}
+<div class="card" id="bo-progress" style="margin-bottom:var(--gap);"
+     data-run="{{ run.run_id }}">
+  <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:6px;">
+    <span><b id="bo-done">{{ run.done }}</b> / {{ run.total }} models done</span>
+    <span class="muted" id="bo-now">generating {{ run.now_running }}…</span>
+  </div>
+  <div style="height:8px; background:var(--border); border-radius:99px; overflow:hidden;">
+    <div id="bo-bar" style="height:100%; width:{{ (run.done / run.total * 100) | round }}%;
+         background:var(--good); transition:width .4s;"></div>
+  </div>
+  <div class="muted" style="font-size:11px; margin-top:6px;">
+    Each model takes a minute or two. This page updates itself — you can leave and come back
+    (Recent bake-offs below).
+  </div>
+</div>
+{% elif run.status == 'error' %}
+<div class="flash flash-err" style="margin-bottom:var(--gap);">
+  Bake-off stopped: {{ run.error }}. Any clips that finished are shown below.
+</div>
+{% endif %}
+
 <div class="res-grid">
   {% for r in run.results %}
   <div class="res-card {{ 'fail' if not r.ok }}">
@@ -248,6 +271,29 @@ function confirmRun(e) {
 }
 
 recost();
+
+// ── Poll an in-progress bake-off and refresh when it finishes ──
+(function () {
+  var box = document.getElementById('bo-progress');
+  if (!box) return;
+  var runId = box.dataset.run;
+  var tick = function () {
+    fetch('/api/providers/video-test/run/' + runId)
+      .then(function (r) { return r.json(); })
+      .then(function (m) {
+        if (!m || m.error) return;
+        if (m.status !== 'running') { location.reload(); return; }
+        var done = m.done || 0, total = m.total || 1;
+        document.getElementById('bo-done').textContent = done;
+        document.getElementById('bo-bar').style.width = Math.round(done / total * 100) + '%';
+        document.getElementById('bo-now').textContent =
+          m.now_running ? ('generating ' + m.now_running + '…') : 'finishing…';
+        setTimeout(tick, 8000);
+      })
+      .catch(function () { setTimeout(tick, 12000); });
+  };
+  setTimeout(tick, 6000);
+})();
 </script>
 </body>
 </html>

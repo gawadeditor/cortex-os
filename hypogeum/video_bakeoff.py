@@ -96,6 +96,11 @@ def list_video_models(config=None, *, force_refresh: bool = False) -> list[dict]
         for m in raw:
             if (m.get("category") or "").strip().lower() != "text to video":
                 continue
+            name = m.get("name", "")
+            # "extend" / "reference" variants need an input video/image — not a
+            # pure text-to-video bake-off candidate.
+            if any(t in name for t in ("-extend", "-reference", "storyboard")):
+                continue
             try:
                 price = round(float(m.get("cost")), 4)
             except (TypeError, ValueError):
@@ -355,24 +360,21 @@ def _generate_one(prompt: str, model: str, aspect_ratio: str, dest: Path,
         return base
 
 
-def run_bakeoff(
-    channel_id: str,
-    prompt: str,
-    models: list,
-    *,
-    aspect_ratio: str = "16:9",
-    db_path: Optional[Path] = None,
-    config=None,
-) -> dict:
-    """Generate one clip per model for `prompt` and persist the run.
-    Returns the run manifest dict."""
-    if config is None:
-        from hypogeum.config import Config
-        config = Config()
+def _write_manifest(run_dir: Path, manifest: dict) -> None:
+    tmp = run_dir / "manifest.json.tmp"
+    tmp.write_text(json.dumps(manifest, indent=2))
+    tmp.replace(run_dir / "manifest.json")
 
+
+_ACTIVE: dict = {}  # run_id -> threading.Thread
+
+
+def _prepare_run(channel_id, prompt, models, aspect_ratio, config):
+    """Validate inputs, create the run dir, write the initial 'running'
+    manifest. Returns (run_id, run_dir, picked_models, price_map)."""
     price_map = _model_price_map(config)
-    models = [m for m in dict.fromkeys(models) if m in price_map]
-    if not models:
+    picked = [m for m in dict.fromkeys(models) if m in price_map]
+    if not picked:
         raise ValueError("no valid video models selected")
     if not (prompt or "").strip():
         raise ValueError("prompt is empty")
@@ -380,33 +382,88 @@ def run_bakeoff(
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:6]
     run_dir = _run_dir(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
-    req_dur = 8.0
+    _write_manifest(run_dir, {
+        "run_id": run_id, "channel_id": channel_id, "aspect_ratio": aspect_ratio,
+        "prompt": prompt, "dry_run": bool(getattr(config, "MUAPI_DRY_RUN", False)),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "status": "running", "models": picked, "done": 0, "total": len(picked),
+        "now_running": picked[0], "results": [],
+        "total_cost_usd": 0.0, "spent_cost_usd": 0.0,
+    })
+    return run_id, run_dir, picked, price_map
 
+
+def _execute_run(run_id, run_dir, prompt, models, aspect_ratio, config, price_map):
+    """Generate one clip per model, re-writing the manifest after each so a
+    results page can poll progress. Each model can take a minute or two."""
+    dry = bool(getattr(config, "MUAPI_DRY_RUN", False))
+    manifest = get_bakeoff(run_id)
     results = []
-    for model in models:
-        log.info("video_bakeoff_model_start", run_id=run_id, model=model, channel_id=channel_id)
-        results.append(_generate_one(
-            prompt, model, aspect_ratio, run_dir / f"{_safe(model)}.mp4", config, req_dur,
-            price_map.get(model, 2.5),
-        ))
-
-    manifest = {
-        "run_id":         run_id,
-        "channel_id":     channel_id,
-        "created_at":     datetime.now(timezone.utc).isoformat(),
-        "aspect_ratio":   aspect_ratio,
-        "prompt":         prompt,
-        "dry_run":        bool(getattr(config, "MUAPI_DRY_RUN", False)),
-        "models":         models,
-        "results":        results,
-        "total_cost_usd": round(sum(r["price_usd"] for r in results if r["ok"]), 4),
-        "spent_cost_usd": round(sum(r["price_usd"] for r in results if r["ok"]
-                                    and not getattr(config, "MUAPI_DRY_RUN", False)), 4),
-    }
-    (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
-    log.info("video_bakeoff_complete", run_id=run_id, channel_id=channel_id,
-             models=len(models), ok=sum(1 for r in results if r["ok"]))
+    for i, model in enumerate(models):
+        manifest["now_running"] = model
+        _write_manifest(run_dir, manifest)
+        log.info("video_bakeoff_model_start", run_id=run_id, model=model)
+        r = _generate_one(prompt, model, aspect_ratio,
+                          run_dir / f"{_safe(model)}.mp4", config, 8.0,
+                          price_map.get(model, 2.5))
+        results.append(r)
+        manifest["results"] = results
+        manifest["done"] = i + 1
+        manifest["now_running"] = models[i + 1] if i + 1 < len(models) else None
+        manifest["total_cost_usd"] = round(sum(x["price_usd"] for x in results if x["ok"]), 4)
+        manifest["spent_cost_usd"] = round(
+            sum(x["price_usd"] for x in results if x["ok"] and not dry), 4)
+        _write_manifest(run_dir, manifest)
+    manifest["status"] = "complete"
+    manifest["now_running"] = None
+    _write_manifest(run_dir, manifest)
+    log.info("video_bakeoff_complete", run_id=run_id,
+             ok=sum(1 for r in results if r["ok"]))
     return manifest
+
+
+def run_bakeoff(channel_id, prompt, models, *, aspect_ratio="16:9",
+                db_path=None, config=None) -> dict:
+    """Synchronous bake-off (used by tests / CLI). Returns the final manifest."""
+    if config is None:
+        from hypogeum.config import Config
+        config = Config()
+    run_id, run_dir, picked, price_map = _prepare_run(
+        channel_id, prompt, models, aspect_ratio, config)
+    return _execute_run(run_id, run_dir, prompt, picked, aspect_ratio, config, price_map)
+
+
+def start_bakeoff(channel_id, prompt, models, *, aspect_ratio="16:9",
+                  db_path=None, config=None) -> str:
+    """Start the bake-off on a background thread; return the run_id at once
+    so the caller can redirect to a polling results page. Generation of many
+    models takes many minutes — it must not block the request."""
+    import threading
+    if config is None:
+        from hypogeum.config import Config
+        config = Config()
+    run_id, run_dir, picked, price_map = _prepare_run(
+        channel_id, prompt, models, aspect_ratio, config)
+
+    def _worker():
+        try:
+            _execute_run(run_id, run_dir, prompt, picked, aspect_ratio, config, price_map)
+        except Exception as exc:  # noqa: BLE001
+            log.error("video_bakeoff_thread_crashed", run_id=run_id, error=str(exc))
+            m = get_bakeoff(run_id) or {}
+            m["status"] = "error"
+            m["error"] = str(exc)
+            try:
+                _write_manifest(run_dir, m)
+            except Exception:  # noqa: BLE001
+                pass
+        finally:
+            _ACTIVE.pop(run_id, None)
+
+    t = threading.Thread(target=_worker, name=f"bakeoff-{run_id}", daemon=True)
+    _ACTIVE[run_id] = t
+    t.start()
+    return run_id
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +495,8 @@ def list_bakeoffs(channel_id: Optional[str] = None, limit: int = 20) -> list[dic
             "channel_id":     m.get("channel_id"),
             "created_at":     m.get("created_at"),
             "models":         m.get("models", []),
+            "status":         m.get("status", "complete"),
+            "done":           m.get("done", len(m.get("results", []))),
             "ok_count":       sum(1 for r in m.get("results", []) if r.get("ok")),
             "total_cost_usd": m.get("total_cost_usd", 0.0),
             "dry_run":        m.get("dry_run", False),

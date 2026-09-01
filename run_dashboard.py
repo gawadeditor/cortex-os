@@ -2401,11 +2401,20 @@ def video_bakeoff_run():
     aspect     = (request.form.get("aspect") or "16:9").strip()
     models     = request.form.getlist("models")
     try:
-        manifest = _bo.run_bakeoff(channel_id, prompt, models,
+        run_id = _bo.start_bakeoff(channel_id, prompt, models,
                                    aspect_ratio=aspect, db_path=_db_path())
     except Exception as exc:  # noqa: BLE001
         return redirect(f"/providers/video-test?channel={channel_id}&flash={exc}")
-    return redirect(f"/providers/video-test?channel={channel_id}&run={manifest['run_id']}")
+    return redirect(f"/providers/video-test?channel={channel_id}&run={run_id}")
+
+
+@app.route("/api/providers/video-test/run/<run_id>")
+def api_video_bakeoff_status(run_id):
+    from hypogeum import video_bakeoff as _bo
+    m = _bo.get_bakeoff(run_id)
+    if not m:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(m)
 
 
 @app.route("/providers/video-test/adopt", methods=["POST"])

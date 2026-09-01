@@ -77,9 +77,14 @@ def get_channel_readiness(channel_id: str, db_path: Optional[Path] = None) -> di
         if not grant.get("active"):
             items.append(_item(
                 "grant.active", "blocker", "Channel Operating Grant",
-                "no active grant — autonomous paid work cannot be authorized.",
-                "Sign one offline: python3 tools/configure_channel_operating_grant.py "
-                f"--channel {channel_id}",
+                "no active grant — autonomous paid work cannot be authorized. "
+                "This is a deliberate money decision that is signed offline, "
+                "never from the dashboard.",
+                "Run in a terminal on this machine:  python3 "
+                "tools/configure_channel_operating_grant.py --channel "
+                f"{channel_id} --apply --db .hypogeum-assets/hypogeum.db "
+                "--i-understand-this-is-production --private-key "
+                "approval_ed25519_private_key.pem",
             ))
         elif grant.get("ceiling_matches_config") is False:
             items.append(_item(

@@ -878,6 +878,86 @@ def api_channel_builder_handle_availability():
     })
 
 
+@app.route("/api/channel-builder/platform-profiles", methods=["POST"])
+def api_channel_builder_platform_profiles():
+    """
+    Draft the copy that lives on each platform's own channel page — the
+    YouTube "About", TikTok / Instagram bios (char-limited), Facebook Page
+    intro, plus link text. The operator pastes these into each platform (or
+    Zernio). Degrades to {ok: False} 200.
+    """
+    src = request.get_json(silent=True) or {}
+    concept = str(src.get("concept", "")).strip()
+    genre = str(src.get("genre", "")).strip()
+    name = str(src.get("name", "")).strip()
+    handle = str(src.get("handle", "")).strip().lstrip("@")
+    persona = str(src.get("persona", "")).strip()
+    language = str(src.get("language", "en")).strip() or "en"
+    if not concept and not name:
+        return jsonify({"ok": False, "error": "name the channel first"}), 422
+
+    schema = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "platform_profiles", "strict": True,
+            "schema": {
+                "type": "object", "additionalProperties": False,
+                "required": ["youtube_about", "tiktok_bio", "instagram_bio",
+                             "facebook_intro", "tagline", "keywords"],
+                "properties": {
+                    "youtube_about":  {"type": "string"},
+                    "tiktok_bio":     {"type": "string"},
+                    "instagram_bio":  {"type": "string"},
+                    "facebook_intro": {"type": "string"},
+                    "tagline":        {"type": "string"},
+                    "keywords":       {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        },
+    }
+    sys_p = (
+        "You write the profile copy for a new video channel's pages on each "
+        "platform. Return: a YouTube About (2-3 short paragraphs, what the "
+        "channel is + upload rhythm + a soft CTA), a TikTok bio (<=80 chars), "
+        "an Instagram bio (<=150 chars, may use line breaks), a Facebook Page "
+        "intro (1-2 sentences), a one-line tagline, and 6-10 discovery "
+        "keywords. Match the persona and niche exactly; no hashtag spam, no "
+        f"emoji walls. Write human-readable fields in {language!r}. JSON only."
+    )
+    user_p = (f"Channel: {name or '(unnamed)'}  @{handle or '(no handle)'}\n"
+              f"Persona: {persona or '(none)'}\nNiche: {genre or '(unspecified)'}\n"
+              f"Concept: {concept or '(from niche)'}")
+    try:
+        data = _cb_call_claude_json(sys_p, user_p, schema, max_tokens=1200)
+        return jsonify({"ok": True, "profiles": data})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": f"profile copy unavailable ({exc}); "
+                                              f"write it in manually"}), 200
+
+
+@app.route("/api/channels/<channel_id>/operator", methods=["POST"])
+def api_channel_set_operator(channel_id: str):
+    """
+    Flip a channel's operator switch (operator_enabled + unattended_operation
+    _enabled) from the wizard's activation step. This does NOT authorize
+    spend — the Operating Grant (offline Ed25519) is still required before
+    the worker will run paid generation for this channel.
+    """
+    src = request.get_json(silent=True) or {}
+    on = bool(src.get("enabled", True))
+    try:
+        from hypogeum.channel_config import update_channel_operations_profile, get_channel_operations_profile
+        if get_channel_operations_profile(channel_id, db_path=_db_path()) is None:
+            return jsonify({"ok": False, "error": "no operations profile for this channel"}), 404
+        update_channel_operations_profile(
+            channel_id, db_path=_db_path(),
+            operator_enabled=on, unattended_operation_enabled=on,
+        )
+        return jsonify({"ok": True, "channel_id": channel_id, "operator_enabled": on})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
 @app.route("/channels/new")
 def channel_builder_page():
     """The guided Channel Builder wizard."""

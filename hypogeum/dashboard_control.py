@@ -581,6 +581,35 @@ def create_channel(
         _spw = cadence.get("shorts_per_week")
         shorts_only = _vpw == 0 and isinstance(_spw, int) and _spw >= 1
 
+        # A wizard-created channel must come out fully configured so the ONLY
+        # remaining activation step is the offline Operating Grant signature
+        # (a deliberate money decision that can't live in the web UI). Build
+        # the per-platform deliverable + analytics policies from the chosen
+        # platforms + format so there are no empty-policy blockers.
+        _plat_policy: dict = {}
+        _analytics_policy: dict = {"shorts": {}, "main_episode": {}}
+        for p in platforms:
+            _plat_policy[p] = {
+                "shorts": {"enabled": True, "ai_disclosure": bool(publishing_in.get("ai_disclosure_required", True))},
+                "main_episode": {"enabled": (p == "youtube" and not shorts_only)},
+            }
+            if p == "youtube":
+                _plat_policy[p]["shorts"]["categoryId"] = "27"
+                if not shorts_only:
+                    _plat_policy[p]["main_episode"].update({"categoryId": "27", "ai_disclosure": True})
+            if p == "tiktok":
+                _plat_policy[p]["shorts"].update({
+                    "privacy": "SELF_ONLY", "content_preview_confirmed": False,
+                    "express_consent_given": False,
+                })
+            _analytics_policy["shorts"][p] = {
+                "enabled": True, "evidence_window_days": 90, "min_sample_size": 8, "min_confidence": 0.65,
+            }
+        if not shorts_only:
+            _analytics_policy["main_episode"]["youtube"] = {
+                "enabled": True, "evidence_window_days": 90, "min_sample_size": 8, "min_confidence": 0.65,
+            }
+
         ops_created = False
         if get_channel_operations_profile(channel_id, db_path=db_path) is None:
             create_channel_operations_profile(
@@ -591,8 +620,18 @@ def create_channel(
                 unattended_operation_enabled=False,
                 production_cadence=cadence,
                 publishing_schedule=publishing_schedule or {},
+                enabled_platforms={p: True for p in platforms},
                 weekly_video_budget_usd=weekly_video_budget_usd,
                 cost_ceiling_usd_per_episode=cost_ceiling_usd_per_episode,
+                platform_deliverable_policy=_plat_policy,
+                analytics_scheduling_policy=_analytics_policy,
+                retry_policy={"max_retries_per_stage": 1, "backoff_seconds": 60},
+                failure_halt_policy={
+                    "halt_on_production_failure": True, "halt_on_validation_failure": True,
+                    "halt_on_enabled_platform_publish_failure": True,
+                    "blocked_or_disabled_platforms_do_not_halt": True,
+                },
+                default_privacy_state=str(publishing_in.get("default_privacy_state", "private")),
                 db_path=db_path,
             )
             ops_created = True
@@ -602,9 +641,43 @@ def create_channel(
                     deliverable_bundle_definitions=[{"bundle_id": "short", "target_buffer_count": _spw}],
                     bundle_cycle_policy={}, deliverable_schedule_policy={},
                 )
+            else:
+                update_channel_operations_profile(
+                    channel_id, db_path=db_path,
+                    deliverable_bundle_definitions=[{"bundle_id": "main_episode", "target_buffer_count": max(1, _vpw or 1)}],
+                )
+
+        # channel-scoped daily/weekly schedule so scheduler.tick() has
+        # something to fire (mirrors run_dashboard.channel_operations_edit).
+        schedule_created = False
+        try:
+            from hypogeum.scheduler import create_schedule
+            from datetime import datetime as _dt, timezone as _tzz, timedelta as _td, time as _tm
+            _now = _dt.now(_tzz.utc)
+            _nxt = _dt.combine(_now.date(), _tm(14, 0), tzinfo=_tzz.utc)
+            if _nxt <= _now:
+                _nxt += _td(days=1)
+            _cad = "daily" if shorts_only else "weekly"
+            _label = f"{channel_id}_{'daily_shorts' if shorts_only else 'weekly'}"
+            from hypogeum.db import get_connection as _gc
+            _c = _gc(db_path)
+            try:
+                _has = _c.execute(
+                    "SELECT 1 FROM schedules WHERE scope='channel' AND channel_id=? AND label=?",
+                    (channel_id, _label),
+                ).fetchone()
+            finally:
+                _c.close()
+            if not _has:
+                create_schedule(scope="channel", channel_id=channel_id, cadence=_cad,
+                                next_run_at=_nxt, max_runs_per_day=1, label=_label, db_path=db_path)
+                schedule_created = True
+        except Exception:  # never fail channel creation on schedule wiring
+            pass
 
         return _ok(channel_id=channel_id, name=name,
-                   operations_profile_created=ops_created, shorts_only=shorts_only)
+                   operations_profile_created=ops_created, shorts_only=shorts_only,
+                   schedule_created=schedule_created)
     except ValueError as exc:
         return _err(str(exc), "invalid")
     except Exception as exc:

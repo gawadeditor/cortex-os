@@ -152,6 +152,61 @@ def test_handle_availability_shape(client, monkeypatch):
     assert body["results"]["youtube"]["status"] == "available"
 
 
+def test_create_fully_configures_a_shorts_channel(client, dbp):
+    """A wizard-created channel comes out with platforms, policies and a
+    schedule — the only manual step left is the offline Operating Grant."""
+    payload = {
+        "channel_id": "fullcfg", "name": "Full Cfg", "format": "shorts",
+        "shorts_per_week": 7, "platforms": ["youtube", "tiktok", "instagram", "facebook"],
+        "cost_ceiling_usd_per_episode": 20, "weekly_video_budget_usd": 135,
+        "publishing": {"default_privacy_state": "private"},
+    }
+    r = client.post("/api/channels/create", data=json.dumps(payload), content_type="application/json")
+    assert r.status_code == 200 and r.get_json()["ok"] is True
+    assert r.get_json()["schedule_created"] is True
+
+    from hypogeum.channel_config import get_channel_operations_profile
+    ops = get_channel_operations_profile("fullcfg", db_path=dbp)
+    assert ops.enabled_platforms == {"youtube": True, "tiktok": True, "instagram": True, "facebook": True}
+    assert set(ops.platform_deliverable_policy) == {"youtube", "tiktok", "instagram", "facebook"}
+    assert ops.platform_deliverable_policy["tiktok"]["shorts"]["privacy"] == "SELF_ONLY"
+    assert ops.analytics_scheduling_policy["shorts"]["youtube"]["enabled"] is True
+    assert ops.retry_policy and ops.failure_halt_policy
+    assert ops.operator_enabled is False  # explicit opt-in stays
+
+    from hypogeum.db import get_connection
+    conn = get_connection(dbp)
+    try:
+        sc = conn.execute("SELECT cadence, status FROM schedules WHERE channel_id='fullcfg'").fetchall()
+    finally:
+        conn.close()
+    assert sc and sc[0]["cadence"] == "daily" and sc[0]["status"] == "active"
+
+
+def test_operator_toggle_endpoint(client, dbp):
+    client.post("/api/channels/create",
+                data=json.dumps({"channel_id": "optog", "name": "Op", "format": "shorts",
+                                 "cost_ceiling_usd_per_episode": 20}),
+                content_type="application/json")
+    r = client.post("/api/channels/optog/operator", data=json.dumps({"enabled": True}),
+                    content_type="application/json")
+    assert r.status_code == 200 and r.get_json()["operator_enabled"] is True
+    from hypogeum.channel_config import get_channel_operations_profile
+    assert get_channel_operations_profile("optog", db_path=dbp).operator_enabled is True
+    # unknown channel -> 404
+    assert client.post("/api/channels/nope/operator", data=json.dumps({"enabled": True}),
+                       content_type="application/json").status_code == 404
+
+
+def test_platform_profiles_degrades_soft(client, monkeypatch):
+    import hypogeum.openrouter as orr
+    monkeypatch.setattr(orr, "call_claude", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+    r = client.post("/api/channel-builder/platform-profiles",
+                    data=json.dumps({"name": "X", "concept": "kids animals"}),
+                    content_type="application/json")
+    assert r.status_code == 200 and r.get_json()["ok"] is False
+
+
 def test_readiness_endpoint(client):
     client.post("/api/channels/create",
                 data=json.dumps({"channel_id": "rdtest", "name": "RD", "format": "shorts",

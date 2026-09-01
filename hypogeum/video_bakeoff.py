@@ -82,21 +82,48 @@ def _valid_model_ids(config=None) -> set:
 # Prompt assembly
 # ---------------------------------------------------------------------------
 
-# Topic-agnostic representative scene. The channel-specific character comes
-# from the canonical Video / Camera / Motion / Lighting / Historical DNA and
-# the brand identity that assemble_video_scene_prompt() appends; the operator
-# is free to rewrite any of this before running.
-_REPRESENTATIVE_SCENE = {
-    "scene": (
-        "A weathered stone chamber lit by a single shaft of daylight from a "
-        "high opening. Dust drifts through the beam. Carved relief detail is "
-        "visible on the far wall."
-    ),
+# Neutral fallback scene, used only when a channel has no brand profile.
+_FALLBACK_SCENE = {
+    "scene": "A single subject in a defined space with clear depth and one dominant light source.",
+    "style": "restrained, photographic, natural colour",
     "camera": "controlled slow push in",
-    "subject": "the carved far wall, relief detail held in the light",
-    "motion": "drifting dust; the light shaft barely shifts",
-    "lighting": "one hard daylight shaft from a high opening, warm, steep falloff",
+    "subject": "the primary subject, held in the light",
+    "motion": "subtle environmental motion only",
+    "lighting": "one directional light source, motivated, with visible falloff",
 }
+
+
+def _scene_from_brand(brand) -> dict:
+    """Compose a representative, channel-specific scene from a BrandProfile."""
+    style = (getattr(brand, "visual_style", "") or "").strip()
+    tone = (getattr(brand, "tone", "") or "").strip().lower()
+    pillars = getattr(brand, "content_pillars", None) or []
+    subject_hint = (pillars[0] if pillars else "the main subject").strip()
+    # Trim an over-long pillar to its first clause.
+    for sep in (" — ", " - ", ":", ";", ","):
+        if sep in subject_hint:
+            subject_hint = subject_hint.split(sep)[0].strip()
+            break
+
+    gentle = any(w in tone for w in ("gentle", "whimsical", "soothing", "calm", "warm", "playful"))
+    scene = {
+        "scene": (
+            f"A representative establishing shot for this channel: {subject_hint}, "
+            f"rendered in the channel's visual world."
+        ),
+        "style": style or _FALLBACK_SCENE["style"],
+        "camera": "slow gentle drift" if gentle else "controlled slow push in",
+        "subject": subject_hint,
+        "motion": (
+            "soft ambient motion — drifting particles, a slight sway"
+            if gentle else "subtle environmental motion only"
+        ),
+        "lighting": (
+            "warm, soft, low-contrast key light"
+            if gentle else "one directional light source, motivated, with visible falloff"
+        ),
+    }
+    return scene
 
 
 def build_channel_scene_prompt(
@@ -105,20 +132,34 @@ def build_channel_scene_prompt(
     aspect_ratio: str = "16:9",
     db_path: Optional[Path] = None,
 ) -> dict:
-    """Assemble a representative, fully-formed scene prompt for `channel_id`
-    using the canonical DNA + brand identity. Returns
-    {channel_id, aspect_ratio, scene_fields, prompt}."""
-    from hypogeum.video_prompt_writer import assemble_video_scene_prompt
-    scene = dict(_REPRESENTATIVE_SCENE)
+    """A representative, fully-editable scene prompt for `channel_id`, built
+    from that channel's brand profile (visual style, tone, content pillars).
+    Returns {channel_id, aspect_ratio, brand_name, scene_fields, prompt}."""
+    from hypogeum.channel_config import get_channel_profile, get_brand_profile
+
+    brand = None
+    brand_name = None
     try:
-        prompt = assemble_video_scene_prompt(scene)
-    except Exception as exc:  # noqa: BLE001
-        log.error("video_bakeoff_prompt_assembly_failed", channel_id=channel_id, error=str(exc))
-        # Fall back to just the authored scene lines.
-        prompt = "\n".join(f"{k.capitalize()}: {v}" for k, v in scene.items())
+        ch = get_channel_profile(channel_id, db_path=db_path)
+        if ch and ch.brand_profile_id:
+            brand = get_brand_profile(ch.brand_profile_id, db_path=db_path)
+            brand_name = getattr(brand, "name", None)
+    except Exception:  # noqa: BLE001
+        brand = None
+
+    scene = _scene_from_brand(brand) if brand else dict(_FALLBACK_SCENE)
+
+    _LABELS = {
+        "scene": "SCENE", "style": "STYLE", "camera": "CAMERA",
+        "subject": "SUBJECT", "motion": "MOTION", "lighting": "LIGHTING",
+    }
+    prompt = "\n".join(f"{_LABELS[k]}: {scene[k]}" for k in
+                       ("scene", "style", "camera", "subject", "motion", "lighting"))
+
     return {
         "channel_id":   channel_id,
         "aspect_ratio": aspect_ratio,
+        "brand_name":   brand_name,
         "scene_fields": scene,
         "prompt":       prompt,
     }

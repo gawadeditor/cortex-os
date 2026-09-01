@@ -30,11 +30,24 @@ def test_estimate_cost_sums_selected_models():
     assert est["total_usd"] == pytest.approx(0.54, abs=0.01)
 
 
-def test_build_prompt_returns_channel_flavoured_scene(tmp_path):
-    pack = bo.build_channel_scene_prompt("hypogeum", aspect_ratio="9:16", db_path=tmp_path / "x.db")
-    assert pack["aspect_ratio"] == "9:16"
-    assert "SCENE:" in pack["prompt"].upper() or "Scene:" in pack["prompt"]
-    assert len(pack["prompt"]) > 200  # DNA sections appended
+def test_build_prompt_is_channel_specific(tmp_path):
+    db = tmp_path / "x.db"
+    from hypogeum.channel_config import create_brand_profile, create_channel_profile
+    b_doc = create_brand_profile("Doc Brand", visual_style="warm earth tones, ancient stone",
+                                 tone="investigative", db_path=db)
+    b_kids = create_brand_profile("Kids Brand", visual_style="soft pastel watercolor, storybook",
+                                  tone="gentle whimsical soothing", db_path=db)
+    create_channel_profile("doc", "Doc", brand_profile_id=b_doc.brand_profile_id, db_path=db)
+    create_channel_profile("kids", "Kids", brand_profile_id=b_kids.brand_profile_id, db_path=db)
+
+    p_doc = bo.build_channel_scene_prompt("doc", aspect_ratio="16:9", db_path=db)
+    p_kids = bo.build_channel_scene_prompt("kids", aspect_ratio="9:16", db_path=db)
+
+    assert "SCENE:" in p_doc["prompt"] and "STYLE:" in p_doc["prompt"]
+    assert p_doc["prompt"] != p_kids["prompt"], "prompt must differ by channel"
+    assert "pastel" in p_kids["prompt"].lower()
+    assert "ancient stone" in p_doc["prompt"].lower()
+    assert p_kids["aspect_ratio"] == "9:16"
 
 
 def test_run_bakeoff_dry_run_produces_one_clip_per_model(tmp_path, monkeypatch):

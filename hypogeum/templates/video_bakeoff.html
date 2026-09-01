@@ -82,8 +82,16 @@
   </div>
 
   <div>
-    <span class="bo-label">Scene prompt — assembled from this channel's Video DNA, edit freely</span>
+    <span class="bo-label">
+      Scene prompt — built from
+      {% if prompt_pack and prompt_pack.brand_name %}{{ prompt_pack.brand_name }}{% else %}this channel's brand profile{% endif %}
+      (visual style, tone, content pillars) — edit freely
+    </span>
     <textarea name="prompt">{{ prompt_pack.prompt if prompt_pack else '' }}</textarea>
+    <div class="muted" style="font-size:11px; margin-top:4px;">
+      This is a starting point in the channel's visual language. Rewrite the SCENE
+      and SUBJECT lines to test the models on the shot you actually care about.
+    </div>
   </div>
 
   <div>

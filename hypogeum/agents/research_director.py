@@ -108,6 +108,53 @@ _RESEARCH_PHASES = [
     },
 ]
 
+# The default (_RESEARCH_PHASES) is written for an investigative documentary-
+# history channel. The four phase_ids and their order are stable — only the
+# Perplexity query keywords and the human descriptions adapt to the channel's
+# register, so a soothing children's-story channel is not sent to look for
+# "peer-reviewed archaeological studies" and "scholarly debate".
+_GENTLE_RESEARCH_PHASES = [
+    {
+        "phase_id": "core_facts",
+        "query_template": "{topic} simple accurate facts explained clearly true details",
+        "description": "Core facts, told simply and accurately",
+    },
+    {
+        "phase_id": "mystery_depth",
+        "query_template": "{topic} surprising delightful details sense of wonder gentle curiosities",
+        "description": "Surprising, wonder-filled details",
+    },
+    {
+        "phase_id": "academic_context",
+        "query_template": "{topic} child-friendly explanation age-appropriate context common misconceptions",
+        "description": "Age-appropriate context and accuracy checks",
+    },
+    {
+        "phase_id": "competitive_landscape",
+        "query_template": "{topic} children's story video bedtime content existing coverage",
+        "description": "Existing content landscape",
+    },
+]
+
+
+def _research_phases_for(channel_brief: Optional[dict]) -> list:
+    """The research-phase set matched to the channel's register.
+
+    Keeps the four stable phase_ids; swaps the query keywords + descriptions
+    so the Research Director asks questions that make sense for THIS channel.
+    Falls back to the investigative default for an unknown / documentary brief.
+    """
+    brief = channel_brief or {}
+    tone = str(brief.get("tone", "")).lower()
+    genre = str(brief.get("genre", "")).lower()
+    blob = f"{tone} {genre}"
+    gentle_markers = ("gentle", "soothing", "bedtime", "lullaby", "calm", "cozy",
+                      "cosy", "whimsical", "dreamy", "toddler", "preschool",
+                      "children", "kids", "nursery")
+    if any(m in blob for m in gentle_markers):
+        return _GENTLE_RESEARCH_PHASES
+    return _RESEARCH_PHASES
+
 
 # ---------------------------------------------------------------------------
 # System prompt — loaded once at import time
@@ -200,7 +247,13 @@ def run_research_director(
     raw_results: list[dict] = []
     query_failures: list[dict] = []
 
-    for i, phase in enumerate(_RESEARCH_PHASES):
+    try:
+        from hypogeum.channel_creative_brief import channel_brief_for
+        _phases = _research_phases_for(channel_brief_for(channel_id))
+    except Exception:  # noqa: BLE001
+        _phases = _RESEARCH_PHASES
+
+    for i, phase in enumerate(_phases):
         query = phase["query_template"].format(topic=topic)
         log.info("rd_query_started", phase_id=phase["phase_id"], query_index=i)
 
@@ -287,7 +340,7 @@ def run_research_director(
     # Phase 3: Check soft-failure threshold
     # -----------------------------------------------------------------------
     n_failed = len(query_failures)
-    n_total  = len(_RESEARCH_PHASES)
+    n_total  = len(_phases)
 
     if n_failed >= _PDR_SOFT_FAILURE_THRESHOLD:
         severity = "BLOCKING" if n_failed == n_total else "MAJOR"

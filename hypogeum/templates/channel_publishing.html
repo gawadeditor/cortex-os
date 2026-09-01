@@ -32,9 +32,23 @@
   {% if flash == 'bound' %}<div class="flash flash-ok">Platform connected for {{ channel.name }}.</div>{% endif %}
   {% if flash == 'unbound' %}<div class="flash flash-ok">Platform disconnected.</div>{% endif %}
   {% if flash == 'err' %}<div class="flash flash-err">Could not update the connection — check the Zernio account pool.</div>{% endif %}
+  {% if flash and flash.startswith('synced:') %}<div class="flash flash-ok">Refreshed from Zernio — {{ flash.split(':')[1] }} account(s) in the pool.</div>{% endif %}
+  {% if flash and flash.startswith('syncerr:') %}<div class="flash flash-err">Zernio refresh failed: {{ flash.split(':',1)[1] }}</div>{% endif %}
 
   <div class="card">
-    <div class="card-title">Platform connections</div>
+    <div class="card-title" style="display:flex; justify-content:space-between; align-items:center;">
+      <span>Platform connections</span>
+      <form method="post" style="margin:0;">
+        <input type="hidden" name="action" value="sync">
+        <button type="submit" class="btn" style="font-size:11px; text-transform:none; letter-spacing:0;">
+          {{ icon('refresh') }} Refresh from Zernio
+        </button>
+      </form>
+    </div>
+    <p class="pl-hint" style="margin-top:0;">
+      Connected a new account in Zernio? Hit <strong>Refresh from Zernio</strong>
+      to pull it into the pool, then pick it below.
+    </p>
     {% if not wanted_platforms %}
       <p class="pl-hint">This channel has no target platforms yet. Set them in
         <a href="/publishing/{{ channel.publishing_profile_id }}/edit">the publishing profile</a>.</p>

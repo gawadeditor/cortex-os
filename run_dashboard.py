@@ -6708,7 +6708,12 @@ def channel_publishing_page(channel_id):
         platform = request.form.get("platform", "")
         flash = "err"
         try:
-            if action == "bind":
+            if action == "sync":
+                from hypogeum.publishing.zernio_accounts import sync_zernio_accounts
+                res = sync_zernio_accounts(db)
+                flash = ("synced:%d" % res.get("synced", 0)) if res.get("ok") \
+                    else "syncerr:%s" % (res.get("error") or "Zernio not configured")
+            elif action == "bind":
                 acct_id = request.form.get("provider_account_id", "")
                 acct = _pr.get_provider_account(db, provider_account_id=acct_id)
                 if acct:

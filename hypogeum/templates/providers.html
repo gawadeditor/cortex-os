@@ -351,10 +351,62 @@
 
 
 {# ─────────────────────────────────────────────────────────── #}
-{# Publishing Platforms                                          #}
+{# Publishing Platforms — Zernio account pool (per-channel)      #}
 {# ─────────────────────────────────────────────────────────── #}
 <div class="section-label" style="margin-top: calc(var(--gap) * 1.5);">Publishing Platforms</div>
-<div class="provider-grid">
+<div class="card" style="margin-bottom:var(--gap);">
+  <p style="font-size:12px; color:var(--muted); line-height:1.55; margin:0;">
+    Publishing goes through <strong>Zernio</strong>. Platform accounts are connected
+    <strong>per channel</strong> — open a channel and use its <strong>Publishing</strong> tab.
+    This is the factory-wide pool of connected accounts and which channels bind each.
+  </p>
+</div>
+
+{% if factory_accounts %}
+<div class="card" style="padding:0; margin-bottom:var(--gap);">
+  <div class="table-wrap" style="border:none;"><table>
+    <thead><tr><th>Platform</th><th>Account</th><th>Status</th><th>Followers</th><th>Bound to</th></tr></thead>
+    <tbody>
+    {% for a in factory_accounts %}
+    <tr>
+      <td style="text-transform:capitalize; font-weight:600;">{{ a.platform }}</td>
+      <td>{{ a.display_label or a.username or '—' }}{% if a.username %}<br><span class="muted" style="font-size:11px;">@{{ a.username }}</span>{% endif %}</td>
+      <td>
+        {% if a.needs_reconnection %}<span class="badge badge-failed">reconnect</span>
+        {% elif a.status == 'active' %}<span class="badge badge-complete">active</span>
+        {% else %}<span class="badge">{{ a.status or 'unknown' }}</span>{% endif %}
+      </td>
+      <td class="muted" style="font-variant-numeric:tabular-nums;">{{ a.followers_count if a.followers_count is not none else '—' }}</td>
+      <td style="font-size:11px;">
+        {% if a.bound_channels %}{% for ch in a.bound_channels %}<span class="badge" style="background:var(--raised);">{{ ch }}</span> {% endfor %}
+        {% else %}<span class="warn">no channel bound</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</div>
+{% else %}
+<div class="empty" style="margin-bottom:var(--gap);">
+  No platform accounts connected yet. Open a channel and connect its accounts on the
+  <strong>Publishing</strong> tab (via Zernio).
+</div>
+{% endif %}
+
+<div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:var(--gap);">
+  {% for ch in nav_channels %}
+  <a href="/channel/{{ ch.channel_id }}/publishing?scope={{ ch.channel_id }}" class="btn" style="font-size:12px;">
+    {{ ch.name }} · Publishing →
+  </a>
+  {% endfor %}
+</div>
+
+<details style="margin-bottom:var(--gap);">
+  <summary style="padding:10px 14px; background:var(--surface); border:1px solid var(--border);
+                  border-radius:var(--radius); font-size:12px; color:var(--muted); cursor:pointer;">
+    Legacy direct connections (YouTube analytics refresh token only)
+  </summary>
+<div class="provider-grid" style="margin-top:10px;">
   {% for p in platform_providers %}
   {% set vstatus = p.vstatus %}
   <div class="provider-card
@@ -468,6 +520,7 @@
   </div>
   {% endfor %}
 </div>
+</details>
 
 
 {% macro cmp_card(r, run_id, ctype) %}

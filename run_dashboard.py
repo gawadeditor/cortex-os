@@ -269,6 +269,44 @@ def _db_path():
 _SCOPE_COOKIE = "cortex_scope"
 
 
+def _factory_provider_accounts() -> list:
+    """The Zernio platform-account pool + which channels bind each — the
+    factory-level view of publishing connections (accounts are connected
+    per channel via Zernio, on each channel's Publishing tab)."""
+    try:
+        import json as _json
+        from hypogeum.db import get_connection as _gc
+        c = _gc(_db_path())
+        try:
+            acc = [dict(r) for r in c.execute(
+                "SELECT provider_account_id, provider_id, platform, display_label, "
+                "external_account_id, status, needs_reconnection, metadata_json "
+                "FROM provider_accounts ORDER BY platform, display_label")]
+            binds = [dict(r) for r in c.execute(
+                "SELECT channel_id, provider_account_id, enabled "
+                "FROM channel_provider_bindings WHERE capability = 'publishing'")]
+        finally:
+            c.close()
+        chan_name = {ch["channel_id"]: ch["name"] for ch in _nav_channels()}
+        bound: dict = {}
+        for b in binds:
+            if b.get("enabled"):
+                bound.setdefault(b["provider_account_id"], []).append(
+                    chan_name.get(b["channel_id"], b["channel_id"]))
+        for a in acc:
+            try:
+                meta = _json.loads(a.get("metadata_json") or "{}")
+            except Exception:  # noqa: BLE001
+                meta = {}
+            a["username"] = meta.get("username")
+            a["followers_count"] = meta.get("followers_count")
+            a["synced_at"] = meta.get("synced_at")
+            a["bound_channels"] = sorted(set(bound.get(a["provider_account_id"], [])))
+        return acc
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _nav_channels():
     """[{channel_id, name}, ...] — cached per request."""
     if not hasattr(g, "_nav_channels"):
@@ -1668,6 +1706,7 @@ def providers_page():
     except Exception:
         verif_map = {}
     platform_providers = _build_providers(list(_PLATFORM_PROVIDERS), creds_map, cost_map, verif_map)
+    factory_accounts = _factory_provider_accounts()
 
     # Phase 1G/1J — most recent comparison results
     try:
@@ -1691,6 +1730,8 @@ def providers_page():
         ai_audio_providers=ai_audio_providers,
         video_provider_pairs=video_provider_pairs,
         platform_providers=platform_providers,
+        factory_accounts=factory_accounts,
+        nav_channels=_nav_channels(),
         connectable_providers=_VALID_CONTENT_PROVIDERS,
         publishing_sp_providers=publishing_sp_providers,
         last_comparison=last_comparison,
@@ -7503,42 +7544,7 @@ def intelligence_sync_page():
             channel_bindings = {}
 
     # Factory scope: aggregate the Zernio account pool + which channels bind each.
-    factory_accounts = []
-    if not _sync_ch:
-        try:
-            import json as _json
-            from hypogeum.db import get_connection as _gc
-            _c = _gc(_db_path())
-            try:
-                acc_rows = [dict(r) for r in _c.execute(
-                    "SELECT provider_account_id, provider_id, platform, display_label, "
-                    "external_account_id, status, needs_reconnection, metadata_json "
-                    "FROM provider_accounts ORDER BY platform, display_label")]
-                bind_rows = [dict(r) for r in _c.execute(
-                    "SELECT channel_id, provider_account_id, enabled "
-                    "FROM channel_provider_bindings WHERE capability = 'publishing'")]
-            finally:
-                _c.close()
-            chan_name = {c["channel_id"]: c["name"] for c in _nav_channels()}
-            bound_by_acc = {}
-            for b in bind_rows:
-                if not b.get("enabled"):
-                    continue
-                bound_by_acc.setdefault(b["provider_account_id"], []).append(
-                    chan_name.get(b["channel_id"], b["channel_id"]))
-            for a in acc_rows:
-                meta = {}
-                try:
-                    meta = _json.loads(a.get("metadata_json") or "{}")
-                except Exception:  # noqa: BLE001
-                    meta = {}
-                a["username"] = meta.get("username")
-                a["followers_count"] = meta.get("followers_count")
-                a["synced_at"] = meta.get("synced_at")
-                a["bound_channels"] = sorted(set(bound_by_acc.get(a["provider_account_id"], [])))
-                factory_accounts.append(a)
-        except Exception:  # noqa: BLE001
-            factory_accounts = []
+    factory_accounts = [] if _sync_ch else _factory_provider_accounts()
 
     flash = request.args.get("flash")
     return render_template(

@@ -60,6 +60,27 @@ from hypogeum.agents.visual_package_director import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _stub_deliverable_contract(monkeypatch):
+    """These tests exercise Cinematic Director duration-fidelity through a full
+    run_visual_package_director call — not Channel Package deliverable-shape
+    validation (its own coverage lives in tests/test_production_plan.py). The
+    generic fixtures here carry no channel_id and ship no channel_packages/
+    fixture, so stub compile_production_plan's Channel-Package lookup. Mirrors
+    tests/test_visual_package_director.py."""
+    import hypogeum.production_plan as pp
+
+    def _permissive_contract(channel_id, *, packages_root=None):
+        return {"allow_standalone_shorts": True, "deliverables": [
+            {"deliverable_id": "main_episode", "kind": "main_episode",
+             "aspect_ratio": "16:9", "required": True, "derived_from": None},
+        ]}
+
+    monkeypatch.setattr(pp, "load_deliverable_contract", _permissive_contract)
+    monkeypatch.setattr(pp, "validate_deliverable_shape", lambda *a, **k: None)
+    monkeypatch.setenv("MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE", "1")
+
+
 # ---------------------------------------------------------------------------
 # Generic fixtures — no Hypogeum/episode identifiers, no historical content
 # ---------------------------------------------------------------------------
@@ -94,11 +115,16 @@ def _make_config(*, seconds_per_shot: float = 10.0, wpm: float = 145.0,
     os.environ["OPENROUTER_API_KEY"] = "sk-or-test"
     os.environ["MUAPI_API_KEY"] = "muapi-test-key"
     os.environ["MUAPI_BASE_URL"] = "https://api.muapi.ai/api/v1"
-    os.environ["MUAPI_T1_MODEL"] = "generic-t1-model"
-    os.environ["MUAPI_T2_MODEL"] = "generic-t2-model"
-    os.environ["MUAPI_T3_MODEL"] = "generic-t3-model"
-    os.environ["MUAPI_I2V_MODEL"] = "generic-i2v-model"
-    os.environ["MUAPI_IMAGE_MODEL"] = "generic-image-model"
+    # Real priced model names — compile_production_plan now refuses to plan
+    # against a model with no authoritative price (the generic-*-model
+    # placeholders these fixtures used predate that check). The specific model
+    # is irrelevant to what this file tests (Cinematic Director duration
+    # fidelity); only that the plan compiles.
+    os.environ["MUAPI_T1_MODEL"] = "veo3-text-to-video"
+    os.environ["MUAPI_T2_MODEL"] = "runway-text-to-video"
+    os.environ["MUAPI_T3_MODEL"] = "veo3-fast-text-to-video"
+    os.environ["MUAPI_I2V_MODEL"] = "veo3-image-to-video"
+    os.environ["MUAPI_IMAGE_MODEL"] = "flux-2-dev"
     os.environ["MUAPI_POLL_INTERVAL_SECONDS"] = "0"
     os.environ["MUAPI_MAX_POLL_ATTEMPTS"] = "3"
     try:

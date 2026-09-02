@@ -96,6 +96,36 @@ def _no_real_cinematic_director_calls():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _stub_production_plan(monkeypatch):
+    """These tests exercise Stage A4 / Visual Intent QA batch overflow + resume
+    through a full run_visual_package_director call. They deliberately no-op
+    Stage B (its run_agent mock returns {}), so scene prompts stay empty — and
+    compile_production_plan (which VPD now runs unconditionally, and which
+    refuses empty prompt text / a missing channel package) is not what this
+    file tests. Stub the plan step out entirely; production-plan behaviour has
+    its own coverage in tests/test_production_plan.py + test_visual_package_director.py."""
+    from types import SimpleNamespace
+    import hypogeum.production_plan as pp  # VPD imports these names from here
+
+    fake_plan = SimpleNamespace(
+        deliverable_ids=["main_episode"], assets=[], content_hash="0" * 64,
+        normal_expected_cost_usd="0.00", maximum_bounded_cost_usd="0.00",
+    )
+    monkeypatch.setattr(pp, "compile_production_plan", lambda **kw: fake_plan)
+    monkeypatch.setattr(pp, "persist_production_plan", lambda *a, **k: None)
+    monkeypatch.setattr(
+        pp, "validate_plan_coverage",
+        lambda *a, **k: SimpleNamespace(sufficient=True, failing_beats=[]),
+    )
+    import hypogeum.agents.finance_agent as fin
+    monkeypatch.setattr(
+        fin, "run_post_vpd_authorization",
+        lambda **kw: {"verdict": "AUTHORIZED", "estimated_spend_usd": "0.00",
+                      "cost_breakdown": {"scene_count": 0}},
+    )
+
+
 # ---------------------------------------------------------------------------
 # Shared helpers (mirrors test_vpd_stage_b_overflow.py)
 # ---------------------------------------------------------------------------

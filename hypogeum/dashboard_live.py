@@ -425,9 +425,15 @@ def get_factory_pulse(
             ).fetchall()}
             hb = wc.get("worker_heartbeat_at")
             age = _elapsed_s(hb)
+            # A worker running a pipeline does not heartbeat during that run
+            # (single process, blocking) — a live run is itself proof of life,
+            # so a stale heartbeat alone must not read as "worker down".
+            _has_live_run = bool(conn.execute(
+                "SELECT 1 FROM runs WHERE status = 'running' LIMIT 1"
+            ).fetchone())
             out["worker"] = {
                 "status": wc.get("worker_status") or "unknown",
-                "alive": bool(age is not None and age <= _WORKER_ALIVE_SECONDS),
+                "alive": bool(_has_live_run or (age is not None and age <= _WORKER_ALIVE_SECONDS)),
                 "heartbeat_age_s": round(age) if age is not None else None,
                 "paused": str(wc.get("queue_paused", "0")) == "1",
                 "stop_requested": str(wc.get("stop_requested", "0")) == "1",

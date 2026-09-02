@@ -590,9 +590,9 @@ class TestAnalyticsUX:
         r = flask_client_bare.get("/intelligence/sync")
         assert r.status_code == 200
         body = r.data.decode()
-        # Find the emergency/force-sync <details> block
-        details_start = body.find("Emergency: force sync")
-        assert details_start >= 0, "Emergency force-sync <details> block not found"
+        # Find the manual "Refresh analytics now" <details> block
+        details_start = body.find("Refresh analytics now")
+        assert details_start >= 0, "manual refresh <details> block not found"
         # Walk back to the containing <details> tag
         details_tag = body.rfind("<details", 0, details_start)
         assert details_tag >= 0

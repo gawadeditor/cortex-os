@@ -160,6 +160,80 @@ def _probe_video_stream(path: Path) -> Optional[dict]:
         return None
 
 
+# A provider output at least this fraction of the target on both axes is a
+# rounding miss (1902/1920 = 0.99) and gets the geometric cover+crop finish;
+# anything more under is a real upscale failure and still fails closed.
+_NORMALIZE_SHORTFALL_TOLERANCE = 0.95
+
+
+def _normalize_to_exact_resolution(
+    path: Path, target_width: int, target_height: int, log, scene_id: str,
+) -> bool:
+    """Snap an enhanced clip to EXACTLY target_width x target_height.
+
+    The MUAPI upscaler is told a resolution *label* ("1080p"), not exact
+    pixels — for a 9:16 source it returns e.g. 1092x1902, which then fails
+    the >= target check by a few px and the whole (paid) enhancement is
+    discarded, leaving the sub-resolution raw clip and a failing A_VIDEO
+    gate. The AI upscale already did the real quality work; this is a
+    deterministic geometric finish: scale-to-cover then centre-crop to the
+    exact canvas (pads nothing — cover+crop keeps every pixel real).
+
+    No-op when the clip is already exactly the target size, OR when the
+    provider output is more than _NORMALIZE_SHORTFALL_TOLERANCE under target
+    on either axis — that is a genuine upscale failure, not a rounding miss,
+    and must still fail closed (bicubic-stretching a 720p clip to 1080p is
+    exactly the fake resolution the output gate exists to reject). Returns
+    True on success/no-op, False if ffmpeg failed or the clip was left for
+    the caller's fail-closed check.
+    """
+    probe = _probe_video_stream(path)
+    if not probe:
+        return False
+    if probe["width"] == target_width and probe["height"] == target_height:
+        return True
+    if (
+        probe["width"] < target_width * _NORMALIZE_SHORTFALL_TOLERANCE
+        or probe["height"] < target_height * _NORMALIZE_SHORTFALL_TOLERANCE
+    ):
+        return False
+    tmp = path.with_name(path.stem + ".norm.mp4")
+    try:
+        r = subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", str(path),
+                "-vf",
+                (
+                    f"scale={target_width}:{target_height}:force_original_aspect_ratio=increase,"
+                    f"crop={target_width}:{target_height},setsar=1"
+                ),
+                "-c:v", "libx264", "-crf", "17", "-preset", "medium",
+                "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart",
+                str(tmp),
+            ],
+            capture_output=True, text=True, timeout=300,
+        )
+        if r.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+            log.warn(
+                "source_enhancement_normalize_failed",
+                scene_id=scene_id, stderr=(r.stderr or "")[-500:],
+            )
+            tmp.unlink(missing_ok=True)
+            return False
+        tmp.replace(path)
+        log.info(
+            "source_enhancement_normalized_to_exact",
+            scene_id=scene_id,
+            from_resolution=f"{probe['width']}x{probe['height']}" if probe else None,
+            to_resolution=f"{target_width}x{target_height}",
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warn("source_enhancement_normalize_error", scene_id=scene_id, error=str(exc))
+        tmp.unlink(missing_ok=True)
+        return False
+
+
 _BLACK_TAIL_MIN_BLACK_SECONDS = 0.5   # ffmpeg blackdetect's own minimum run length
 _BLACK_TAIL_END_TOLERANCE_S = 0.2     # a black region ending within this of EOF counts as "the tail"
 
@@ -683,6 +757,12 @@ def qualify_asset(
         )
         return True  # FAIL CLOSED on the source clip — original clip untouched, still
         # non-compliant. Any generated candidate is quarantined, never deleted.
+
+    # --- Snap the provider's output to the EXACT target canvas ---
+    # The upscaler is given a resolution *label*, so a 9:16 source often comes
+    # back a few px short of the target (e.g. 1092x1902 vs 1080x1920) and the
+    # whole paid enhancement would otherwise be discarded. Cover+crop finish.
+    _normalize_to_exact_resolution(dest_path, required_width, required_height, log, scene_id)
 
     # --- Provider claims success is not proof: re-probe independently ---
     probe = _probe_video_stream(dest_path)

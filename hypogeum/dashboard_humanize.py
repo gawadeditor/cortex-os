@@ -269,6 +269,62 @@ _PROBLEM_ALIASES = {
 }
 
 
+# Free-text error phrases → a plain (label, meaning, action). Matched as a
+# case-insensitive substring against the raw error message, in order.
+_ERROR_PHRASES: list[tuple[str, tuple[str, str, str]]] = [
+    ("run orphaned", (
+        "Production stopped when the worker restarted",
+        "The production process was interrupted — usually a worker restart, not a real fault.",
+        "Cortex re-queues these automatically; no action needed unless it repeats.",
+    )),
+    ("killed by operator", (
+        "Production was restarted mid-run",
+        "Someone restarted production while this episode was being made.",
+        "Cortex resumes from where it stopped — no work or money is lost.",
+    )),
+    ("worker restart", (
+        "Production stopped when the worker restarted",
+        "The production process was interrupted by a restart.",
+        "Cortex resumes automatically.",
+    )),
+    ("production plan already exists", (
+        "Couldn't re-plan a half-finished episode",
+        "This episode was partly produced before, and its saved plan doesn't match a fresh one.",
+        "Move the old plan file aside and let it re-run, or start the episode fresh.",
+    )),
+    ("content_hash", (
+        "Saved plan mismatch",
+        "A saved production plan no longer matches what Cortex would produce now.",
+        "Re-run the episode from a clean state.",
+    )),
+    ("does not supply exactly one valid measured duration", (
+        "Voiceover timing didn't line up",
+        "The narration timings for one or more parts of the script weren't recorded.",
+        "Re-run the episode — this is usually a one-off in the voice provider.",
+    )),
+    ("instagram_caption_too_long", (
+        "Caption too long for Instagram",
+        "The description was longer than Instagram allows.",
+        "Fixed — captions are now trimmed for short videos.",
+    )),
+    ("no active grant", (
+        "Payment not authorized",
+        "This channel has no signed authorization for paid production.",
+        "Sign the channel's payment authorization on its Settings page.",
+    )),
+    ("timeout", (
+        "A step took too long",
+        "Part of production ran past its time limit.",
+        "Re-run the episode — usually a slow provider, not a real fault.",
+    )),
+    ("rate limit", (
+        "A provider was busy",
+        "One of the AI providers asked us to slow down.",
+        "Cortex retries automatically after a short wait.",
+    )),
+]
+
+
 def _problem_key(code) -> Optional[str]:
     if not code:
         return None
@@ -277,27 +333,38 @@ def _problem_key(code) -> Optional[str]:
         return k
     if k in _PROBLEM_ALIASES:
         return _PROBLEM_ALIASES[k]
-    # tolerate a trailing "_gate", "_check", "_blocked"
     k2 = re.sub(r"_(gate|check|blocked|failed|error)$", "", k)
     if k2 in _PROBLEMS:
         return k2
     return None
 
 
-def plain_problem(code, *, default_label: str = "Needs attention") -> dict:
-    """Return {label, meaning, action, known} for an internal problem code."""
+def plain_problem(code, *, default_label: str = "Production stopped") -> dict:
+    """Return {label, meaning, action, known} for an internal problem code or
+    a raw error message."""
     key = _problem_key(code)
-    if key is None:
-        # last-resort: de-snake the code so it at least reads as words
-        pretty = re.sub(r"[_\-]+", " ", str(code or "")).strip().capitalize()
-        return {
-            "label": pretty or default_label,
-            "meaning": "",
-            "action": "Open the item to see the details.",
-            "known": False,
-        }
-    label, meaning, action = _PROBLEMS[key]
-    return {"label": label, "meaning": meaning, "action": action, "known": True}
+    if key is not None:
+        label, meaning, action = _PROBLEMS[key]
+        return {"label": label, "meaning": meaning, "action": action, "known": True}
+
+    raw = str(code or "").strip()
+    low = raw.lower()
+    for phrase, (label, meaning, action) in _ERROR_PHRASES:
+        if phrase in low:
+            return {"label": label, "meaning": meaning, "action": action, "known": True}
+
+    # short codes (a_video, blocked_x) that slipped through: de-snake them
+    if raw and len(raw) <= 40 and " " not in raw:
+        pretty = re.sub(r"[_\-]+", " ", raw).strip().capitalize()
+        return {"label": pretty, "meaning": "", "action": "Open the item to see the details.", "known": False}
+
+    # a long free-text error we don't recognise — never dump it as the label
+    return {
+        "label": default_label,
+        "meaning": "Cortex hit a problem it couldn't categorise.",
+        "action": "Open the full log to see exactly what happened, then re-run the episode.",
+        "known": False,
+    }
 
 
 def plain_problem_label(code) -> str:

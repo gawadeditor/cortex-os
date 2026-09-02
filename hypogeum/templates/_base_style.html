@@ -559,6 +559,21 @@
     .spark-good .spark-fill { fill: var(--good-bg); } .spark-good .spark-line, .spark-good .spark-dot { stroke: var(--good); fill: var(--good); }
     .spark-info .spark-fill { fill: var(--info-bg); } .spark-info .spark-line, .spark-info .spark-dot { stroke: var(--info); fill: var(--info); }
 
+    /* areachart — full-width feature trend */
+    .areachart { width: 100%; height: clamp(120px, 22vw, 180px); display: block; overflow: visible; }
+    .areachart-grid { stroke: var(--hairline); stroke-width: 1; }
+    .areachart-fill { stroke: none; fill: color-mix(in srgb, var(--accent) 14%, transparent); }
+    .areachart-line { fill: none; stroke: var(--accent); stroke-width: 2;
+                      stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+    .areachart-dot  { fill: var(--accent); stroke: var(--bg); stroke-width: 2; }
+    .areachart-good .areachart-fill { fill: var(--good-bg); }
+    .areachart-good .areachart-line, .areachart-good .areachart-dot { stroke: var(--good); }
+    .areachart-good .areachart-dot { fill: var(--good); }
+    .areachart-info .areachart-fill { fill: var(--info-bg); }
+    .areachart-info .areachart-line, .areachart-info .areachart-dot { stroke: var(--info); }
+    .areachart-info .areachart-dot { fill: var(--info); }
+    :root[data-skin="presentation"] .areachart-line { filter: drop-shadow(0 0 8px var(--accent-line)); }
+
     .hbar { position: relative; display: inline-block; width: 100%; min-width: 60px; height: 8px;
             border-radius: 4px; vertical-align: middle; }
     .hbar-track { background: var(--overlay); }
@@ -752,6 +767,10 @@
     .sig-row-lbl { flex: 0 0 130px; }
     .sig-row .sig-track { flex: 1; height: 10px; }
     .sig-row-val { flex: 0 0 104px; text-align: right; font-size: 12px; font-weight: 700; }
+
+    /* clamp long episode titles in dense table cells to 2 lines */
+    .cell-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+                  overflow: hidden; line-height: 1.4; }
 
     /* signal strength meter — 3 bars, no raw number */
     .sig-meter { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); }

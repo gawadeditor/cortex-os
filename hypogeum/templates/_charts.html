@@ -27,6 +27,41 @@
   {%- else -%}<span class="muted" style="font-size:11px;">—</span>{%- endif -%}
 {%- endmacro -%}
 
+{#- areachart(values): a full-width filled trend for a hero/feature card.
+    Subtle baseline + two gridlines, emphasised end point. Scales to its
+    container (preserveAspectRatio none on the fill, meet on the dot layer).
+    values = list of numbers; needs >= 2 to draw. -#}
+{%- macro areachart(values, width=640, height=160, tone='accent') -%}
+  {%- set vals = values | map('float') | list -%}
+  {%- if vals | length >= 2 -%}
+    {%- set lo = vals | min -%}{%- set hi = vals | max -%}
+    {%- set span = (hi - lo) if (hi - lo) > 0 else 1 -%}
+    {%- set n = vals | length -%}
+    {%- set pad = 6 -%}
+    {%- set pts = [] -%}
+    {%- for v in vals -%}
+      {%- set x = (loop.index0 / (n - 1) * (width - 2 * pad) + pad) | round(2) -%}
+      {%- set y = (height - pad - (v - lo) / span * (height - 3 * pad)) | round(2) -%}
+      {%- set _ = pts.append(x ~ ',' ~ y) -%}
+    {%- endfor -%}
+  <svg class="areachart areachart-{{ tone }}" viewBox="0 0 {{ width }} {{ height }}"
+       preserveAspectRatio="none" role="img"
+       aria-label="trend across {{ n }} points, {{ vals[0]|round|int }} to {{ vals[-1]|round|int }}">
+    <title>{{ vals[0]|round|int }} → {{ vals[-1]|round|int }} (low {{ lo|round|int }}, high {{ hi|round|int }})</title>
+    {%- for gy in [0.25, 0.5, 0.75] %}
+    <line x1="0" x2="{{ width }}" y1="{{ (height * gy) | round(1) }}" y2="{{ (height * gy) | round(1) }}" class="areachart-grid"/>
+    {%- endfor %}
+    <polygon points="{{ pad }},{{ height - pad }} {{ pts | join(' ') }} {{ width - pad }},{{ height - pad }}" class="areachart-fill"/>
+    <polyline points="{{ pts | join(' ') }}" class="areachart-line"/>
+    <circle cx="{{ pts[-1].split(',')[0] }}" cy="{{ pts[-1].split(',')[1] }}" r="3.5" class="areachart-dot"/>
+  </svg>
+  {%- else -%}
+  <div class="dv-empty" style="min-height:80px;">
+    <div class="dv-empty-sub">Not enough history yet — this fills in as more episodes publish.</div>
+  </div>
+  {%- endif -%}
+{%- endmacro -%}
+
 {#- hbar(value, max): one horizontal bar. tone = accent|good|warn|critical. -#}
 {%- macro hbar(value, max, tone='accent', track=true) -%}
   {%- set pct = (value / max * 100) if max and max > 0 else 0 -%}

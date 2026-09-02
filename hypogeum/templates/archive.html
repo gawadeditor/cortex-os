@@ -22,11 +22,11 @@
     .ar-prompt { color: var(--muted); font-size: 12px; max-width: 460px; display: -webkit-box;
       -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
     .ar-mono { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11.5px; color: var(--faint); word-break: break-all; }
-    .pill { display: inline-block; font-size: 10.5px; font-weight: 700; padding: 2px 7px; border-radius: 999px;
+    .ar-pill { display: inline-block; font-size: 10.5px; font-weight: 700; padding: 2px 7px; border-radius: 999px;
       text-transform: uppercase; letter-spacing: .04em; }
-    .pill.local { background: var(--raised); color: var(--muted); }
-    .pill.cold  { background: var(--accent-bg); color: var(--accent); }
-    .pill.reuse { background: var(--good-bg, var(--raised)); color: var(--good, var(--muted)); }
+    .ar-pill.local { background: var(--raised); color: var(--muted); }
+    .ar-pill.cold  { background: var(--accent-bg); color: var(--accent); }
+    .ar-pill.reuse { background: var(--good-bg, var(--raised)); color: var(--good, var(--muted)); }
     .ar-pager { display: flex; gap: 8px; margin-top: 16px; align-items: center; }
     .ar-num { font-variant-numeric: tabular-nums; }
     .ar-scroll { overflow-x: auto; }
@@ -38,15 +38,14 @@
 
 <div class="container">
 
-  <div class="page-header">
-    <span class="eyebrow">Archive</span>
-    <h1>Asset archive</h1>
-    <span class="page-meta">
-      {{ data.total }} catalogued asset{{ 's' if data.total != 1 }} ·
-      root <span class="ar-mono">{{ root.resolved_root }}</span> ·
-      <a href="/settings/storage">change</a>
-    </span>
-  </div>
+  {% from '_hero.html' import hero %}
+  {{ hero(
+     eyebrow='Archive',
+     title='Everything Cortex has made',
+     lede='Every video clip, image and voice track from every episode — searchable by what it shows. Once an episode is published, its files move to long-term storage.',
+     figure="{:,}".format(data.total),
+     figure_label='saved files') }}
+  <p class="ar-count" style="margin-bottom:14px;"><a href="/settings/storage">Storage settings →</a></p>
 
   <form class="ar-tools" method="get" action="/archive">
     <div style="flex:1">
@@ -97,8 +96,8 @@
   <div class="card ar-scroll">
     <table class="ar-table">
       <thead><tr>
-        <th>Type</th><th>Prompt</th><th>Provider / model</th><th>Source episode</th>
-        <th>Used in</th><th>Published</th><th>Cost</th><th>Location</th>
+        <th>Type</th><th>What it shows</th><th>Made by</th><th>Episode</th>
+        <th>Reused</th><th>Published</th><th>Cost</th><th>Where it is</th>
       </tr></thead>
       <tbody>
       {% for r in data.rows %}
@@ -109,14 +108,14 @@
           </td>
           <td><div class="ar-prompt">{{ r.generation_prompt or '—' }}</div></td>
           <td>{{ r.provider }}{% if r.model %}<div class="ar-mono">{{ r.model }}</div>{% endif %}</td>
-          <td class="ar-mono">{{ r.episode_id }}</td>
+          <td style="font-size:12px;">{{ r.episode_id | episode_name }}</td>
           <td class="ar-num">{{ r.used_in_episodes | length }}</td>
-          <td class="ar-mono">{{ (r.published_at or '')[:10] or '—' }}</td>
-          <td class="ar-num">{{ '$%.2f'|format(r.cost_usd) if r.cost_usd else '—' }}</td>
+          <td class="muted" style="white-space:nowrap;">{{ r.published_at | friendly_date if r.published_at else '—' }}</td>
+          <td class="ar-num">{{ r.cost_usd | friendly_money if r.cost_usd else '—' }}</td>
           <td>
-            {% if r.moved_at %}<span class="pill cold">archived</span>
-            {% else %}<span class="pill local">local</span>{% endif %}
-            {% if r.reuse_eligible %}<span class="pill reuse">reuse</span>{% endif %}
+            {% if r.moved_at %}<span class="ar-pill cold">in cold storage</span>
+            {% else %}<span class="ar-pill local">on this machine</span>{% endif %}
+            {% if r.reuse_eligible %}<span class="ar-pill reuse">reusable</span>{% endif %}
           </td>
         </tr>
       {% endfor %}
@@ -141,8 +140,7 @@
     {% if filters.q or filters.asset_type or filters.provider %}
       No catalogued assets match these filters.
     {% else %}
-      Nothing catalogued yet. Assets are indexed automatically when an episode
-      finishes the pipeline, and moved here once it is published.
+      Nothing here yet. Files are saved automatically as each episode is made, and moved to storage once it's published.
     {% endif %}
   </div></div>
   {% endif %}

@@ -65,7 +65,7 @@ def test_archive_root_rejects_relative(client):
 def test_archive_browser_lists_and_searches(client):
     r = client.get("/archive")
     assert r.status_code == 200
-    assert b"3 catalogued asset" in r.data
+    assert b"3 saved files" in r.data
     assert b"brick vaulted corridor" in r.data
 
     r = client.get("/archive?q=colonnade")

@@ -175,6 +175,16 @@ def run_script_engine(
             "cta": "at most one short spoken line",
             "pacing": "open on the hook in the first sentence; no throat-clearing",
         }
+        if _generated_outro_policy(channel_id) is not None:
+            _tie = (_generated_outro_policy(channel_id) or {}).get(
+                "tie_directive",
+                "one gentle sentence showing the story's main character now peacefully asleep",
+            )
+            _input_package["short_native_directive"]["ending"] = (
+                f"Your final beat is the story's close: {_tie}. Then STOP — do not "
+                "add any farewell, sign-off, or call to follow/subscribe. The "
+                "channel appends its own closing line after your script."
+            )
 
     # Channel Learning: hook / pacing directives from this channel's own
     # retention analytics (hypogeum.channel_learning). Advisory to the model.
@@ -205,6 +215,10 @@ def run_script_engine(
 
     if (getattr(config, "SHORT_NATIVE_MODE", False) is True):
         _enforce_short_native_budget(script_package, config, log, channel_id=channel_id)
+
+    # Channel generated-outro: appended AFTER the budget trim so it is never
+    # dropped. No-op unless the channel ships outro_policy.json {mode:generated}.
+    _append_generated_outro(script_package, config, log, channel_id=channel_id)
 
     output_sections = len(script_package.get("sections", []))
     cta_count       = script_package.get("script_integrity", {}).get("cta_count", 0)
@@ -353,3 +367,104 @@ def _enforce_short_native_budget(
             total_words_max=max_total_words,
             final_total_words=running_total,
         )
+
+
+OUTRO_BEAT_TYPE = "outro"
+
+
+def _generated_outro_policy(channel_id: Optional[str]) -> Optional[dict]:
+    """The channel's outro policy when it wants a *generated* outro (a closing
+    beat appended to every script that gets its own shots), else None."""
+    if not channel_id:
+        return None
+    try:
+        from hypogeum.channel_package_scaffold import channel_outro_policy  # noqa: PLC0415
+        pol = channel_outro_policy(channel_id)
+        return pol if isinstance(pol, dict) and pol.get("mode") == "generated" else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _append_generated_outro(
+    script_package: dict, config, log, *, channel_id: Optional[str] = None,
+) -> None:
+    """Append the channel's closing outro to the script as its own beats.
+
+    The story's own final beat (written by the LLM) leaves the protagonist
+    settled to sleep; this adds the channel's fixed follow/like line on top,
+    split into per-clip-sized beats so each gets its own generated shot
+    through the normal pipeline (scene planner, cinematic director, VPD,
+    assembly) — no static outro.mp4, no coverage-fill. Runs AFTER
+    _enforce_short_native_budget so the outro is never trimmed. No-op unless
+    the channel ships channel_packages/<id>/outro_policy.json {mode:generated}.
+    """
+    pol = _generated_outro_policy(channel_id)
+    if pol is None:
+        return
+    follow_line = (pol.get("follow_line") or "").strip()
+    if not follow_line:
+        return
+
+    sections = script_package.get("sections", []) or []
+    if not sections:
+        return
+    last = sections[-1]
+    beats = last.setdefault("narration_beats", [])
+
+    # already appended (idempotent resume)?
+    if any((b.get("beat_type") == OUTRO_BEAT_TYPE) for b in beats):
+        return
+
+    _beat_secs, per_beat_words, _wps = _short_native_beat_budget(config, channel_id)
+
+    # Split the follow line into clip-sized chunks, breaking on sentence then
+    # comma boundaries, so each outro beat is sayable in one clip.
+    chunks: list[str] = []
+    for sentence in (s for s in _SENTENCE_SPLIT.split(follow_line) if s.strip()):
+        words = sentence.split()
+        if len(words) <= per_beat_words:
+            chunks.append(sentence.strip())
+            continue
+        cur: list[str] = []
+        for part in sentence.replace(", ", ",\x00").split("\x00"):
+            pw = part.split()
+            if cur and len(" ".join(cur).split()) + len(pw) > per_beat_words:
+                chunks.append(" ".join(cur).strip())
+                cur = []
+            cur.append(part.strip())
+        if cur:
+            chunks.append(" ".join(cur).strip())
+    # any chunk still over the cap (a long comma-free clause) → split into
+    # ceil(words/cap) roughly-equal parts (avoids a 1-word orphan tail)
+    import math as _math  # noqa: PLC0415
+    _bounded: list[str] = []
+    for c in (x for x in chunks if x):
+        w = c.split()
+        if len(w) <= per_beat_words:
+            _bounded.append(c)
+            continue
+        n = _math.ceil(len(w) / per_beat_words)
+        size = _math.ceil(len(w) / n)
+        for j in range(0, len(w), size):
+            _bounded.append(" ".join(w[j:j + size]))
+    # greedily merge adjacent chunks that still fit — fewest outro clips
+    merged: list[str] = []
+    for c in (x for x in _bounded if x):
+        if merged and len((merged[-1] + " " + c).split()) <= per_beat_words:
+            merged[-1] = merged[-1] + " " + c
+        else:
+            merged.append(c)
+    chunks = merged or [follow_line]
+
+    for i, text in enumerate(chunks, start=1):
+        beats.append({
+            "beat_id": f"b_outro_{i}",
+            "text": text,
+            "beat_type": OUTRO_BEAT_TYPE,
+        })
+    log.info(
+        "se_generated_outro_appended",
+        outro_beats=len(chunks),
+        per_beat_words_max=per_beat_words,
+        channel_id=channel_id,
+    )

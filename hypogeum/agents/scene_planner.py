@@ -176,11 +176,20 @@ def build_scene_plan_input(
             # hold a full story arc — otherwise the ending beats get no video
             # and the short is visibly cut off). Take the scaled value.
             _hard_cap = _ez
-        _beat_count = sum(
-            len(sec.get("narration_beats", []) or [])
-            for sec in script_package.get("sections", []) or []
+        _all_beats = [
+            b for sec in script_package.get("sections", []) or []
+            for b in (sec.get("narration_beats", []) or [])
+        ]
+        _beat_count = len(_all_beats)
+        # A channel generated-outro (beat_type == "outro") is appended on top of
+        # the story and must ALWAYS get its own shot — cap the story at
+        # _hard_cap, then add one scene slot per outro beat so none is dropped
+        # (which would trip the narration-completeness gate).
+        _outro_beats = sum(1 for b in _all_beats if b.get("beat_type") == "outro")
+        _story_beats = _beat_count - _outro_beats
+        _scene_cap = (
+            (min(_story_beats, _hard_cap) if _story_beats else _hard_cap) + _outro_beats
         )
-        _scene_cap = min(_beat_count, _hard_cap) if _beat_count else _hard_cap
         input_package["generation_constraints"] = {
             "max_main_scenes": _scene_cap,
             "scene_granularity": "exactly one scene per narration beat",

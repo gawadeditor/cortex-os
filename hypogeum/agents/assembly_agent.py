@@ -990,9 +990,21 @@ def run_assembly_agent(
     # AFTER the coverage / narration-completeness gates and never affects
     # them. Best-effort — a failed append ships the episode without the
     # outro rather than not at all.
+    #
+    # Skipped entirely when the channel uses a *generated* outro
+    # (outro_policy.json {mode:generated}) — that outro is real narrated beats
+    # already in the timeline, so a static clip on top would double it.
     # ------------------------------------------------------------------
     _outro_seconds = 0.0
-    if render_manifest.get("main_render", {}).get("file_exists"):
+    try:
+        from hypogeum.channel_package_scaffold import channel_outro_policy  # noqa: PLC0415
+        _generated_outro = (channel_outro_policy(channel_id) or {}).get("mode") == "generated"
+    except Exception:  # noqa: BLE001
+        _generated_outro = False
+    if _generated_outro:
+        log.info("assembly_static_outro_skipped", episode_id=episode_id,
+                 reason="channel_uses_generated_outro", channel_id=channel_id)
+    if not _generated_outro and render_manifest.get("main_render", {}).get("file_exists"):
         try:
             _res = str(render_manifest.get("main_resolution") or "1080x1920").lower().split("x")
             _w, _h = int(_res[0]), int(_res[1])

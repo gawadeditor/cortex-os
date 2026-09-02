@@ -49,6 +49,31 @@ def channel_outro_path(
     return p if p.is_file() else None
 
 
+def channel_outro_policy(
+    channel_id: str, *, packages_root: Optional[Path] = None,
+) -> Optional[dict]:
+    """The channel's outro policy (``channel_packages/<id>/outro_policy.json``),
+    or None when the channel has no policy file.
+
+    ``{"mode": "generated", "follow_line": "...", "tie_directive": "..."}``
+    means the Script Engine appends a closing "outro" beat to every episode —
+    a gentle one-sentence tie plus ``follow_line`` verbatim, narrated in the
+    channel voice — and that beat gets its own generated shots through the
+    normal pipeline (no static outro.mp4). Any other / missing policy leaves
+    the static ``channel_outro_path`` behaviour unchanged."""
+    if not channel_id:
+        return None
+    root = Path(packages_root) if packages_root is not None else _PACKAGES
+    p = root / channel_id / "outro_policy.json"
+    if not p.is_file():
+        return None
+    try:
+        pol = json.loads(p.read_text(encoding="utf-8"))
+        return pol if isinstance(pol, dict) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def scaffold_channel_package(channel_id: str, *, db_path: Optional[Path] = None,
                              template: str = "hypogeum",
                              packages_root: Optional[Path] = None) -> dict:

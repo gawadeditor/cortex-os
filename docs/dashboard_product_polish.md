@@ -52,14 +52,15 @@ per-page `<style>` unless truly page-local.
 
 | # | Page | Template | State | Notes |
 |---|------|----------|-------|-------|
-| 1 | Learning / Intelligence | `learning.html` | todo | hero + insight cards + signal viz |
-| 2 | Analytics / Performance | `analytics.html` | todo | hero + platform cards + real views chart |
-| 3 | Overview / Control room | `exec_dashboard.html`? | todo | tighten existing hero, humanise stats |
-| 4 | Channels | `channels.html` | todo | humanise NEXT SLOT / budget week |
-| 5 | Episodes (queue) | `episodes.html` | todo | hero, humanise priority/slug |
-| 6 | Episode detail | `episode_detail.html` | todo | 118KB — audit for bugs |
-| 7 | Production | `command.html` | todo | — |
-| — | consistency + bug sweep | all 73 | todo | after 1–6 |
+| 1 | Learning / Intelligence | `learning.html` | ✅ done | hero, insight cards, diverging signal bars, full plain-language |
+| 2 | Analytics / Performance | `analytics.html` | ✅ done | hero, stat-grid, full-width areachart, platform cards, titles not ids |
+| 3 | Overview / Control room | `exec_dashboard.html` | ✅ pass 1 | Recent/Latest Episodes humanised, dropped Platform-ID col + debug footer |
+| 4 | Attention / Review | `attention.html` | ✅ done | hero, plain learning items, icons not emoji |
+| 5 | Channels | `channels.html` | todo | humanise NEXT SLOT / budget week |
+| 6 | Episodes (queue) | `episodes.html` | todo | hero, humanise priority/slug |
+| 7 | Episode detail | `episode_detail.html` | todo | 118KB — audit for bugs |
+| 8 | Production | `command.html` | todo | — |
+| — | consistency + bug sweep | all 73 | todo | after the above |
 
 ## Log
 
@@ -73,4 +74,10 @@ per-page `<style>` unless truly page-local.
   `_hero.html` macro. **Learning page fully rebuilt** — hero, insight
   cards, humanised language everywhere (no ep-ids, no "avg strength:
   -0.50", no snake_case), diverging signal-by-area bars, intentional
-  empty state. Pages 2+ still todo.
+  empty state.
+- 2026-09-03 (cont.): Analytics/Performance rebuilt (hero, stat-grid, new
+  `areachart` macro, per-platform stat cards, episode TITLES everywhere,
+  dropped YouTube-OAuth copy). Overview pass 1 (Recent + Latest Episodes
+  humanised, "Platform ID" column + /api debug footer removed).
+  Attention/Review rebuilt (hero, plain learning items, SVG icons).
+  4 commits total. Next: Channels, Episodes queue, Episode detail.

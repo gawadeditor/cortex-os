@@ -107,71 +107,38 @@
 {{ subnav('production') }}
 <div class="container">
 
-{# ── Page header ── #}
-<div class="page-header">
-  <h1>Discovery Pipeline</h1>
-  <span class="page-meta">
-    Candidates scored by the autonomous discovery engine
-    {% if candidates %}&ensp;·&ensp;{{ candidates|length }} candidate{% if candidates|length != 1 %}s{% endif %}{% endif %}
-    {% if queued_topics %}&ensp;·&ensp;{{ queued_topics|length }} queued{% endif %}
-  </span>
+{% from '_hero.html' import hero %}
+{% call hero(
+     eyebrow='Discovery',
+     title='Topic ideas for ' ~ (channel_id | channel_name),
+     lede='Cortex looks for episode topics on its own, scores each one for how well it fits the channel and how likely it is to land, and lines up the best. Approve the ones you like — they go straight into the production queue.',
+     figure=candidates|length,
+     figure_label='idea' ~ ('' if candidates|length == 1 else 's') ~ ' scored',
+     pill=(queued_topics|length ~ ' already queued') if queued_topics else 'nothing queued yet',
+     pill_class='is-good' if queued_topics else 'is-warn') %}
   {% if channels and channels|length > 1 %}
-  <div style="margin-left:auto;">
-    <form method="GET" action="/discover" style="display:inline;">
-      <select name="channel_id" onchange="this.form.submit()"
-              style="padding:4px 8px; background:var(--surface); border:1px solid var(--border);
-                     border-radius:var(--radius); color:var(--text); font-size:12px;">
-        {% for ch in channels %}
-          <option value="{{ ch.channel_id }}"
-            {% if ch.channel_id == channel_id %}selected{% endif %}>{{ ch.channel_id }}</option>
-        {% endfor %}
-      </select>
-    </form>
-  </div>
+  <form method="GET" action="/discover">
+    <select name="channel_id" onchange="this.form.submit()" style="min-width:180px;">
+      {% for ch in channels %}
+        <option value="{{ ch.channel_id }}" {% if ch.channel_id == channel_id %}selected{% endif %}>{{ ch.name or ch.channel_id }}</option>
+      {% endfor %}
+    </select>
+  </form>
   {% endif %}
-</div>
-<p style="font-size:12px; color:var(--muted); margin-bottom:8px;">
-  Discovery runs automatically on schedule. The candidates below were scored by the last cycle.
-</p>
-<div style="margin-bottom:var(--gap); padding:8px 12px; background:rgba(210,153,34,.06);
-            border:1px solid rgba(210,153,34,.2); border-radius:var(--radius);
-            font-size:11px; color:var(--muted); line-height:1.7;">
-  <strong style="color:var(--yellow);">{{ icon('warning') }} Scoring status: rubric-based, not analytics-backed.</strong>
-  Scores reflect an LLM-assigned breakdown across 8 dimensions (click potential, curiosity gap,
-  evidence strength, visual potential, retention, feasibility, channel fit, novelty).
-  Scores vary per candidate (typical range 0.45–0.85) but are not yet calibrated against
-  real channel performance data.
-  <em>Cached candidates from before the last discovery cycle may still show 0.70
-  (old constant score) — run a fresh cycle to get real scores.</em>
-  <br><strong>Backlog:</strong> Replace with analytics-backed scoring once YouTube/social connectors provide
-  real CTR, retention, and watch-time signals.
-</div>
-
-{# ── Emergency: manual trigger ── #}
-<details style="margin-bottom:var(--gap);">
-  <summary style="padding:8px 14px; background:var(--surface); border:1px solid var(--border);
-                  border-radius:var(--radius); font-size:12px; color:var(--muted);
-                  list-style:none; cursor:pointer; display:flex; align-items:center; gap:6px;">
-    <span style="font-size:10px;">{{ icon('chevron-down') }}</span>
-    Emergency: manually trigger discovery cycle
-    <span style="font-size:11px; margin-left:4px;">(scheduled worker handles this automatically)</span>
-  </summary>
-  <div class="card" style="border-top:none; border-radius:0 0 var(--radius) var(--radius);
-                            padding:14px 16px; margin-top:0;">
-    <p style="font-size:12px; color:var(--muted); margin-bottom:12px;">
-      Only use this to force an immediate cycle for debugging or if the scheduler is not running.
-      In normal operation the discovery worker fires on its configured schedule.
-    </p>
-    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+  <details style="align-self:center;">
+    <summary class="btn btn-sm">Look for ideas now {{ icon('chevron-down') }}</summary>
+    <div class="card" style="position:absolute; z-index:10; margin-top:6px; max-width:340px;">
+      <p style="font-size:12px; color:var(--muted); margin-bottom:10px;">
+        Cortex does this on its own each day. Run it now only if you want fresh ideas straight away.
+      </p>
       <div id="discover-status" role="status" aria-live="polite"></div>
-      <button id="btn-run" type="button" class="btn btn-save"
-              onclick="runDiscovery()"
-              {% if discovery_status == 'running' %}disabled{% endif %}>
-        {% if discovery_status == 'running' %}Running…{% else %}Run Discovery Cycle{% endif %}
+      <button id="btn-run" type="button" class="btn btn-primary btn-sm"
+              onclick="runDiscovery()" {% if discovery_status == 'running' %}disabled{% endif %}>
+        {% if discovery_status == 'running' %}Looking…{% else %}Look for ideas now{% endif %}
       </button>
     </div>
-  </div>
-</details>
+  </details>
+{% endcall %}
 
 {# ── Flash messages ── #}
 {% if flash == 'approved' %}
@@ -210,11 +177,8 @@
 
 {# ── Cycle metadata ── #}
 {% if cycle_id and discovery_status in ('completed', 'idle') and candidates %}
-<div style="font-size:12px; color:var(--muted); margin-bottom:var(--gap);">
-  Last cycle:
-  {% if discovery_completed_at %}{{ discovery_completed_at[:19].replace('T',' ') }} UTC &nbsp;·&nbsp;{% endif %}
-  <code style="font-size:11px;">{{ cycle_id[:8] }}…</code>
-  &nbsp;·&nbsp; Channel: <code style="font-size:11px;">{{ channel_id }}</code>
+<div style="font-size:12px; color:var(--faint); margin-bottom:var(--gap);">
+  {% if discovery_completed_at %}Last looked for ideas {{ discovery_completed_at | rel_time }}{% endif %}
 </div>
 {% endif %}
 
@@ -237,19 +201,18 @@
       {# ── Score bar ── #}
       {% set pct = (c.score * 100) | int %}
       <div class="score-row">
-        <span class="rationale-lbl" style="min-width:90px;">Discovery Score</span>
-        <span class="score-num">{{ "%.2f"|format(c.score) }}</span>
-        <div class="score-bar-wrap" title="Discovery Score {{ pct }}%">
+        <span class="rationale-lbl" style="min-width:90px;">How it rates</span>
+        <span class="score-num">{% if c.score >= 0.75 %}strong{% elif c.score >= 0.6 %}good{% elif c.score >= 0.45 %}fair{% else %}weak{% endif %}</span>
+        <div class="score-bar-wrap" title="{{ pct }}%">
           <div class="score-bar-fill {% if c.score < 0.5 %}score-low{% elif c.score < 0.7 %}score-mid{% endif %}"
                style="width:{{ pct }}%;"></div>
         </div>
-        <span class="source-tag">{{ c.source }}</span>
         {% if c.selected %}<span class="badge badge-active">top pick</span>{% endif %}
         {% if already_queued %}<span class="badge-queued">{{ icon('check') }} queued</span>{% endif %}
         {% if c.status == 'approved' and not already_queued %}
           <span class="badge badge-active">approved</span>
         {% elif c.status == 'rejected' %}
-          <span class="badge" style="color:var(--muted);">rejected</span>
+          <span class="badge" style="color:var(--muted);">skipped</span>
         {% endif %}
       </div>
 

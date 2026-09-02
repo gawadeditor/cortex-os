@@ -220,6 +220,21 @@ def run_script_engine(
     # dropped. No-op unless the channel ships outro_policy.json {mode:generated}.
     _append_generated_outro(script_package, config, log, channel_id=channel_id)
 
+    # Re-persist the checkpoint so it reflects the FINAL package (humanized
+    # beats + short-native trim + generated outro), not just run_agent's raw
+    # LLM output. Without this, a pipeline resume reloads the stale on-disk
+    # copy and silently drops the outro / humanization.
+    try:
+        import json as _json  # noqa: PLC0415
+        from hypogeum.agent import _resolve_output_path  # noqa: PLC0415
+        _ckpt = _resolve_output_path(episode_id, "script_package", output_dir)
+        _ckpt.write_text(
+            _json.dumps(script_package, ensure_ascii=False, indent=2), encoding="utf-8",
+        )
+        log.info("se_script_checkpoint_repersisted", path=str(_ckpt))
+    except Exception as exc:  # noqa: BLE001
+        log.warn("se_script_checkpoint_repersist_failed", error=str(exc))
+
     output_sections = len(script_package.get("sections", []))
     cta_count       = script_package.get("script_integrity", {}).get("cta_count", 0)
     output_shorts   = len(script_package.get("shorts_scripts", []))

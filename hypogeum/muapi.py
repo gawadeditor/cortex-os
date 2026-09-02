@@ -1468,7 +1468,7 @@ def submit_scene(
     # is supplied). The ONLY exception is MUAPI_DRY_RUN -- the legacy path
     # then just writes a zero-network placeholder. Pre-plan / no-plan
     # callers (tests, tools, shadow observation) are unaffected.
-    if not config.MUAPI_DRY_RUN:
+    if not getattr(config, "MUAPI_DRY_RUN", False):
         from hypogeum.production_plan import PlanLifecycle, classify_plan_lifecycle
         if classify_plan_lifecycle(eid, output_dir) is not PlanLifecycle.PRE_PLAN:
             log.warn(

@@ -252,10 +252,8 @@ class TestLightingDnaWiring:
     def test_submit_scene_call_shape_unaffected(self):
         import hypogeum.muapi as muapi
         source = Path(muapi.__file__).read_text()
-        assert (
-            'video_prompt_writer.assemble_video_scene_prompt(prod_spec["primary_prompt"])'
-            in source
-        )
+        assert "video_prompt_writer.assemble_video_scene_prompt(" in source
+        assert 'prod_spec["primary_prompt"], channel_id=channel_id)' in source
 
 
 def test_no_duplicate_lighting_forbidden_items_when_combined_with_composition():

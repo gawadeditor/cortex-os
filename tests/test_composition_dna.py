@@ -271,16 +271,12 @@ class TestCompositionDnaWiring:
         assert "talking_head" in forbidden_section  # from Video DNA, not duplicated
 
     def test_submit_scene_call_shape_unaffected(self, monkeypatch):
-        # hypogeum.muapi.submit_scene() must continue calling
-        # assemble_video_scene_prompt() with exactly one positional
-        # argument — proves this slice did not touch muapi.py's call site.
+        # hypogeum.muapi.submit_scene() must continue assembling the prompt via
+        # video_prompt_writer from prod_spec's own prompt (+ the channel_id the
+        # channel-separation work threads through) — proves this slice did not
+        # touch muapi.py's call site.
         import hypogeum.muapi as muapi
         source = Path(muapi.__file__).read_text()
-        assert (
-            'video_prompt_writer.assemble_video_scene_prompt(prod_spec["primary_prompt"])'
-            in source
-        )
-        assert (
-            'video_prompt_writer.assemble_video_scene_prompt(prod_spec["fallback_prompt"])'
-            in source
-        )
+        assert "video_prompt_writer.assemble_video_scene_prompt(" in source
+        assert 'prod_spec["primary_prompt"], channel_id=channel_id)' in source
+        assert 'prod_spec["fallback_prompt"], channel_id=channel_id)' in source

@@ -918,11 +918,14 @@ def run_assembly_agent(
         )
 
     # Resolve end-page path: auto-discover from assets_root/end-page.png.
-    # Passed to the renderer only when the file exists on disk AND the channel
-    # has no branded outro of its own. channel_packages/<id>/outro.mp4 is the
-    # per-channel sign-off and supersedes the shared generic end-page card —
-    # otherwise a channel gets two end cards (and a shorts-native episode a
-    # 30s+ tail on a ~35s story, plus the shared card is Hypogeum-branded).
+    # The shared end-page.png is Hypogeum-branded and 20s long — it is only
+    # for a long-form hypogeum episode that has no sign-off of its own. It is
+    # skipped when:
+    #   - the channel ships channel_packages/<id>/outro.mp4 (static sign-off), OR
+    #   - the channel uses a generated outro (its closing beats are already in
+    #     the body — appending a second, off-brand card is wrong), OR
+    #   - the episode is short-native (a 20s Hypogeum card on a ~50s story is
+    #     both too long and off-brand for every non-hypogeum shorts channel).
     _end_page_path = assets_root / "end-page.png"
     _end_page_duration = float(getattr(config, "END_PAGE_DURATION_SECONDS", 20))
     try:
@@ -930,12 +933,25 @@ def run_assembly_agent(
         _channel_has_own_outro = channel_outro_path(channel_id) is not None
     except Exception:  # noqa: BLE001
         _channel_has_own_outro = False
-    _use_end_page = _end_page_path.exists() and not _channel_has_own_outro
-    if _end_page_path.exists() and _channel_has_own_outro:
+    try:
+        from hypogeum.channel_package_scaffold import channel_outro_policy
+        _channel_generated_outro = (
+            (channel_outro_policy(channel_id) or {}).get("mode") == "generated"
+        )
+    except Exception:  # noqa: BLE001
+        _channel_generated_outro = False
+    _short_native = getattr(config, "SHORT_NATIVE_MODE", False) is True
+    _skip_end_page = _channel_has_own_outro or _channel_generated_outro or _short_native
+    _use_end_page = _end_page_path.exists() and not _skip_end_page
+    if _end_page_path.exists() and _skip_end_page:
         log.info(
             "assembly_end_page_skipped",
             episode_id=episode_id,
-            reason="channel_has_own_branded_outro",
+            reason=(
+                "channel_has_own_branded_outro" if _channel_has_own_outro
+                else "channel_uses_generated_outro" if _channel_generated_outro
+                else "short_native_episode"
+            ),
             channel_id=channel_id,
         )
 

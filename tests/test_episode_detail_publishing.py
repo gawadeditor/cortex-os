@@ -542,7 +542,8 @@ class TestPublishingCards:
         _cred(conn, platform="tiktok", status="expired")
         conn.close()
         html = self._pub_html((c, db_path), "ep_nc")
-        assert "/platforms/connect/tiktok" in html
+        # accounts are connected per channel in Zernio (not the old per-platform OAuth)
+        assert "Connect in Zernio" in html and "/channels" in html
 
     def test_empty_state_shows_all_connect_links(self, client):
         """No outcomes and no credentials → empty state with connect buttons."""
@@ -551,7 +552,7 @@ class TestPublishingCards:
         _ep(conn, episode_id="ep_empty")
         conn.close()
         html = self._pub_html((c, db_path), "ep_empty")
-        assert "/platforms/connect/youtube" in html
+        assert "Connect accounts in Zernio" in html
 
     def test_platform_display_names_used(self, client):
         """Cards use 'YouTube' not 'youtube'."""

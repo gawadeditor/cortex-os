@@ -365,6 +365,13 @@ def _build_detail(conn, episode_id: str) -> Optional[dict]:
         platforms.append(p)
         pub_outcomes_by_platform[p["platform"]] = p
 
+    # Episodes published through Zernio have no publishing_outcomes row —
+    # rebuild the per-platform outcome from the submission ledger.
+    for plat, syn in _zernio_publish_outcomes(conn, episode_id).items():
+        if plat not in pub_outcomes_by_platform:
+            pub_outcomes_by_platform[plat] = syn
+            platforms.append(syn)
+
     # ── Credential states (for Publishing tab connection_state) ─────────
     cred_states = _load_cred_states(conn)
 
@@ -528,10 +535,31 @@ def _build_stage_groups(
 
 def _load_cred_states(conn) -> dict[str, str]:
     """
-    Return {platform: credential_status} using the most-recent credential row
-    per platform.  status values: "active" | "expired" | "revoked" | "none"
+    Return {platform: credential_status}. status: "active" | "expired" |
+    "revoked" | "none".
+
+    A platform counts as connected when EITHER an active Zernio publishing
+    binding exists for it (the current model — accounts are connected per
+    channel in Zernio) OR a legacy direct-OAuth secret profile is active
+    (kept only for older single-channel installs).
     """
     result = {p: "none" for p in _PLATFORM_ORDER}
+    # ── Zernio publishing bindings (current) ──────────────────────────────
+    try:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT pa.platform
+            FROM channel_provider_bindings b
+            JOIN provider_accounts pa ON pa.provider_account_id = b.provider_account_id
+            WHERE b.capability = 'publishing' AND b.enabled = 1
+              AND pa.platform IN ('youtube','tiktok','instagram','facebook')
+            """
+        ).fetchall()
+        for r in rows:
+            result[r["platform"]] = "active"
+    except Exception:
+        pass
+    # ── Legacy direct-OAuth secret profiles ──────────────────────────────
     try:
         rows = conn.execute(
             """
@@ -544,12 +572,59 @@ def _load_cred_states(conn) -> dict[str, str]:
         ).fetchall()
         seen: set = set()
         for r in rows:
-            if r["provider"] not in seen:
+            if r["provider"] not in seen and result.get(r["provider"]) == "none":
                 result[r["provider"]] = r["status"]
                 seen.add(r["provider"])
     except Exception:
         pass
     return result
+
+
+def _zernio_publish_outcomes(conn, episode_id: str) -> dict[str, dict]:
+    """
+    Synthesise per-platform publishing outcomes from the Zernio submission
+    ledger (publishing_attempts + publishing_receipts) for episodes that
+    published through Zernio and therefore have no publishing_outcomes row.
+    Never raises.
+    """
+    out: dict[str, dict] = {}
+    try:
+        rows = conn.execute(
+            """
+            SELECT a.platform, a.state,
+                   r.provider_publication_id, r.native_platform_content_id,
+                   r.provider_status, r.acknowledged_at
+            FROM publishing_attempts a
+            LEFT JOIN publishing_receipts r ON r.attempt_id = a.attempt_id
+            WHERE a.episode_id = ?
+            ORDER BY a.updated_at DESC
+            """,
+            [episode_id],
+        ).fetchall()
+    except Exception:
+        return out
+    _STATE_MAP = {
+        "succeeded": "success", "acknowledged": "success",
+        "failed_definitive": "failed", "cancelled": None,
+        "submitting": "pending", "prepared": "pending", "ambiguous": "pending",
+    }
+    for r in rows:
+        plat = r["platform"]
+        if plat in out:
+            continue  # newest row wins
+        mapped = _STATE_MAP.get((r["state"] or "").lower(), "pending")
+        if mapped is None:
+            continue
+        out[plat] = {
+            "platform": plat,
+            "publishing_status": mapped,
+            "platform_video_id": r["native_platform_content_id"] or r["provider_publication_id"],
+            "published_at": r["acknowledged_at"],
+            "url": None,
+            "failure_reason": None,
+            "status_label": _PUBLISH_STATUS_LABELS.get(mapped, "Unknown"),
+        }
+    return out
 
 
 def _build_publishing_data(

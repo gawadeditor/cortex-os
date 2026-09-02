@@ -579,7 +579,7 @@
   {% else %}
   {# Fallback single-status badge for DB episodes that don't have 4-way state yet #}
   <div class="ep-meta-row" style="margin-top:4px;">
-    <span class="badge badge-{{ d.status }}">{{ d.status_label }}</span>
+    <span class="badge badge-{{ d.status }}">{{ (d.status or d.status_label) | plain_status }}</span>
   </div>
   {% endif %}
 
@@ -620,7 +620,7 @@
           <span style="color:var(--muted)">—</span>
         {% endif %}
       </div>
-      <div class="ep-kpi-lbl">Duration</div>
+      <div class="ep-kpi-lbl">Time to make</div>
     </div>
     <div class="ep-kpi">
       <div class="ep-kpi-val">
@@ -1236,10 +1236,10 @@ function resumeEpisode(episodeId, kind) {
     {% for item in pub.checklist %}
     <tr style="border-bottom:1px solid var(--border);">
       <td style="padding:10px 8px; width:28px; text-align:center;">
-        {% if item.status == 'pass' %}<span style="color:var(--green); font-weight:700;">✓</span>
-        {% elif item.status == 'warn' %}<span style="color:var(--yellow); font-weight:700;">⚠</span>
-        {% elif item.status == 'fail' %}<span style="color:var(--red); font-weight:700;">✗</span>
-        {% else %}<span style="color:var(--muted);">—</span>{% endif %}
+        {% if item.status == 'pass' %}<span class="ok">{{ icon('check') }}</span>
+        {% elif item.status == 'warn' %}<span class="warn">{{ icon('warning') }}</span>
+        {% elif item.status == 'fail' %}<span class="err">{{ icon('x') }}</span>
+        {% else %}<span class="muted">—</span>{% endif %}
       </td>
       <td style="padding:10px 8px; font-weight:600; white-space:nowrap;">{{ item.label }}</td>
       <td style="padding:10px 8px; font-size:12px; color:
@@ -1261,17 +1261,17 @@ function resumeEpisode(episodeId, kind) {
   <div style="margin-top:14px; padding-top:12px; border-top:1px solid var(--border);
               display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
     {% if rel_status == 'READY' %}
-      <span style="color:var(--green); font-weight:700; font-size:13px;">✓ Ready to publish</span>
+      <span style="color:var(--green); font-weight:700; font-size:13px;">{{ icon('check') }} Ready to publish</span>
       <span class="btn" style="opacity:.4; cursor:not-allowed;" title="Publishing runs via pipeline — not available from this UI">
         Publish (pipeline only)
       </span>
     {% elif rel_status == 'BLOCKED' %}
       <span style="color:var(--red); font-weight:700; font-size:13px;">
-        ✗ Publish blocked — {{ d.get('release_blocker_label') or d.get('release_blocker') or 'see checklist above' }}
+        {{ icon('x') }} Publish blocked — {{ d.get('release_blocker_label') or d.get('release_blocker') or 'see checklist above' }}
       </span>
     {% else %}
       <span style="color:var(--yellow); font-weight:700; font-size:13px;">
-        ⚠ Review required before publishing
+        {{ icon('warning') }} Review needed before publishing
       </span>
     {% endif %}
   </div>
@@ -1342,7 +1342,7 @@ function resumeEpisode(episodeId, kind) {
       {% if card.published_at %}
       <div class="pub-field">
         <span class="pub-field-label">Published</span>
-        <span>{{ card.published_at[:10] }}</span>
+        <span>{{ card.published_at | friendly_date }}</span>
       </div>
       {% endif %}
       {% if card.published_at_display and card.published_at_display != 'Unknown' %}
@@ -1353,14 +1353,14 @@ function resumeEpisode(episodeId, kind) {
       {% endif %}
       {% if card.platform_video_id %}
       <div class="pub-field">
-        <span class="pub-field-label">Video ID</span>
+        <span class="pub-field-label">Post ID</span>
         <span class="pub-video-id">{{ card.platform_video_id }}</span>
       </div>
       {% endif %}
       {% if card.url %}
       <div class="pub-card-actions">
         <a href="{{ card.url }}" target="_blank" rel="noopener" class="btn btn-approve">
-          ▶ Watch on {{ card.display_name }} ↗
+          {{ icon('play') }} Watch on {{ card.display_name }}
         </a>
       </div>
       {% endif %}
@@ -1380,7 +1380,7 @@ function resumeEpisode(episodeId, kind) {
       {% if card.published_at %}
       <div class="pub-field" style="margin-top:8px;">
         <span class="pub-field-label">Queued at</span>
-        <span>{{ card.published_at[:10] }}</span>
+        <span>{{ card.published_at | friendly_date }}</span>
       </div>
       {% endif %}
 
@@ -1395,12 +1395,10 @@ function resumeEpisode(episodeId, kind) {
 
     {% else %}{# not_connected #}
       <div style="font-size:13px; color:var(--muted); margin-top:4px;">
-        Platform not connected
+        Not connected to this platform in Zernio yet
       </div>
       <div class="pub-card-actions">
-        <a href="/platforms/connect/{{ card.platform }}" class="btn">
-          Connect {{ card.display_name }}
-        </a>
+        <a href="/channels" class="btn">Connect in Zernio</a>
       </div>
     {% endif %}
 
@@ -1449,32 +1447,29 @@ function resumeEpisode(episodeId, kind) {
   <div style="margin-top:14px; padding-top:12px; border-top:1px solid var(--border);
               display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
     {% if rel_status == 'READY' %}
-      <span style="color:var(--green); font-weight:700; font-size:13px;">✓ Ready to publish</span>
+      <span style="color:var(--green); font-weight:700; font-size:13px;">{{ icon('check') }} Ready to publish</span>
       <span class="btn" style="opacity:.4; cursor:not-allowed;" title="Automated publishing not yet wired to this UI">
         Publish (pipeline only)
       </span>
     {% elif rel_status == 'BLOCKED' %}
       <span style="color:var(--red); font-weight:700; font-size:13px;">
-        ✗ Publish blocked — {{ d.get('release_blocker_label') or d.get('release_blocker') or 'see checklist' }}
+        {{ icon('x') }} Publish blocked — {{ d.get('release_blocker_label') or d.get('release_blocker') or 'see checklist' }}
       </span>
     {% else %}
       <span style="color:var(--yellow); font-weight:700; font-size:13px;">
-        ⚠ Review required before publishing
+        {{ icon('warning') }} Review needed before publishing
       </span>
     {% endif %}
     <span style="font-size:11px; color:var(--muted); margin-left:auto;">
-      <a href="/platforms/connect/youtube" style="color:var(--muted);">Manage YouTube credential →</a>
+      <a href="/channels" style="color:var(--muted);">Manage connections in Zernio →</a>
     </span>
   </div>
 </div>
 {% else %}
 <div class="card" style="text-align:center; padding:40px 20px; color:var(--muted);">
-  No platform connections or publishing records found for this episode.
-  <div style="margin-top:12px; display:flex; gap:8px; justify-content:center; flex-wrap:wrap;">
-    <a href="/platforms/connect/youtube"    class="btn">Connect YouTube</a>
-    <a href="/platforms/connect/tiktok"     class="btn">Connect TikTok</a>
-    <a href="/platforms/connect/instagram"  class="btn">Connect Instagram</a>
-    <a href="/platforms/connect/facebook"   class="btn">Connect Facebook</a>
+  This episode hasn't been published yet. Social accounts are connected per channel through Zernio.
+  <div style="margin-top:12px;">
+    <a href="/channels" class="btn btn-primary">Connect accounts in Zernio</a>
   </div>
 </div>
 {% endif %}
@@ -1686,12 +1681,16 @@ function resumeEpisode(episodeId, kind) {
 </div>
 
 {% else %}
-{# Empty state #}
-<div class="card" style="text-align:center; padding:40px 20px; color:var(--muted);">
-  No thumbnail candidates found for this episode.
-  <div style="margin-top:12px;">
-    <a href="?tab=production" class="btn">← Back to Production</a>
+{# Empty state — short-form videos use the platform auto-cover, not a custom thumbnail #}
+<div class="dv-empty">
+  {{ icon('palette') }}
+  <div class="dv-empty-title">No custom thumbnail for this episode</div>
+  <div class="dv-empty-sub">
+    Short vertical videos use each platform's own cover (taken from the opening
+    frame) — that's expected and needs nothing from you. Full-length videos
+    generate thumbnail options here during production.
   </div>
+  <a href="?tab=production" class="btn" style="margin-top:6px;">Back to production</a>
 </div>
 {% endif %}
 
@@ -1963,7 +1962,7 @@ function resumeEpisode(episodeId, kind) {
           <th>Platform</th>
           <th>Published</th>
           <th>Days since publish</th>
-          <th>Video ID</th>
+          <th>Post ID</th>
           <th>First analytics</th>
           <th>Latest analytics</th>
           <th>Link</th>

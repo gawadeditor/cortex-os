@@ -5,252 +5,209 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Learning — Cortex</title>
   {% include '_base_style.html' %}
-  <style>
-    .action-row { padding: 12px 0; border-bottom: 1px solid var(--border); }
-    .action-row:last-child { border-bottom: none; }
-    .action-header { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
-    .action-btns { margin-left: auto; display: flex; gap: 6px; }
-    .action-rationale { font-size: 13px; color: var(--text); margin-top: 2px; }
-    .action-time { font-size: 11px; color: var(--muted); margin-top: 3px; }
-    .rec-card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
-                padding: 10px 14px; margin-bottom: 8px; }
-    .rec-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; }
-    .confidence-bar { font-family: monospace; font-size: 11px; color: var(--blue); }
-    .lr-row { padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 12px;
-              display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-    .lr-row:last-child { border-bottom: none; }
-    .cov-tile { text-align: center; padding: 8px 12px; }
-    .cov-val { font-size: 18px; font-weight: 700; }
-    .cov-lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; margin-top: 2px; }
-  </style>
 </head>
 <body>
 {% include '_nav.html' %}
 {% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
 
 <div class="container">
 
-{% include '_intelligence_subnav.html' %}
+{% set _pending = state.pending_actions_list or [] %}
+{% set _total_signals = (state.total_analytics_records or 0) %}
+{% set _dir_cls = {'up':'dir-up','down':'dir-down','change':'dir-change'} %}
 
-{% set _DIM_CLS = {
-  'thumbnail': 'dim-thumbnail', 'title': 'dim-title', 'hook': 'dim-hook',
-  'pacing': 'dim-pacing', 'retention': 'dim-retention', 'cta': 'dim-cta',
-  'audio': 'dim-audio', 'topic': 'dim-topic',
-} %}
-
-<div class="page-header">
-  <h1>Intelligence</h1>
-  <span class="page-meta">
-    {{ state.total_insights }} insight{% if state.total_insights != 1 %}s{% endif %} ·
-    {{ state.total_analytics_records }} records
-  </span>
-  <div style="margin-left:auto;">
-    <a href="/intelligence/performance" class="btn">Analytics →</a>
-  </div>
-</div>
-<p style="font-size:12px; color:var(--muted); margin-bottom:var(--gap);">
-  The system applies high-confidence tunings automatically. Items below require your judgment.
-</p>
-
-{# ── Items requiring human review (below confidence threshold) ── #}
-{% if state.pending_actions_list %}
-<div class="action-banner">
-  {{ icon("bolt", "i-lg") }}
-  <div class="action-banner-body">
-    <div class="action-banner-title">
-      {{ state.pending_actions_list | length }} item{% if state.pending_actions_list | length != 1 %}s{% endif %} require your review
-    </div>
-    <div class="action-banner-sub">The system applies high-confidence tunings automatically. These items fell below the confidence threshold and require your judgment.</div>
-  </div>
-  <span class="action-banner-count">{{ state.pending_actions_list | length }}</span>
-</div>
-
-<div class="card" style="padding:0 16px;">
-  {% for a in state.pending_actions_list %}
-  <div class="action-row">
-    <div class="action-header">
-      <span class="dim-badge {{ _DIM_CLS.get(a.dimension|lower, 'dim-default') }}">{{ a.dimension }}</span>
-      <span class="badge badge-queued">{{ a.action_type }}</span>
-      {% if a.source_episode %}
-        <a href="/analytics/episode/{{ a.source_episode }}" class="muted" style="font-size:11px;">
-          {{ a.source_episode }}
-        </a>
-      {% endif %}
-      <div class="action-btns">
-        <form method="POST" action="/learning/action/{{ a.action_id }}/apply" style="display:inline;">
-          <button type="submit" class="btn btn-approve">✓ Apply</button>
-        </form>
-        <form method="POST" action="/learning/action/{{ a.action_id }}/dismiss" style="display:inline;"
-              onsubmit="return confirm('Dismiss this action?')">
-          <button type="submit" class="btn btn-reject">✗ Dismiss</button>
-        </form>
-      </div>
-    </div>
-    <div class="action-rationale">{{ a.rationale[:220] }}</div>
-    <div class="action-time">{{ a.created_at[:16] if a.created_at else '' }}</div>
-  </div>
-  {% endfor %}
-</div>
-
-{% else %}
-<div class="card" style="text-align:center; padding:20px 16px;">
-  <div style="font-size:14px; color:var(--muted); margin-bottom:8px;">No pending actions.</div>
+{% call hero(
+     eyebrow='Intelligence',
+     title='What Cortex is learning from your audience',
+     lede='High-confidence lessons are applied to the next episode automatically. Everything below scored under the confidence line and is waiting for your call.',
+     figure=_total_signals,
+     figure_label='data points read',
+     pill=(_pending|length ~ ' waiting for you') if _pending else 'All caught up',
+     pill_class='is-warn' if _pending else 'is-good') %}
+  <a class="btn btn-primary" href="/intelligence/performance">
+    {{ icon('analytics') }} View performance
+  </a>
   {% if state.total_analytics_records == 0 %}
-    <a href="/analytics/import" class="btn">Import analytics to generate insights →</a>
-  {% else %}
-    <div style="font-size:12px; color:var(--muted);">
-      All {{ state.applied_actions + state.dismissed_actions }} actions have been processed.
-    </div>
+    <a class="btn" href="/analytics/import">{{ icon('upload') }} Import analytics</a>
   {% endif %}
-</div>
-{% endif %}
+{% endcall %}
 
-{# ── KPI strip ── #}
-<div class="kpi-strip">
-  <div class="kpi-card">
-    <div class="kpi-val">{{ state.total_analytics_records }}</div>
-    <div class="kpi-lbl">Analytics records</div>
-  </div>
-  <div class="kpi-card">
-    <div class="kpi-val">{{ state.total_insights }}</div>
-    <div class="kpi-lbl">Insights</div>
-  </div>
-  <div class="kpi-card">
-    <div class="kpi-val {% if state.pending_actions > 0 %}warn{% else %}muted{% endif %}">
-      {{ state.pending_actions }}
-    </div>
-    <div class="kpi-lbl">Pending actions</div>
-  </div>
-  <div class="kpi-card">
-    <div class="kpi-val ok">{{ state.applied_actions }}</div>
-    <div class="kpi-lbl">Applied</div>
-  </div>
-  <div class="kpi-card">
-    <div class="kpi-val muted">{{ state.dismissed_actions }}</div>
-    <div class="kpi-lbl">Dismissed</div>
-  </div>
+{# ── Review queue ─────────────────────────────────────────────────────── #}
+<div class="sec-head">
+  <h2>Waiting for your review</h2>
+  <span class="sec-count">{{ _pending|length }}</span>
 </div>
 
-{# ── Platform coverage ── #}
-{% if state.platform_coverage %}
-<div class="card" style="padding:12px 16px; margin-bottom:var(--gap);">
-  <div class="card-title">Platform Coverage</div>
-  <div style="display:flex; gap:0; flex-wrap:wrap;">
-    {% for plat, count in state.platform_coverage.items() %}
-    <div class="cov-tile">
-      <div class="cov-val">{{ count }}</div>
-      <div class="cov-lbl">{{ plat }}</div>
-    </div>
-    {% endfor %}
-  </div>
-</div>
-{% endif %}
-
-{# ── Signal map by dimension ── #}
-{% if state.insights_by_dimension %}
-<div class="card" style="padding:0; margin-bottom:var(--gap);">
-  <div style="padding:12px 16px 0;"><div class="card-title">Signal Map</div></div>
-  <table>
-    <thead>
-      <tr><th>Dimension</th><th style="text-align:right;">Positive</th><th style="text-align:right;">Negative</th><th style="text-align:right;">Net</th></tr>
-    </thead>
-    <tbody>
-      {% for dim, counts in state.insights_by_dimension.items() %}
-      {% set net = counts.positive - counts.negative %}
-      <tr>
-        <td><span class="dim-badge {{ _DIM_CLS.get(dim|lower, 'dim-default') }}">{{ dim }}</span></td>
-        <td class="ok" style="text-align:right;">{{ counts.positive }}</td>
-        <td class="err" style="text-align:right;">{{ counts.negative }}</td>
-        <td class="{% if net > 0 %}ok{% elif net < 0 %}err{% else %}muted{% endif %}"
-            style="text-align:right; font-weight:600;">
-          {% if net > 0 %}+{% endif %}{{ net }}
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</div>
-{% endif %}
-
-{# ── Recommendations by dimension ── #}
-{% if state.recommendations %}
-<div class="card" style="margin-bottom:var(--gap);">
-  <div class="card-title">Recommendations by Dimension</div>
-  {% for dim, rec in state.recommendations.items() %}
-  <div class="rec-card">
-    <div class="rec-header">
-      <span class="dim-badge {{ _DIM_CLS.get(dim|lower, 'dim-default') }}">{{ dim }}</span>
-      <span class="badge badge-{% if rec.status == 'applied' %}complete{% else %}queued{% endif %}">
-        {{ rec.action_type }}
+{% if _pending %}
+<div class="insight-list skin-stagger">
+  {% for a in _pending %}
+  {% set _act = a.action_type | plain_learning_action %}
+  <article class="insight-card {{ _dir_cls.get(_act.direction, 'dir-change') }}">
+    <div class="insight-head">
+      <span class="insight-dir {{ _dir_cls.get(_act.direction, 'dir-change') }}">
+        {% if _act.direction == 'up' %}{{ icon('arrow-right') }}{% elif _act.direction == 'down' %}{{ icon('arrow-right') }}{% else %}{{ icon('sparkle') }}{% endif %}
+        {{ _act.label }}
       </span>
-      <span class="confidence-bar">{{ rec.confidence | pct_bar(10) }}</span>
-      <span class="muted" style="font-size:11px; margin-left:auto;">{{ rec.status }}</span>
+      <span class="dim-badge dim-default">{{ a.dimension | plain_dimension }}</span>
+      {% if a.source_episode %}
+        <span class="insight-ep">· {{ a.source_episode | episode_name }}</span>
+      {% endif %}
+      <div class="insight-actions">
+        <form method="POST" action="/learning/action/{{ a.action_id }}/apply">
+          <button type="submit" class="btn btn-sm btn-approve">{{ icon('check') }} Apply</button>
+        </form>
+        <form method="POST" action="/learning/action/{{ a.action_id }}/dismiss"
+              onsubmit="return confirm('Dismiss this suggestion?')">
+          <button type="submit" class="btn btn-sm btn-reject">{{ icon('x') }} Dismiss</button>
+        </form>
+      </div>
     </div>
-    <div style="font-size:12px; color:var(--muted);">{{ rec.rationale[:200] }}</div>
+    <p class="insight-body">{{ a.rationale | clean_rationale }}</p>
+    <div class="insight-foot">
+      {% set _ev = a.evidence or {} %}
+      {% set _sig = _ev.avg_signal_strength | signal_words %}
+      {% if _ev.platforms %}
+        <span class="pill" style="padding:3px 9px; font-size:11px;">
+          from {{ _ev.platforms | map('friendly_platform') | join(', ') }}
+        </span>
+      {% endif %}
+      {% if _sig.label %}
+        <span class="sig-meter sig-{{ _sig.direction }}" title="{{ _sig.label }}">
+          {% for n in range(3) %}<i class="{{ 'on' if n < _sig.level }}"></i>{% endfor %}
+          <span>{{ _sig.label }}</span>
+        </span>
+      {% endif %}
+      <span style="margin-left:auto;">{{ icon('clock') }} Noticed {{ a.created_at | rel_time }}</span>
+    </div>
+  </article>
+  {% endfor %}
+</div>
+{% else %}
+<div class="dv-empty">
+  {{ icon('check') }}
+  <div class="dv-empty-title">Nothing needs your judgment right now</div>
+  <div class="dv-empty-sub">
+    {% if state.total_analytics_records == 0 %}
+      Once episodes have platform analytics, Cortex will surface lessons here.
+    {% else %}
+      Cortex has processed every suggestion. New ones appear as fresh analytics arrive.
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{# ── The numbers ─────────────────────────────────────────────────────── #}
+<div class="sec-head"><h2>The picture so far</h2></div>
+<div class="stat-grid skin-stagger">
+  <div class="stat-card">
+    <div class="stat-lbl">{{ icon('analytics') }} Data points</div>
+    <div class="stat-val">{{ state.total_analytics_records or 0 }}</div>
+    <div class="stat-note">rows of platform analytics read</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-lbl">{{ icon('sparkle') }} Lessons found</div>
+    <div class="stat-val">{{ state.total_insights or 0 }}</div>
+    <div class="stat-note">patterns strong enough to act on</div>
+  </div>
+  <div class="stat-card {% if (state.pending_actions or 0) > 0 %}is-accent{% endif %}">
+    <div class="stat-lbl">{{ icon('clock') }} Waiting for you</div>
+    <div class="stat-val {% if (state.pending_actions or 0) == 0 %}is-muted{% endif %}">{{ state.pending_actions or 0 }}</div>
+    <div class="stat-note">suggestions below the confidence line</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-lbl">{{ icon('check') }} Applied</div>
+    <div class="stat-val">{{ state.applied_actions or 0 }}</div>
+    <div class="stat-note">now shaping new episodes</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-lbl">{{ icon('x') }} Set aside</div>
+    <div class="stat-val is-muted">{{ state.dismissed_actions or 0 }}</div>
+    <div class="stat-note">suggestions you chose to skip</div>
+  </div>
+</div>
+
+{# ── Signal by area ──────────────────────────────────────────────────── #}
+{% if state.insights_by_dimension %}
+{% set _scale = (state.insights_by_dimension.values() | map(attribute='negative') | map('int') | list
+                 + state.insights_by_dimension.values() | map(attribute='positive') | map('int') | list
+                 + [1]) | max %}
+<div class="sec-head">
+  <h2>Which parts of an episode the data is talking about</h2>
+</div>
+<div class="card">
+  {% for dim, counts in state.insights_by_dimension.items() %}
+  {% set pos = counts.positive | int %}
+  {% set neg = counts.negative | int %}
+  {% set net = pos - neg %}
+  <div class="sig-row">
+    <span class="dim-badge dim-default sig-row-lbl">{{ dim | plain_dimension }}</span>
+    <span class="sig-track">
+      <span class="sig-mid"></span>
+      {% if pos %}<span class="sig-fill pos" style="width:{{ (pos / _scale * 50) | round(1) }}%;"></span>{% endif %}
+      {% if neg %}<span class="sig-fill neg" style="width:{{ (neg / _scale * 50) | round(1) }}%;"></span>{% endif %}
+    </span>
+    <span class="sig-row-val {% if net > 0 %}ok{% elif net < 0 %}err{% else %}muted{% endif %}">
+      {% if net > 0 %}mostly positive{% elif net < 0 %}mostly negative{% else %}mixed{% endif %}
+    </span>
+  </div>
+  {% endfor %}
+  <p class="muted" style="font-size:11.5px; margin-top:12px;">
+    Green = episodes where this worked. Red = where it hurt watch-through. Longer bar = more episodes said so.
+  </p>
+</div>
+{% endif %}
+
+{# ── Where the signal comes from ─────────────────────────────────────── #}
+{% if state.platform_coverage %}
+<div class="sec-head"><h2>Where the signal is coming from</h2></div>
+<div class="stat-grid">
+  {% for plat, count in state.platform_coverage.items() %}
+  <div class="stat-card">
+    <div class="stat-lbl">{{ plat | friendly_platform }}</div>
+    <div class="stat-val">{{ count }}</div>
+    <div class="stat-note">{{ count }} episode{{ 's' if count != 1 }} with data</div>
   </div>
   {% endfor %}
 </div>
 {% endif %}
 
-{# ── Applied actions (collapsed by default) ── #}
-{% if state.applied_actions_list %}
-<details>
-  <summary>Applied Actions ({{ state.applied_actions_list | length }}) — active on next episode</summary>
-  <div class="collapse-body">
-    {% for a in state.applied_actions_list %}
-    <div class="action-row">
-      <div class="action-header">
-        <span class="dim-badge {{ _DIM_CLS.get(a.dimension|lower, 'dim-default') }}">{{ a.dimension }}</span>
-        <span class="badge badge-complete">{{ a.action_type }}</span>
-        <span class="muted" style="font-size:11px;">Applied {{ a.applied_at[:16] if a.applied_at else '' }}</span>
-      </div>
-      <div class="muted" style="font-size:12px;">{{ a.rationale[:180] }}</div>
+{# ── Standing recommendations ────────────────────────────────────────── #}
+{% if state.recommendations %}
+<div class="sec-head"><h2>Standing guidance by area</h2></div>
+<div class="insight-list">
+  {% for dim, rec in state.recommendations.items() %}
+  {% set _ra = rec.action_type | plain_learning_action %}
+  <article class="insight-card {{ _dir_cls.get(_ra.direction, 'dir-change') }}">
+    <div class="insight-head">
+      <span class="insight-dir {{ _dir_cls.get(_ra.direction, 'dir-change') }}">{{ _ra.label }}</span>
+      <span class="dim-badge dim-default">{{ dim | plain_dimension }}</span>
+      <span class="pill {% if rec.status == 'applied' %}is-good{% else %}is-warn{% endif %}"
+            style="margin-left:auto;">{{ rec.status | plain_status }}</span>
     </div>
-    {% endfor %}
-  </div>
-</details>
+    <p class="insight-body">{{ rec.rationale | clean_rationale }}</p>
+  </article>
+  {% endfor %}
+</div>
 {% endif %}
 
-{# ── Pipeline signals (collapsed by default) ── #}
-{% if state.learning_records %}
-<details>
-  <summary>Pipeline Signals ({{ state.learning_records | length }})</summary>
-  <div class="collapse-body">
-    {% for lr in state.learning_records %}
-    <div class="lr-row">
-      <span class="badge badge-running" style="font-size:10px; flex-shrink:0;">{{ lr.signal_type }}</span>
-      <span>{{ lr.episode_id }}</span>
-      {% if lr.recommendation %}
-        <span class="muted">{{ lr.recommendation[:120] }}</span>
-      {% endif %}
-      <span class="muted" style="margin-left:auto; font-size:11px; white-space:nowrap;">
-        {{ lr.recorded_at[:16] if lr.recorded_at else '' }}
-      </span>
-    </div>
-    {% endfor %}
-  </div>
-</details>
-{% endif %}
-
+{# ── What Cortex has already changed ─────────────────────────────────── #}
 {% if changelog %}
-<div class="card" style="padding:0; margin-bottom:var(--gap);">
-  <div style="padding:12px 16px 0;">
-    <div class="card-title">What Cortex changed — Channel Learning</div>
-    <p class="muted" style="font-size:11px; margin:2px 0 8px;">
-      Applied learning actions that became a standing directive for a channel's
-      next episode. Cadence changes execute directly and aren't listed here.
-    </p>
-  </div>
+<div class="sec-head">
+  <h2>What Cortex has already changed</h2>
+  <span class="sec-count">{{ changelog|length }}</span>
+</div>
+<div class="card" style="padding:0;">
   <div class="table-wrap" style="border:none;"><table>
-    <thead><tr><th>When</th><th>Channel</th><th>Dimension</th><th>Directive</th><th></th></tr></thead>
+    <thead><tr><th>When</th><th>Channel</th><th>Area</th><th>What changed</th><th></th></tr></thead>
     <tbody>
     {% for d in changelog %}
     <tr {% if not d.active %}style="opacity:.5;"{% endif %}>
-      <td class="muted" style="font-size:11px; white-space:nowrap;">{{ (d.created_at or '')[:16].replace('T',' ') }}</td>
-      <td style="font-size:12px;">{{ d.channel_name }}</td>
-      <td><span class="badge" style="background:var(--raised); font-size:10px;">{{ d.dimension }}</span></td>
-      <td style="font-size:12px;">{{ d.directive_text }}</td>
-      <td class="muted" style="font-size:10px;">{{ 'active' if d.active else 'superseded' }}</td>
+      <td class="muted" style="white-space:nowrap;">{{ d.created_at | rel_time }}</td>
+      <td>{{ d.channel_name }}</td>
+      <td><span class="dim-badge dim-default">{{ d.dimension | plain_dimension }}</span></td>
+      <td>{{ d.directive_text }}</td>
+      <td class="muted" style="font-size:10.5px;">{{ 'active' if d.active else 'replaced' }}</td>
     </tr>
     {% endfor %}
     </tbody>
@@ -258,15 +215,48 @@
 </div>
 {% endif %}
 
+{# ── Detail drawers ─────────────────────────────────────────────────── #}
+{% if state.applied_actions_list %}
+<details>
+  <summary>{{ icon('check') }} Applied suggestions ({{ state.applied_actions_list|length }})</summary>
+  <div class="collapse-body">
+    {% for a in state.applied_actions_list %}
+    <div class="health-stat" style="padding:10px 0;">
+      <span class="dim-badge dim-default">{{ a.dimension | plain_dimension }}</span>
+      <span style="flex:1; margin:0 12px; font-size:12.5px; color:var(--muted);">{{ a.rationale | clean_rationale }}</span>
+      <span class="muted" style="white-space:nowrap; font-size:11px;">{{ a.applied_at | rel_time }}</span>
+    </div>
+    {% endfor %}
+  </div>
+</details>
+{% endif %}
+
+{% if state.learning_records %}
+<details>
+  <summary>{{ icon('robot') }} Signals from the production pipeline ({{ state.learning_records|length }})</summary>
+  <div class="collapse-body">
+    {% for lr in state.learning_records %}
+    <div class="health-stat" style="padding:9px 0;">
+      <span class="badge badge-running" style="font-size:10px;">{{ lr.signal_type | plain_status }}</span>
+      <span style="flex:1; margin:0 12px;">{{ lr.episode_id | episode_name }}</span>
+      {% if lr.recommendation %}<span class="muted" style="font-size:12px;">{{ lr.recommendation[:110] }}</span>{% endif %}
+      <span class="muted" style="white-space:nowrap; font-size:11px;">{{ lr.recorded_at | rel_time }}</span>
+    </div>
+    {% endfor %}
+  </div>
+</details>
+{% endif %}
+
+</div><!-- /.container -->
+
 <div id="toast" class="toast"></div>
 <script>
 function showToast(msg, ok) {
   var t = document.getElementById('toast');
   t.textContent = msg;
   t.className = 'toast show ' + (ok ? 'toast-ok' : 'toast-err');
-  setTimeout(function() { t.className = 'toast'; }, 3000);
+  setTimeout(function () { t.className = 'toast'; }, 3000);
 }
 </script>
-</div><!-- /.container -->
 </body>
 </html>

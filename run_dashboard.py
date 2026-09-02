@@ -244,6 +244,79 @@ def human_label_filter(value):
     )
 
 
+# ── Plain-language / humanising filters (hypogeum.dashboard_humanize) ────────
+# A paying channel owner never sees a raw episode id, an internal blocker
+# code, a machine timestamp or a snake_case status. See that module.
+from hypogeum import dashboard_humanize as _hz  # noqa: E402
+
+
+@app.template_filter("episode_name")
+def _f_episode_name(episode_id):
+    """ep_f38dc597 → 'The Real Atlantis Was Found in Greece'."""
+    return _hz.episode_display_name(episode_id, db_path=_db_path())
+
+
+@app.template_filter("plain_status")
+def _f_plain_status(value):
+    return _hz.plain_status(value)
+
+
+@app.template_filter("plain_problem")
+def _f_plain_problem(code):
+    """Internal blocker code → {label, meaning, action, known}."""
+    return _hz.plain_problem(code)
+
+
+@app.template_filter("plain_problem_label")
+def _f_plain_problem_label(code):
+    return _hz.plain_problem_label(code)
+
+
+@app.template_filter("rel_time")
+def _f_rel_time(value):
+    return _hz.relative_time(value)
+
+
+@app.template_filter("friendly_dt")
+def _f_friendly_dt(value, tz_name=None):
+    return _hz.friendly_datetime(value, tz_name=tz_name)
+
+
+@app.template_filter("friendly_date")
+def _f_friendly_date(value):
+    return _hz.friendly_date(value)
+
+
+@app.template_filter("friendly_money")
+def _f_friendly_money(value, currency="$"):
+    return _hz.friendly_money(value, currency=currency)
+
+
+@app.template_filter("friendly_platform")
+def _f_friendly_platform(value):
+    return _hz.friendly_platform(value)
+
+
+@app.template_filter("plain_learning_action")
+def _f_plain_learning_action(value):
+    return _hz.plain_learning_action(value)
+
+
+@app.template_filter("plain_dimension")
+def _f_plain_dimension(value):
+    return _hz.plain_dimension(value)
+
+
+@app.template_filter("clean_rationale")
+def _f_clean_rationale(value):
+    return _hz.clean_rationale(value)
+
+
+@app.template_filter("signal_words")
+def _f_signal_words(value):
+    return _hz.signal_strength_words(value)
+
+
 # ---------------------------------------------------------------------------
 # Serialisation helpers
 # ---------------------------------------------------------------------------

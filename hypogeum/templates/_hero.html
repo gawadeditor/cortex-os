@@ -1,0 +1,45 @@
+{#  _hero.html — the one hero section every refreshed page opens with.
+
+    Usage (simple):
+      {% from '_hero.html' import hero %}
+      {{ hero(
+           eyebrow='Intelligence',
+           title='What Cortex learned this week',
+           lede='High-confidence tunings apply automatically. Everything below is waiting for your call.',
+           figure='24', figure_label='signals read',
+           pill='2 need review', pill_class='is-warn') }}
+
+    Usage (with custom actions / aside via {% call %}):
+      {% call hero(eyebrow='…', title='…', lede='…') %}
+        <a class="btn btn-primary" href="…">Review now</a>
+        <a class="btn" href="…">See analytics</a>
+      {% endcall %}
+    — the caller() body is placed in .hero-actions.
+#}
+{% macro hero(eyebrow='', title='', lede='', figure='', figure_label='',
+              pill='', pill_class='', meta=None) %}
+<section class="hero">
+  <div class="hero-top">
+    <div class="hero-headline">
+      {% if eyebrow %}<span class="eyebrow">{{ eyebrow }}</span>{% endif %}
+      {% if title %}<h1>{{ title }}</h1>{% endif %}
+      {% if lede %}<p class="hero-lede">{{ lede }}</p>{% endif %}
+      {% if meta %}
+        <div class="hero-meta">
+          {% for m in meta %}<span>{{ m.label }} <b>{{ m.value }}</b></span>{% endfor %}
+        </div>
+      {% endif %}
+      {% if caller %}<div class="hero-actions">{{ caller() }}</div>{% endif %}
+    </div>
+    {% if figure or pill %}
+    <div class="hero-aside">
+      {% if pill %}<span class="pill {{ pill_class }}">{{ pill }}</span>{% endif %}
+      {% if figure %}
+        <span class="hero-figure">{{ figure }}</span>
+        {% if figure_label %}<span class="hero-figure-lbl">{{ figure_label }}</span>{% endif %}
+      {% endif %}
+    </div>
+    {% endif %}
+  </div>
+</section>
+{% endmacro %}

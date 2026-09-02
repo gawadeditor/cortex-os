@@ -1,0 +1,491 @@
+"""
+hypogeum/dashboard_humanize.py — plain-language + humanising helpers for
+the operator dashboard.
+
+A paying channel owner is NOT an engineer. They must never be shown:
+  - a raw episode id            (ep_f38dc597)         → its real title
+  - an internal blocker code    (A_VIDEO, F_THUMBNAIL)→ a plain label + fix
+  - a channel slug              (twinkle_mini_tales)  → its display name
+  - a machine timestamp         (2026-09-03T08:00:00+00:00) → "in 3 hours"
+  - a snake_case status         (blocked_metadata)    → "Missing details"
+
+Every helper here is import-light, never raises, and degrades to a sane
+string. Registered as Jinja filters + a context processor by
+run_dashboard.py.
+"""
+from __future__ import annotations
+
+import re
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Optional
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Episode identity — never show a raw id where a human title exists
+# ─────────────────────────────────────────────────────────────────────────────
+
+_EP_TITLE_CACHE: dict = {}
+_ID_RE = re.compile(r"^(ep[_-]?[0-9a-f]{6,}|ep_[a-z0-9_]+)$", re.IGNORECASE)
+
+
+def looks_like_episode_id(value) -> bool:
+    return bool(value) and bool(_ID_RE.match(str(value).strip()))
+
+
+def episode_display_name(episode_id, *, db_path=None,
+                         fallback: str = "Untitled episode") -> str:
+    """Resolve an episode id to its real title (falls back to its topic,
+    then a friendly generic). Cached; only real titles are cached so a
+    not-yet-titled episode is re-checked on the next request."""
+    if not episode_id:
+        return fallback
+    episode_id = str(episode_id).strip()
+    if not looks_like_episode_id(episode_id):
+        # already a human string — leave it alone
+        return episode_id
+    key = (str(db_path or ""), episode_id)
+    if key in _EP_TITLE_CACHE:
+        return _EP_TITLE_CACHE[key]
+    title = None
+    try:
+        from hypogeum.db import get_connection
+        conn = get_connection(Path(db_path) if db_path else None)
+        try:
+            row = conn.execute(
+                "SELECT title, topic FROM episodes WHERE episode_id = ?",
+                (episode_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row:
+            title = ((row["title"] or "").strip()
+                     or (row["topic"] or "").strip()
+                     or None)
+    except Exception:  # noqa: BLE001
+        title = None
+    if title:
+        _EP_TITLE_CACHE[key] = title
+        return title
+    return fallback
+
+
+def clear_episode_title_cache() -> None:
+    _EP_TITLE_CACHE.clear()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Plain-language problem catalogue
+#
+# Each entry: (label, what_it_means, what_to_do). `label` is a calm noun
+# phrase; `what_to_do` is one plain sentence. Keyed by the internal code,
+# case-insensitively, with a few aliases.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PROBLEMS: dict[str, tuple[str, str, str]] = {
+    # ── production output gate ──────────────────────────────────────────
+    "a_video": (
+        "Video quality check",
+        "The finished video didn't meet the resolution or format the "
+        "platforms need.",
+        "Cortex will re-render the affected clips automatically on the next run.",
+    ),
+    # ── publish readiness capabilities ─────────────────────────────────
+    "a_metadata": (
+        "Missing publish details",
+        "The title, description or caption for this episode isn't ready yet.",
+        "Open the episode and fill in the missing publish details, then retry.",
+    ),
+    "b_long_render": (
+        "Main video not ready",
+        "The full-length video file hasn't finished rendering.",
+        "Wait for production to finish, or re-run the episode if it stalled.",
+    ),
+    "c_shorts_renders": (
+        "Short clips not ready",
+        "One or more of the short vertical clips hasn't finished rendering.",
+        "Wait for production to finish, or re-run the episode if it stalled.",
+    ),
+    "d_publishing_binding": (
+        "Channel not connected to this platform",
+        "This channel isn't linked to the social account for one of the "
+        "target platforms.",
+        "Go to the channel's Publishing tab and connect the account in Zernio.",
+    ),
+    "e_media_staging_ready": (
+        "Upload preparation failed",
+        "The video couldn't be uploaded to the staging area before publishing.",
+        "This is usually temporary — retry the publish in a few minutes.",
+    ),
+    "f_thumbnail": (
+        "Thumbnail not approved",
+        "The episode's thumbnail hasn't passed the brand check yet.",
+        "Open the episode's Thumbnail tab and approve or regenerate it.",
+    ),
+    "channel_scope": (
+        "Wrong channel",
+        "This action was aimed at the wrong channel.",
+        "Reload the page and try again from the correct channel.",
+    ),
+    # ── episode_state blockers ─────────────────────────────────────────
+    "missing_render": (
+        "Video not assembled",
+        "The final video file wasn't produced — assembly didn't complete.",
+        "Re-run the episode; if it keeps failing, open it to see which step stopped.",
+    ),
+    "qa_failed": (
+        "Quality review failed",
+        "The automated quality review found a problem serious enough to hold "
+        "the episode.",
+        "Open the episode's Quality tab to see what failed, then re-run or fix it.",
+    ),
+    "qa_warning": (
+        "Quality review — needs a look",
+        "The episode passed quality review but with warnings worth checking "
+        "before it goes public.",
+        "Open the Quality tab, review the warnings, and approve if they're fine.",
+    ),
+    "script_bga_blocked": (
+        "Script held by brand check",
+        "The script didn't match the channel's brand and tone rules.",
+        "Review the script against the brand guide, or adjust the brand rules.",
+    ),
+    "thumbnail_tig_blocked": (
+        "Thumbnail rejected by brand check",
+        "The thumbnail didn't match the channel's visual identity.",
+        "Open the Thumbnail tab and regenerate it, or adjust the brand identity.",
+    ),
+    # ── publish flow outcomes ─────────────────────────────────────────
+    "blocked_metadata": (
+        "Missing publish details",
+        "The episode can't be published because required title/description/"
+        "caption information is missing.",
+        "Open the episode and complete the publish details.",
+    ),
+    "blocked_readiness": (
+        "Not ready to publish",
+        "One or more pre-publish checks haven't passed yet.",
+        "Open the episode to see which check is holding it.",
+    ),
+    "blocked_schedule": (
+        "No release time set",
+        "Cortex couldn't work out when to release this episode.",
+        "Set a daily release time for the channel in its publishing settings.",
+    ),
+    "blocked_publish": (
+        "Publishing didn't go through",
+        "The platforms rejected the upload or it failed partway.",
+        "This is often temporary — Cortex will retry automatically.",
+    ),
+    "blocked_output": (
+        "Video quality check",
+        "The finished video didn't meet what the platforms need.",
+        "Cortex will re-render the affected parts automatically.",
+    ),
+    # ── run failure reasons ───────────────────────────────────────────
+    "other": (
+        "Production stopped unexpectedly",
+        "A production run ended early for a reason Cortex couldn't categorise.",
+        "Open the run to see the last step that ran, then re-run the episode.",
+    ),
+    "timeout": (
+        "A step took too long",
+        "Part of production ran past its time limit and was stopped.",
+        "Re-run the episode — this is usually a slow provider, not a real fault.",
+    ),
+    "provider_error": (
+        "A creative tool failed",
+        "One of the AI providers (video, voice or images) returned an error.",
+        "Re-run the episode; if it repeats, check that provider on the Providers page.",
+    ),
+    "budget_exceeded": (
+        "Weekly budget reached",
+        "This channel has spent its production budget for the week.",
+        "Raise the weekly budget in the channel's production plan, or wait for the reset.",
+    ),
+}
+
+_PROBLEM_ALIASES = {
+    "failed": "other",
+    "error": "other",
+    "render_missing": "missing_render",
+    "qa_gate_failed": "qa_failed",
+    "instagram_caption_too_long": "blocked_metadata",
+    "validation_error": "blocked_metadata",
+    "stale_reconciliation": "blocked_publish",
+}
+
+
+def _problem_key(code) -> Optional[str]:
+    if not code:
+        return None
+    k = re.sub(r"[^a-z0-9_]+", "_", str(code).strip().lower()).strip("_")
+    if k in _PROBLEMS:
+        return k
+    if k in _PROBLEM_ALIASES:
+        return _PROBLEM_ALIASES[k]
+    # tolerate a trailing "_gate", "_check", "_blocked"
+    k2 = re.sub(r"_(gate|check|blocked|failed|error)$", "", k)
+    if k2 in _PROBLEMS:
+        return k2
+    return None
+
+
+def plain_problem(code, *, default_label: str = "Needs attention") -> dict:
+    """Return {label, meaning, action, known} for an internal problem code."""
+    key = _problem_key(code)
+    if key is None:
+        # last-resort: de-snake the code so it at least reads as words
+        pretty = re.sub(r"[_\-]+", " ", str(code or "")).strip().capitalize()
+        return {
+            "label": pretty or default_label,
+            "meaning": "",
+            "action": "Open the item to see the details.",
+            "known": False,
+        }
+    label, meaning, action = _PROBLEMS[key]
+    return {"label": label, "meaning": meaning, "action": action, "known": True}
+
+
+def plain_problem_label(code) -> str:
+    return plain_problem(code)["label"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Status vocabulary — snake_case machine state → calm human phrase
+# ─────────────────────────────────────────────────────────────────────────────
+
+_STATUS_WORDS: dict[str, str] = {
+    "in_progress": "In production",
+    "running": "Running",
+    "queued": "Waiting in queue",
+    "claimed": "Starting",
+    "pending": "Waiting",
+    "complete": "Finished",
+    "completed": "Finished",
+    "published": "Published",
+    "partial": "Partly published",
+    "failed": "Stopped",
+    "cancelled": "Cancelled",
+    "superseded": "Replaced",
+    "skipped": "Skipped",
+    "consumed": "Used",
+    "draft": "Draft",
+    "active": "Active",
+    "paused": "Paused",
+    "idle": "Idle — waiting for the next slot",
+    "blocked": "Held",
+    "awaiting_review": "Waiting for your review",
+    "awaiting_publish_approval": "Waiting for your approval",
+    "needs_review": "Needs your review",
+    "approved": "Approved",
+    "rejected": "Rejected",
+    "resolved": "Resolved",
+    "processing": "Processing on the platform",
+    "acknowledged": "Accepted by the platform",
+    "succeeded": "Done",
+    "submitting": "Sending to the platform",
+    "not_planned": "Not scheduled",
+}
+
+
+def plain_status(value, *, default: Optional[str] = None) -> str:
+    if value is None or value == "":
+        return default if default is not None else "—"
+    k = str(value).strip().lower()
+    if k in _STATUS_WORDS:
+        return _STATUS_WORDS[k]
+    return re.sub(r"[_\-]+", " ", k).strip().capitalize()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Time — machine timestamps → what a person actually wants to know
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _parse_dt(value) -> Optional[datetime]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        s = str(value).strip().replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(s)
+        except ValueError:
+            # tolerate "2026-09-03 08:00:00" and date-only
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                try:
+                    dt = datetime.strptime(s[:19], fmt)
+                    break
+                except ValueError:
+                    continue
+            else:
+                return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def relative_time(value, *, now: Optional[datetime] = None) -> str:
+    """'in 3 hours' / '5 minutes ago' / 'just now'."""
+    dt = _parse_dt(value)
+    if dt is None:
+        return "—"
+    now = now or datetime.now(timezone.utc)
+    delta = dt - now
+    secs = delta.total_seconds()
+    future = secs > 0
+    secs = abs(secs)
+
+    if secs < 45:
+        return "just now" if not future else "any moment now"
+    mins, hours, days = secs / 60, secs / 3600, secs / 86400
+    if mins < 45:
+        n = round(mins); unit = "minute" if n == 1 else "minutes"
+    elif hours < 22:
+        n = round(hours); unit = "hour" if n == 1 else "hours"
+    elif days < 6:
+        n = round(days); unit = "day" if n == 1 else "days"
+    elif days < 45:
+        n = round(days / 7); unit = "week" if n == 1 else "weeks"
+    else:
+        n = round(days / 30); unit = "month" if n == 1 else "months"
+    return f"in {n} {unit}" if future else f"{n} {unit} ago"
+
+
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def friendly_datetime(value, *, tz_name: Optional[str] = None) -> str:
+    """'3 Sep, 8:00 AM' in the given timezone (default UTC). For when an
+    exact wall-clock time matters (a scheduled release)."""
+    dt = _parse_dt(value)
+    if dt is None:
+        return "—"
+    if tz_name:
+        try:
+            from zoneinfo import ZoneInfo
+            dt = dt.astimezone(ZoneInfo(tz_name))
+        except Exception:  # noqa: BLE001
+            pass
+    hour = dt.hour % 12 or 12
+    ampm = "AM" if dt.hour < 12 else "PM"
+    return f"{dt.day} {_MONTHS[dt.month - 1]}, {hour}:{dt.minute:02d} {ampm}"
+
+
+def friendly_date(value) -> str:
+    dt = _parse_dt(value)
+    if dt is None:
+        return "—"
+    return f"{dt.day} {_MONTHS[dt.month - 1]} {dt.year}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Misc small humanisers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def friendly_money(value, *, currency: str = "$") -> str:
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    if n == 0:
+        return f"{currency}0"
+    if abs(n) >= 1000:
+        return f"{currency}{n/1000:.1f}k"
+    return f"{currency}{n:,.0f}" if n == int(n) else f"{currency}{n:,.2f}"
+
+
+def friendly_count(value, singular: str, plural: Optional[str] = None) -> str:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return "—"
+    word = singular if n == 1 else (plural or singular + "s")
+    return f"{n:,} {word}"
+
+
+_LEARNING_ACTIONS = {
+    "avoid": ("Do less of this", "down"),
+    "reduce": ("Do less of this", "down"),
+    "change": ("Adjust the approach", "change"),
+    "adjust": ("Adjust the approach", "change"),
+    "increase": ("Do more of this", "up"),
+    "boost": ("Do more of this", "up"),
+    "keep": ("Keep doing this", "up"),
+    "maintain": ("Keep doing this", "up"),
+}
+
+
+def plain_learning_action(action_type):
+    """('avoid'|'change'|'increase'|…) → {label, direction}."""
+    k = str(action_type or "").strip().lower()
+    label, direction = _LEARNING_ACTIONS.get(k, (k.capitalize() or "Review", "change"))
+    return {"label": label, "direction": direction}
+
+
+_DIMENSIONS = {
+    "topic": "Topic choice",
+    "pacing": "Pacing",
+    "thumbnail": "Thumbnail",
+    "title": "Title",
+    "hook": "Opening hook",
+    "retention": "Retention",
+    "cta": "Call to action",
+    "audio": "Audio",
+    "structure": "Story structure",
+    "length": "Length",
+}
+
+
+def plain_dimension(value) -> str:
+    k = str(value or "").strip().lower()
+    return _DIMENSIONS.get(k, re.sub(r"[_\-]+", " ", k).strip().capitalize())
+
+
+def friendly_platform(value) -> str:
+    return {
+        "youtube": "YouTube", "tiktok": "TikTok",
+        "instagram": "Instagram", "facebook": "Facebook",
+    }.get(str(value or "").strip().lower(), str(value or "").title())
+
+
+# ── Learning rationale: strip the machine tail an owner shouldn't read ──
+_RATIONALE_TAIL = re.compile(
+    r"\s*[.—\-]*\s*Signal(?:s)? from [a-z, ]+"
+    r"(?:\s*\(avg(?:erage)? (?:signal )?strength:?\s*-?\d*\.?\d+\))?\.?\s*$",
+    re.IGNORECASE,
+)
+_STRENGTH_PAREN = re.compile(
+    r"\s*\(avg(?:erage)? (?:signal )?strength:?\s*-?\d*\.?\d+\)\.?\s*$", re.IGNORECASE)
+
+
+def clean_rationale(text) -> str:
+    """Drop the '… Signal from tiktok (avg strength: -0.50)' tail — the
+    platform + strength are shown as UI chips instead."""
+    if not text:
+        return ""
+    s = str(text).strip()
+    s = _RATIONALE_TAIL.sub("", s)
+    s = _STRENGTH_PAREN.sub("", s)
+    return s.strip().rstrip("—-").strip() or str(text).strip()
+
+
+def signal_strength_words(value) -> dict:
+    """avg_signal_strength (−1..1) → {label, level 0-3, direction}."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return {"label": "", "level": 0, "direction": "flat"}
+    mag = abs(v)
+    if mag >= 0.35:
+        level, word = 3, "strong"
+    elif mag >= 0.15:
+        level, word = 2, "clear"
+    elif mag >= 0.04:
+        level, word = 1, "slight"
+    else:
+        level, word = 0, "faint"
+    direction = "up" if v > 0 else ("down" if v < 0 else "flat")
+    tail = "positive signal" if v > 0 else ("negative signal" if v < 0 else "no clear signal")
+    return {"label": f"{word} {tail}", "level": level, "direction": direction}

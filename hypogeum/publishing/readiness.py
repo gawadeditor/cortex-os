@@ -949,6 +949,26 @@ def _check_main_episode_thumbnail(episode_id: str, episode_dir: Path, platforms:
             reason="youtube not requested for this check — main-episode thumbnail requirement not evaluated",
             evidence={},
         )
+
+    # Short-native episodes: the single deliverable IS a 9:16 vertical Short.
+    # YouTube Shorts have no custom-thumbnail slot — the platform covers from a
+    # video frame — so the pipeline records the sentinel
+    # main_thumbnail.asset_id == "short_native_autocover" instead of a designed
+    # candidate. That is a complete, correct state for a Short; the long-form
+    # custom-thumbnail QA lineage below must not be applied to it.
+    _pkg_path = episode_dir / f"thumbnail_package_{episode_id}.json"
+    if _pkg_path.exists():
+        try:
+            _mt = (json.loads(_pkg_path.read_text(encoding="utf-8")).get("main_thumbnail") or {})
+            if str(_mt.get("asset_id") or "").strip() == "short_native_autocover":
+                return GateCheckResult(
+                    capability="F_THUMBNAIL", status="pass",
+                    reason="short-native Short — platform auto-covers from a video frame, no custom thumbnail required",
+                    evidence={"main_thumbnail_asset_id": "short_native_autocover"},
+                )
+        except Exception:  # noqa: BLE001 — fall through to the strict check
+            pass
+
     try:
         resolved = resolve_canonical_main_thumbnail(episode_id, episode_dir)
     except ThumbnailResolutionError as exc:

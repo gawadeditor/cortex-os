@@ -81,6 +81,20 @@ def _iso(dt: datetime) -> str:
     return dt.isoformat()
 
 
+def _parse_dt_utc(value: str) -> datetime:
+    """Parse an ISO-8601 timestamp to an offset-aware UTC datetime.
+
+    Tolerates a naive string (no offset) — e.g. one written by a raw
+    `UPDATE ... SET next_run_at = datetime('now')` — by assuming UTC, so a
+    single hand-edited schedule row can never crash tick() (and with it the
+    whole worker loop) on an offset-naive/-aware subtraction.
+    """
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def _new_id() -> str:
     return str(uuid.uuid4())
 
@@ -345,7 +359,7 @@ def tick(
 
             due_at = row["next_run_at"]
             if due_at:
-                delay_seconds = (now - datetime.fromisoformat(due_at)).total_seconds()
+                delay_seconds = (now - _parse_dt_utc(due_at)).total_seconds()
                 if delay_seconds > _MISSED_SCHEDULE_GRACE_SECONDS:
                     from hypogeum.logger import get_logger
                     get_logger(agent="scheduler").warn(

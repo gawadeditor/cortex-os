@@ -531,7 +531,7 @@ class TestFlaskRunRoutes:
         client, _ = flask_client
         r = client.get("/runs")
         assert r.status_code == 200
-        assert b"Runs" in r.data
+        assert b"Production history" in r.data
 
     def test_runs_page_lists_runs(self, flask_client):
         client, ids = flask_client

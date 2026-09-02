@@ -3,105 +3,75 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Runs — Cortex</title>
+  <title>Production history — Cortex</title>
   {% include '_base_style.html' %}
-  <style>
-    .badge-orphaned { background:var(--warn-bg); color:var(--warn); border:1px solid var(--warn); }
-    .orphan-note { font-size:10px; color:var(--warn); display:block; margin-top:2px; }
-  </style>
 </head>
 <body>
 {% include '_nav.html' %}
+{% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
 
 {% from '_subnav.html' import subnav %}
 {{ subnav('production') }}
 <div class="container">
 
-<div class="page-header">
-  <div>
-    <span class="eyebrow">Operations</span>
-    <h1>Runs</h1>
-  </div>
-  <span class="page-meta">{{ runs | length }} run{% if runs | length != 1 %}s{% endif %}</span>
-</div>
+{% set _running = runs | selectattr('status', 'equalto', 'running') | list | length %}
+{{ hero(
+   eyebrow='Production',
+   title='Production history',
+   lede='Every episode Cortex has produced, newest first — how long it took, what it cost, and where it ended up.',
+   figure=runs|length,
+   figure_label='run' ~ ('' if runs|length == 1 else 's'),
+   pill=(_running ~ ' in production now') if _running else 'nothing running',
+   pill_class='is-warn' if _running else 'is-good') }}
 
 <div class="filters">
-  <span class="muted" style="font-size:12px;">Filter:</span>
   <a href="/runs"                    class="filter-link {% if not status_filter %}active{% endif %}">All</a>
-  <a href="/runs?status=running"     class="filter-link {% if status_filter == 'running' %}active{% endif %}">Running</a>
-  <a href="/runs?status=complete"    class="filter-link {% if status_filter in ('complete','completed') %}active{% endif %}">Complete</a>
-  <a href="/runs?status=failed"      class="filter-link {% if status_filter == 'failed' %}active{% endif %}">Failed</a>
-  <a href="/runs?status=awaiting_review" class="filter-link {% if status_filter == 'awaiting_review' %}active{% endif %}">Awaiting Review</a>
-  <a href="/runs?status=awaiting_publish_approval" class="filter-link {% if status_filter == 'awaiting_publish_approval' %}active{% endif %}">Awaiting Publish</a>
+  <a href="/runs?status=running"     class="filter-link {% if status_filter == 'running' %}active{% endif %}">In production</a>
+  <a href="/runs?status=complete"    class="filter-link {% if status_filter in ('complete','completed') %}active{% endif %}">Finished</a>
+  <a href="/runs?status=failed"      class="filter-link {% if status_filter == 'failed' %}active{% endif %}">Stopped</a>
+  <a href="/runs?status=awaiting_review" class="filter-link {% if status_filter == 'awaiting_review' %}active{% endif %}">Needs review</a>
+  <a href="/runs?status=awaiting_publish_approval" class="filter-link {% if status_filter == 'awaiting_publish_approval' %}active{% endif %}">Needs approval</a>
 </div>
 
 {% set superseded_n = runs | selectattr('superseded') | list | length %}
 {% if superseded_n %}
 <p style="font-size:12px; color:var(--muted); margin-bottom:10px;">
-  {{ superseded_n }} of these failed on an episode that was later published —
+  {{ superseded_n }} of these stopped on an episode that was later remade and published —
   <a href="#" id="toggle-superseded">show / hide</a>.
 </p>
 {% endif %}
 
 {% if runs %}
-<div class="card" style="padding: 0;">
+<div class="card" style="padding:0;">
   <div class="table-wrap" style="border:none;">
   <table>
     <thead>
       <tr>
-        <th>Run ID</th>
-        <th>Episode</th>
-        <th>Status</th>
-        <th>Started</th>
-        <th>Duration</th>
-        <th>Stages</th>
-        <th>Cost</th>
+        <th>Episode</th><th>Status</th><th>Started</th>
+        <th style="text-align:right;">Steps</th><th style="text-align:right;">Cost</th>
       </tr>
     </thead>
     <tbody>
       {% for r in runs %}
       <tr class="{{ 'run-superseded' if r.superseded }}"{% if r.superseded %} style="opacity:.45;"{% endif %}>
-        <td>
-          <a href="/run/{{ r.run_id }}">{{ r.run_id[:12] }}…</a>
-          {% if r.superseded %}<span class="badge" style="background:var(--raised);color:var(--faint);font-size:9px;">superseded</span>{% endif %}
-        </td>
-        <td>
-          <a href="/episode/{{ r.episode_id }}" style="font-size:12px; color:var(--text);">
-            {{ r.episode_id }}
+        <td style="max-width:360px;">
+          <a href="/run/{{ r.run_id }}" style="color:var(--text); font-weight:600;">
+            <span class="cell-title">{{ (r.episode_id or r.run_id) | episode_name }}</span>
           </a>
-          {% if r.episode_title %}
-            <br><span class="muted" style="font-size:11px;">{{ r.episode_title[:60] }}</span>
-          {% elif r.episode_topic %}
-            <br><span class="muted" style="font-size:11px;">{{ r.episode_topic[:60] }}</span>
-          {% endif %}
+          {% if r.superseded %}<span class="badge" style="background:var(--raised);color:var(--faint);font-size:9px;">replaced</span>{% endif %}
         </td>
         <td>
           {% if r.error_message and r.error_message.startswith('Run orphaned') %}
-            <span class="badge badge-orphaned">orphaned</span>
-            <span class="orphan-note">worker not active</span>
+            <span class="badge badge-failed">Stopped early</span>
           {% else %}
-            <span class="badge badge-{{ r.status }}">{{ r.status }}</span>
+            <span class="badge badge-{{ r.status }}">{{ r.status | plain_status }}</span>
           {% endif %}
         </td>
-        <td class="muted" style="font-size:12px; white-space:nowrap;">
-          {{ r.started_at[:16] if r.started_at else '—' }}
-        </td>
-        <td class="muted" style="font-size:12px; white-space:nowrap;">
-          {% if r.started_at and r.completed_at %}
-            {% set dur_ms = (r.completed_at[:19] | string) %}
-            {# Duration shown as completed - started; fallback to '—' #}
-            {{ r.completed_at[:16] }}
-          {% else %}
-            —
-          {% endif %}
-        </td>
+        <td class="muted" style="white-space:nowrap;">{{ r.started_at | rel_time if r.started_at else '—' }}</td>
         <td class="muted" style="text-align:right;">{{ r.stage_count or 0 }}</td>
         <td style="text-align:right; font-variant-numeric:tabular-nums;">
-          {% if r.total_cost_usd and r.total_cost_usd > 0 %}
-            ${{ "%.4f" | format(r.total_cost_usd) }}
-          {% else %}
-            <span class="muted">—</span>
-          {% endif %}
+          {% if r.total_cost_usd and r.total_cost_usd > 0 %}{{ r.total_cost_usd | friendly_money }}{% else %}<span class="muted">—</span>{% endif %}
         </td>
       </tr>
       {% endfor %}
@@ -110,7 +80,10 @@
   </div>
 </div>
 {% else %}
-<div class="empty">No runs found{% if status_filter %} with status "{{ status_filter }}"{% endif %}.</div>
+<div class="dv-empty">
+  {{ icon('runs') }}
+  <div class="dv-empty-title">No production runs{% if status_filter %} matching that filter{% endif %}</div>
+</div>
 {% endif %}
 
 </div><!-- /.container -->

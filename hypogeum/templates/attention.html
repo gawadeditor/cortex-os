@@ -65,21 +65,26 @@
 </head>
 <body>
 {% include '_nav.html' %}
+{% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
 
 {% from '_subnav.html' import subnav %}
 {{ subnav('review') }}
 <div class="container">
 
-
-<div class="page-header">
-  <h1>Attention</h1>
-  <span class="page-meta">What needs your attention right now</span>
-  {% if readiness_level %}
-  <span class="badge badge-{{ readiness_level | lower }}" style="margin-left:auto;">
-    {{ readiness_level }}
-  </span>
-  {% endif %}
-</div>
+{% set _need = (blocking_count or 0) + (action_required_count or 0) %}
+{{ hero(
+   eyebrow='Review',
+   title=('Everything is running smoothly' if total == 0 else
+          (_need ~ ' thing' ~ ('' if _need == 1 else 's') ~ ' need you') if _need else
+          'A few things worth a glance'),
+   lede=('Nothing needs a decision from you right now. Cortex will flag anything that does.' if total == 0
+         else 'Blocking items stop production until you act. Warnings are safe to clear once the factory is producing normally.'),
+   figure=(total if total else ''),
+   figure_label='open items' if total else '',
+   pill=(readiness_level | plain_status) if readiness_level else '',
+   pill_class=('is-good' if (readiness_level or '')|lower in ('ready','operational','ok') else
+               'is-critical' if (readiness_level or '')|lower in ('blocked','critical') else 'is-warn')) }}
 
 {% if state_err %}
 <div class="card" style="border-color:var(--red); margin-bottom:var(--gap); padding:12px 16px;">
@@ -112,7 +117,7 @@
 {# ── All-clear state ── #}
 {% if total == 0 %}
 <div class="all-clear">
-  <div class="all-clear-title">&#10003; No attention required</div>
+  <div class="all-clear-title">{{ icon('check') }} Nothing needs you</div>
   <div class="all-clear-sub">The factory is running normally. Check back when something needs you.</div>
 </div>
 
@@ -203,30 +208,27 @@
   <div class="attn-item sev-action" style="padding:10px 16px;">
     <div class="attn-dot dot-blue"></div>
     <div class="attn-body">
-      <div class="attn-label">{{ a.approval_type | replace('_',' ') | title }}</div>
+      <div class="attn-label">{{ a.approval_type | plain_status }}</div>
       <div class="attn-detail">
-        run <code style="font-size:11px;">{{ (a.run_id or '')[:12] }}…</code>
-        &nbsp;·&nbsp; episode <code style="font-size:11px;">{{ a.episode_id }}</code>
-        {% if a.requested_at %}
-        &nbsp;·&nbsp; {{ a.requested_at[:16] }}
-        {% endif %}
+        {{ a.episode_id | episode_name }}
+        {% if a.requested_at %} &nbsp;·&nbsp; asked {{ a.requested_at | rel_time }}{% endif %}
       </div>
     </div>
     <div class="attn-actions">
       <button class="btn btn-approve"
               onclick="postAction('/api/action/approve/{{ a.approval_id|e }}', null)">
-        ✓ Approve
+        {{ icon('check') }} Approve
       </button>
       <button class="btn btn-reject"
               onclick="postAction('/api/action/reject/{{ a.approval_id|e }}',
                        'Reject this approval? The run will be marked failed.')">
-        ✗ Reject
+        {{ icon('x') }} Reject
       </button>
     </div>
   </div>
   {% endfor %}
   {% else %}
-  <div class="section-zero">✓ No pending approvals.</div>
+  <div class="section-zero">{{ icon('check') }} No pending approvals.</div>
   {% endif %}
 </div>
 
@@ -240,43 +242,44 @@
     <span class="section-count count-blue">{{ learning_pending|length }}</span>
     {% endif %}
     <span style="font-size:11px; color:var(--muted); font-weight:400; margin-left:4px;">
-      — items below confidence threshold
+      — suggestions Cortex isn't sure enough about to apply on its own
     </span>
-    <a href="/learning" class="origin-link" style="margin-left:auto;">intelligence ↗</a>
+    <a href="/learning" class="origin-link" style="margin-left:auto;">learning ↗</a>
   </div>
 
   {% if learning_pending %}
   {% for a in learning_pending %}
+  {% set _act = a.action_type | plain_learning_action %}
   <div class="attn-item sev-action" style="padding:10px 16px;">
     <div class="attn-dot dot-blue"></div>
     <div class="attn-body">
       <div class="attn-label">
-        {{ a.dimension | title if a.dimension else 'Learning' }} — {{ a.action_type }}
+        {{ _act.label }}{% if a.dimension %} — {{ a.dimension | plain_dimension }}{% endif %}
       </div>
       {% if a.rationale %}
-      <div class="attn-detail">{{ a.rationale[:200] }}</div>
+      <div class="attn-detail">{{ a.rationale | clean_rationale }}</div>
       {% endif %}
       {% if a.source_episode %}
       <div class="attn-detail">
-        Source: <a href="/analytics/episode/{{ a.source_episode }}" style="color:var(--blue);">
-          {{ a.source_episode }}
+        From: <a href="/analytics/episode/{{ a.source_episode }}" style="color:var(--blue);">
+          {{ a.source_episode | episode_name }}
         </a>
       </div>
       {% endif %}
     </div>
     <div class="attn-actions">
       <form method="POST" action="/learning/action/{{ a.action_id }}/apply" style="display:inline;">
-        <button type="submit" class="btn btn-approve">✓ Apply</button>
+        <button type="submit" class="btn btn-approve">{{ icon('check') }} Apply</button>
       </form>
       <form method="POST" action="/learning/action/{{ a.action_id }}/dismiss" style="display:inline;"
-            onsubmit="return confirm('Dismiss this action?')">
-        <button type="submit" class="btn btn-reject">✗ Dismiss</button>
+            onsubmit="return confirm('Dismiss this suggestion?')">
+        <button type="submit" class="btn btn-reject">{{ icon('x') }} Dismiss</button>
       </form>
     </div>
   </div>
   {% endfor %}
   {% else %}
-  <div class="section-zero">✓ No learning actions require review.</div>
+  <div class="section-zero">{{ icon('check') }} No suggestions waiting.</div>
   {% endif %}
 </div>
 
@@ -306,7 +309,7 @@
   </div>
   {% endfor %}
   {% else %}
-  <div class="section-zero">✓ All platform connections look healthy.</div>
+  <div class="section-zero">{{ icon('check') }} All platform connections look healthy.</div>
   {% endif %}
 </div>
 

@@ -470,9 +470,12 @@ def run_assembly_agent(
     )
 
     # ------------------------------------------------------------------
-    # A2. Clip Repair — attempt to fill gaps before QA rejects.
-    #     Strategy A: semantic reuse of existing clips (no consecutive dupes).
-    #     Strategy B: MUAPI generation for remaining gaps (capped by config).
+    # A2. Clip Repair — regenerate missing clips before QA rejects.
+    #     A missing scene is regenerated from its own prompt via MUAPI
+    #     (capped by config; a generated-outro scene is always regenerated).
+    #     No donor-copy / reuse fallback — perceptual repetition is forbidden;
+    #     whatever cannot be regenerated stays missing and the episode fails
+    #     closed at the clip-availability gate below.
     #     Only runs if CLIP_REPAIR_ENABLED (default True) and clips are missing.
     # ------------------------------------------------------------------
     if missing_clips and getattr(config, "CLIP_REPAIR_ENABLED", True):

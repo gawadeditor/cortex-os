@@ -2,16 +2,16 @@
 tests/test_clip_repair_agent.py — Unit tests for hypogeum/agents/clip_repair_agent.py
 
 Tests:
-  TestStrategyA
-    - Missing clip is filled by copying a semantically similar present clip
-    - Best semantic match (highest Jaccard) is chosen, not arbitrary
-    - Same donor clip not reused for two different missing slots
-    - No consecutive duplicate: clip at position N cannot be same as N-1
+  TestNoDonorCopy
+    - A missing clip is NEVER filled by copying a similar present clip
+    - True even with many similar present clips available
+    - Perceptual repetition is a rejected rule (2026-09-02)
 
   TestStrategyB
-    - MUAPI submit_scene() called for clips still missing after Strategy A
-    - Generation count capped at CLIP_REPAIR_MAX_GENERATED
-    - Failed generation leaves scene in still_missing
+    - MUAPI submit_scene() called to regenerate every missing clip
+    - Generation count capped at CLIP_REPAIR_MAX_GENERATED (story scenes)
+    - A generated-outro scene is regenerated even past that cap
+    - Failed generation leaves scene in still_missing → episode fails closed
 
   TestRepairResult
     - ClipRepairResult fields populated correctly
@@ -166,32 +166,28 @@ class TestJaccard:
 
 
 # ---------------------------------------------------------------------------
-# TestStrategyA — semantic reuse
+# TestNoDonorCopy — perceptual repetition is forbidden (2026-09-02).
+# A missing scene is NEVER filled with a copy of another scene's clip. It is
+# regenerated (Strategy B) or it stays in still_missing and the episode fails
+# closed. There is no semantic-reuse / donor-copy path any more.
 # ---------------------------------------------------------------------------
 
-class TestStrategyA:
+class TestNoDonorCopy:
 
-    def test_missing_clip_filled_by_semantic_match(self, tmp_path):
-        """A missing scene is repaired by copying a present clip to its expected path.
-
-        Layout (by scene_index order):
-          sc_missing (index=0, pos=0) — MISSING — no prev neighbor
-          sc_adj     (index=1, pos=1) — present — next neighbor (blocked by consecutive rule)
-          sc_far     (index=5, pos=2) — present — not adjacent → eligible donor
-        """
+    def test_missing_clip_never_copied_from_a_similar_present_clip(self, tmp_path):
+        """With generation disabled, a highly similar present clip is NOT copied
+        into the missing scene's slot — the scene stays missing."""
         assets_root = tmp_path / "assets"
         assets_root.mkdir()
 
         scenes = [
             _make_scene("sc_missing", asset_id="asset_missing", scene_index=0,
                         description="ancient roman ruins excavation"),
-            _make_scene("sc_adj",     asset_id="asset_adj",     scene_index=1,
-                        description="medieval castle stone"),       # next neighbor
-            _make_scene("sc_far",     asset_id="asset_far",     scene_index=5,
-                        description="ancient ruins archaeology"),   # non-adjacent
+            _make_scene("sc_far", asset_id="asset_far", scene_index=5,
+                        description="ancient roman ruins excavation archaeology"),
         ]
-        _write_clip(assets_root, "asset_adj")
-        _write_clip(assets_root, "asset_far")
+        donor_bytes = b"DONOR_CLIP" * 100
+        (assets_root / "asset_far.mp4").write_bytes(donor_bytes)
 
         vp = _make_visual_package(scenes)
         cfg = _make_config(max_generated=0)  # Strategy B disabled
@@ -200,99 +196,32 @@ class TestStrategyA:
         result = run_clip_repair(
             visual_package=vp,
             missing_scene_ids=["sc_missing"],
-            present_clip_ids=["asset_adj", "asset_far"],
+            present_clip_ids=["asset_far"],
             assets_root=assets_root,
             config=cfg,
-            episode_id="ep_a_01",
+            episode_id="ep_norepeat_01",
             log=log,
         )
 
-        repaired_path = assets_root / "asset_missing.mp4"
-        assert repaired_path.exists(), "Repaired clip must be copied to expected path"
-        assert "sc_missing" in result.repaired_by_reuse
-        assert result.still_missing == []
+        assert not (assets_root / "asset_missing.mp4").exists(), (
+            "a missing scene must never be filled by copying another clip"
+        )
+        assert result.repaired_by_reuse == []
+        assert "sc_missing" in result.still_missing
+        # the donor clip is left untouched
+        assert (assets_root / "asset_far.mp4").read_bytes() == donor_bytes
 
-    def test_highest_jaccard_donor_chosen(self, tmp_path):
-        """Strategy A picks the non-adjacent donor with the highest semantic score.
-
-        Layout (by scene_index):
-          sc_missing (index=0)           — MISSING
-          sc_adj     (index=1, present)  — next neighbor → blocked by consecutive rule
-          sc_high    (index=3, present)  — high Jaccard with sc_missing, not adjacent
-          sc_low     (index=5, present)  — low Jaccard with sc_missing, not adjacent
-        """
+    def test_no_copy_even_with_many_similar_present_clips(self, tmp_path):
         assets_root = tmp_path / "assets"
         assets_root.mkdir()
 
         scenes = [
-            _make_scene("sc_missing", asset_id="asset_missing", scene_index=0,
-                        description="ancient roman ruins excavation"),
-            _make_scene("sc_adj",  asset_id="asset_adj",  scene_index=1,
-                        description="ancient roman ruins excavation"),  # adjacent → blocked
-            _make_scene("sc_high", asset_id="asset_high", scene_index=3,
-                        description="ancient roman forum excavation"),  # 3/5 Jaccard
-            _make_scene("sc_low",  asset_id="asset_low",  scene_index=5,
-                        description="modern city skyline buildings"),   # 0.0 Jaccard
+            _make_scene(f"sc_{i}", asset_id=f"asset_{i}", scene_index=i,
+                        description="ancient ruins")
+            for i in range(5)
         ]
-        high_bytes = b"HIGH_MATCH" * 100
-        low_bytes  = b"LOW_MATCH"  * 100
-        (assets_root / "asset_adj.mp4").write_bytes(b"ADJ_BLOCKED" * 100)
-        (assets_root / "asset_high.mp4").write_bytes(high_bytes)
-        (assets_root / "asset_low.mp4").write_bytes(low_bytes)
-
-        vp = _make_visual_package(scenes)
-        cfg = _make_config(max_generated=0)
-        log = MagicMock()
-
-        run_clip_repair(
-            visual_package=vp,
-            missing_scene_ids=["sc_missing"],
-            present_clip_ids=["asset_adj", "asset_high", "asset_low"],
-            assets_root=assets_root,
-            config=cfg,
-            episode_id="ep_a_02",
-            log=log,
-        )
-
-        # The repaired clip must be a copy of asset_high (not asset_low)
-        repaired = assets_root / "asset_missing.mp4"
-        assert repaired.exists()
-        assert repaired.read_bytes() == high_bytes, (
-            "Strategy A must pick the highest-Jaccard non-adjacent donor"
-        )
-
-    def test_same_donor_not_reused_for_two_gaps(self, tmp_path):
-        """Each donor clip used for at most one missing slot.
-
-        Layout (5 scenes, two present, two missing, one present at end):
-          sc_000 (index=0, MISSING)   — not adjacent to sc_004's present
-          sc_001 (index=1, present)   — next of sc_000, blocks asset_001 for sc_000
-          sc_002 (index=2, MISSING)   — between two present clips
-          sc_003 (index=3, present)   — next of sc_002, blocks asset_003 for sc_002
-          sc_004 (index=4, present)   — prev of nothing (last scene)
-
-        The only non-adjacent eligible donor for sc_000 is asset_003 or asset_004.
-        The only non-adjacent eligible donor for sc_002 is asset_001 or asset_004.
-        asset_004 can be used for one of the two gaps, but NOT both.
-        """
-        assets_root = tmp_path / "assets"
-        assets_root.mkdir()
-
-        scenes = [
-            _make_scene("sc_000", asset_id="asset_000", scene_index=0,
-                        description="ancient ruins"),
-            _make_scene("sc_001", asset_id="asset_001", scene_index=1,
-                        description="ancient ruins"),
-            _make_scene("sc_002", asset_id="asset_002", scene_index=2,
-                        description="ancient ruins"),
-            _make_scene("sc_003", asset_id="asset_003", scene_index=3,
-                        description="ancient ruins"),
-            _make_scene("sc_004", asset_id="asset_004", scene_index=4,
-                        description="ancient ruins"),
-        ]
-        _write_clip(assets_root, "asset_001")
-        _write_clip(assets_root, "asset_003")
-        _write_clip(assets_root, "asset_004")
+        for i in (1, 2, 3, 4):
+            _write_clip(assets_root, f"asset_{i}")
 
         vp = _make_visual_package(scenes)
         cfg = _make_config(max_generated=0)
@@ -300,61 +229,17 @@ class TestStrategyA:
 
         result = run_clip_repair(
             visual_package=vp,
-            missing_scene_ids=["sc_000", "sc_002"],
-            present_clip_ids=["asset_001", "asset_003", "asset_004"],
+            missing_scene_ids=["sc_0"],
+            present_clip_ids=["asset_1", "asset_2", "asset_3", "asset_4"],
             assets_root=assets_root,
             config=cfg,
-            episode_id="ep_a_03",
+            episode_id="ep_norepeat_02",
             log=log,
         )
 
-        # Each donor can be used at most once — total repairs ≤ number of distinct donors
-        donors_used = result.repaired_by_reuse
-        # If both gaps were repaired, both must have used DIFFERENT donors
-        if len(donors_used) == 2:
-            # The two repairs cannot have used the same donor
-            # (enforced by donated_asset_ids set inside run_clip_repair)
-            repaired_files = [
-                (assets_root / f"asset_{sid.split('_')[1]}.mp4").read_bytes()
-                for sid in donors_used
-                if (assets_root / f"asset_{sid.split('_')[1]}.mp4").exists()
-            ]
-        # Core assertion: no donor was used twice
-        total = len(result.repaired_by_reuse) + len(result.still_missing)
-        assert total == 2, "All missing scenes must be accounted for"
-
-    def test_no_consecutive_duplicate_at_adjacent_position(self, tmp_path):
-        """Repair clip must not be same as the clip at the adjacent position."""
-        assets_root = tmp_path / "assets"
-        assets_root.mkdir()
-
-        # Layout: sc_001 (present) → sc_002 (missing) — sc_002's only eligible donor is asset_001
-        # But sc_001 is at position 0 and sc_002 is at position 1 → consecutive → skip
-        scenes = [
-            _make_scene("sc_001", asset_id="asset_001", scene_index=0,
-                        description="ancient ruins"),
-            _make_scene("sc_002", asset_id="asset_002", scene_index=1,
-                        description="ancient ruins"),
-        ]
-        _write_clip(assets_root, "asset_001")
-
-        vp = _make_visual_package(scenes)
-        cfg = _make_config(max_generated=0)
-        log = MagicMock()
-
-        result = run_clip_repair(
-            visual_package=vp,
-            missing_scene_ids=["sc_002"],
-            present_clip_ids=["asset_001"],
-            assets_root=assets_root,
-            config=cfg,
-            episode_id="ep_a_04",
-            log=log,
-        )
-
-        # sc_002 must NOT be repaired because the only donor would create a consecutive duplicate
-        assert "sc_002" not in result.repaired_by_reuse
-        assert "sc_002" in result.still_missing
+        assert result.repaired_by_reuse == []
+        assert result.still_missing == ["sc_0"]
+        assert not (assets_root / "asset_0.mp4").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -429,14 +314,11 @@ class TestStrategyB:
         log = MagicMock()
 
         generate_calls = []
+        _aid_by_sid = {s["scene_id"]: s["asset_id"] for s in scenes}
 
         def _mock_submit(scene_spec, config, episode_id, output_dir, agent):
             sid = scene_spec.get("scene_id", "")
-            aid = scene_spec.get("asset_id", "")
-            # Write output so the path-exists check passes
-            target = output_dir / f"{aid}.mp4" if aid else None
-            if target:
-                target.write_bytes(b"GENERATED")
+            (output_dir / f"{_aid_by_sid[sid]}.mp4").write_bytes(b"GENERATED")
             generate_calls.append(sid)
             return {"generation_status": "generated"}
 
@@ -451,9 +333,57 @@ class TestStrategyB:
                 log=log,
             )
 
-        assert len(result.repaired_by_generation) <= 2, (
-            f"Expected at most 2 generations, got {len(result.repaired_by_generation)}"
+        assert len(result.repaired_by_generation) == 2, (
+            f"Expected exactly 2 generations (the cap), got {len(result.repaired_by_generation)}"
         )
+        assert len(generate_calls) == 2
+
+    def test_generated_outro_scene_regenerated_even_past_the_cap(self, tmp_path):
+        """A channel generated-outro scene (narration_reference 'b_outro*') is
+        regenerated even when the story cap is already spent — a dropped outro
+        clip would trip the narration-completeness gate."""
+        assets_root = tmp_path / "assets"
+        assets_root.mkdir()
+
+        scenes = []
+        for i in range(4):  # 4 story scenes
+            scenes.append(_make_scene(f"sc_{i:03d}", asset_id=f"asset_{i:03d}",
+                                      scene_index=i, description="story scene"))
+        outro = _make_scene("sc_outro", asset_id="asset_outro", scene_index=99,
+                            description="the hero now asleep")
+        outro["narration_reference"] = "b_outro_1"
+        scenes.append(outro)
+
+        vp = _make_visual_package(scenes)
+        cfg = _make_config(max_generated=2)  # only 2 story regens allowed
+        log = MagicMock()
+
+        generated = []
+        _aid_by_sid = {s["scene_id"]: s["asset_id"] for s in scenes}
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent):
+            sid = scene_spec.get("scene_id", "")
+            (output_dir / f"{_aid_by_sid[sid]}.mp4").write_bytes(b"GENERATED")
+            generated.append(sid)
+            return {"generation_status": "generated"}
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit):
+            result = run_clip_repair(
+                visual_package=vp,
+                missing_scene_ids=["sc_000", "sc_001", "sc_002", "sc_003", "sc_outro"],
+                present_clip_ids=[],
+                assets_root=assets_root,
+                config=cfg,
+                episode_id="ep_b_outro",
+                log=log,
+            )
+
+        assert "sc_outro" in result.repaired_by_generation, (
+            "the outro scene must always be regenerated, cap notwithstanding"
+        )
+        # story regen still capped at 2
+        story_regen = [s for s in result.repaired_by_generation if s != "sc_outro"]
+        assert len(story_regen) == 2
 
     def test_failed_generation_leaves_scene_in_still_missing(self, tmp_path):
         """If MUAPI fails for a scene, that scene remains in still_missing."""
@@ -1479,8 +1409,8 @@ class TestRepairResult:
         assets_root = tmp_path / "assets"
         assets_root.mkdir()
 
-        # sc_002: repaired by Strategy A (semantic match with sc_001 — non-consecutive)
-        # sc_004: still missing (no eligible donor, no generation)
+        # With generation disabled (max_generated=0) and no donor-copy path,
+        # every missing scene stays in still_missing.
         scenes = [
             _make_scene("sc_001", asset_id="asset_001", scene_index=0,
                         description="ancient ruins excavation"),
@@ -1512,9 +1442,11 @@ class TestRepairResult:
         assert isinstance(result.repaired_by_reuse, list)
         assert isinstance(result.repaired_by_generation, list)
         assert isinstance(result.still_missing, list)
-        # Repaired by A + still_missing must together account for all missing scenes
+        # regenerated + still_missing must together account for all missing scenes
         total = len(result.repaired_by_reuse) + len(result.repaired_by_generation) + len(result.still_missing)
         assert total == 2
+        assert result.repaired_by_reuse == [], "donor-copy path is removed"
+        assert set(result.still_missing) == {"sc_002", "sc_004"}
 
     def test_no_missing_returns_empty_result(self, tmp_path):
         """When no clips are missing, run_clip_repair() returns empty ClipRepairResult."""
@@ -1679,7 +1611,7 @@ class TestQAGateIntegration:
         def _repair_fills_all(**kwargs):
             (assets_root / f"{missing_asset_id}.mp4").write_bytes(b"REPAIRED" * 200)
             return ClipRepairResult(
-                repaired_by_reuse=[kwargs["missing_scene_ids"][0]],
+                repaired_by_generation=[kwargs["missing_scene_ids"][0]],
                 still_missing=[],
             )
 

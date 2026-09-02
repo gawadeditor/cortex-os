@@ -4,38 +4,30 @@ hypogeum/agents/clip_repair_agent.py — Clip Repair Agent
 Runs inside Assembly Agent between asset inventory validation and timeline
 construction. Attempts to fill missing clips before QA can reject the episode.
 
-Strategy A — Semantic reuse
-    For each missing scene, find the most semantically relevant existing clip
-    already on disk. Copy it to the expected path.
+NO-REPETITION POLICY (2026-09-02)
+    A missing scene is NEVER filled with a copy of another scene's clip.
+    Perceptual repetition is a rejected rule across the whole factory: a
+    scene with no clip is regenerated from its own prompt, or the episode
+    fails closed at the clip-availability gate. There is no "semantic
+    reuse / donor copy" path any more — the former Strategy A was removed.
 
-    Constraints enforced:
-      - No consecutive duplicates in the repaired timeline: the repair clip
-        for scene N cannot be the same file as the clip for scene N-1 or N+1.
-      - No same source clip used twice across all repairs: each donor clip is
-        used for at most one missing slot.
-      - Never random selection: always pick by descending semantic score.
-
-    Semantic scoring: Jaccard similarity on whitespace-split token sets from
-    the scene's visual description fields (prompt, visual_directions,
-    scene_description, narrative_signals). No LLM, no stopword filtering —
-    domain-specific vocabulary makes simple overlap effective.
-
-Strategy B — Extra clip generation
-    If missing clips remain after Strategy A, generate up to
-    config.CLIP_REPAIR_MAX_GENERATED (default 5) clips via MUAPI.
-    Only the scenes with the highest scene_index priority are generated;
-    the rest are left missing and QA decides.
+Strategy B — Regeneration (the only repair path)
+    For every missing scene, generate its clip via MUAPI from the scene's
+    own production_spec (build_scene_spec() — the same canonical translator
+    VPD Phase 2 uses). Up to config.CLIP_REPAIR_MAX_GENERATED (default 5)
+    story scenes are regenerated, by scene_index priority; a channel
+    generated-outro scene (narration_reference "b_outro*") is ALWAYS
+    regenerated regardless of that cap, because dropping it would trip the
+    narration-completeness gate. All MUAPI safety flags (DRY_RUN,
+    CHEAP_MODE, etc.) apply.
 
     Quality > cost: ~5 clips at T2 costs ≈ $3 — acceptable for production.
 
-    Uses muapi.submit_scene() directly with the existing scene spec from the
-    visual_package. All MUAPI safety flags (DRY_RUN, CHEAP_MODE, etc.) apply.
-
 QA rejection gate
-    Only after both A and B are exhausted (or disabled) does the Assembly Agent
-    hand off to the Final Render Reviewer with the remaining missing clips.
-    If repair fills all gaps, clip_availability_rate reaches 1.0 and the reviewer
-    sees no freeze-frame failure.
+    Whatever Strategy B cannot fill is left missing and handed to the Final
+    Render Reviewer. If clip_availability_rate stays below the assembly
+    threshold the episode fails closed — by design, never papered over with
+    a repeated clip.
 
 Public API:
     run_clip_repair(
@@ -45,18 +37,14 @@ Public API:
 
 Logging events emitted:
     clip_repair_started            — info  — inputs received
-    clip_repair_strategy_a_match   — info  — semantic match found for a scene
-    clip_repair_strategy_a_skip    — warn  — no eligible donor found
-    clip_repair_strategy_a_done    — info  — strategy A summary
-    clip_repair_strategy_b_start   — info  — extra clip generation begins
-    clip_repair_strategy_b_clip    — info  — one clip generated
-    clip_repair_strategy_b_skip    — warn  — generation failed for a scene
+    clip_repair_strategy_b_start   — info  — regeneration begins
+    clip_repair_strategy_b_clip    — info  — one clip regenerated
+    clip_repair_strategy_b_skip    — warn  — regeneration failed for a scene
     clip_repair_done               — info  — final summary
 """
 
 from __future__ import annotations
 
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set
@@ -96,9 +84,9 @@ def _force_short_native_aspect(scene_spec: dict, config) -> None:
 @dataclass
 class ClipRepairResult:
     """Summary of what the Clip Repair Agent did."""
-    repaired_by_reuse: List[str] = field(default_factory=list)    # scene_ids fixed by Strategy A
-    repaired_by_generation: List[str] = field(default_factory=list)  # scene_ids fixed by Strategy B
-    still_missing: List[str] = field(default_factory=list)        # scene_ids still missing after both
+    repaired_by_reuse: List[str] = field(default_factory=list)    # deprecated — donor-copy path removed 2026-09-02; always empty
+    repaired_by_generation: List[str] = field(default_factory=list)  # scene_ids regenerated (Strategy B)
+    still_missing: List[str] = field(default_factory=list)        # scene_ids still missing → episode fails closed
 
 
 # ---------------------------------------------------------------------------
@@ -144,157 +132,51 @@ def run_clip_repair(
         return ClipRepairResult()
 
     scenes: List[dict] = visual_package.get("scenes", [])
-    asset_manifest: dict = visual_package.get("asset_manifest", {})
-    assets_list: List[dict] = asset_manifest.get("assets", [])
 
     # Build scene_id → scene dict for fast lookup
     scene_by_id: Dict[str, dict] = {s["scene_id"]: s for s in scenes}
 
-    # Build asset_id → file Path for present clips
-    present_paths: Dict[str, Path] = {}
-    for asset in assets_list:
-        aid = asset.get("asset_id", "")
-        if aid and aid in present_clip_ids:
-            p = assets_root / f"{aid}.mp4"
-            if p.exists() and p.stat().st_size > 0:
-                present_paths[aid] = p
-
-    # Build ordered scene list (main episode only, by scene_index) for
-    # consecutive-duplicate constraint.
-    main_scenes_ordered = sorted(
-        [s for s in scenes if s.get("source_type") == "main_episode"],
-        key=lambda s: s.get("scene_index", 0),
-    )
-    scene_id_order = [s["scene_id"] for s in main_scenes_ordered]
-
-    # ---------------------------------------------------------------------------
-    # Strategy A: Semantic reuse
-    # ---------------------------------------------------------------------------
     result = ClipRepairResult()
-    donated_asset_ids: Set[str] = set()  # each donor used at most once
-
-    # Tracks what clip (asset_id) will be at each position after repair
-    # (for consecutive-duplicate enforcement).
-    assigned: Dict[str, str] = {}  # scene_id → asset_id (donor)
-
-    # Seed assigned with the clips we already have
-    for asset in assets_list:
-        aid = asset.get("asset_id", "")
-        sid = _asset_id_to_scene_id(aid, scenes)
-        if sid and aid in present_paths:
-            assigned[sid] = aid
-
     still_missing = list(missing_scene_ids)
 
-    for missing_sid in list(still_missing):
-        missing_scene = scene_by_id.get(missing_sid, {})
-        missing_desc = _scene_description(missing_scene)
-
-        # Score all present clips by semantic overlap
-        candidates: List[tuple] = []
-        for donor_aid, donor_path in present_paths.items():
-            if donor_aid in donated_asset_ids:
-                continue  # already used this donor
-            donor_sid = _asset_id_to_scene_id(donor_aid, scenes)
-            donor_scene = scene_by_id.get(donor_sid or "", {})
-            donor_desc = _scene_description(donor_scene)
-            score = _jaccard(missing_desc, donor_desc)
-            candidates.append((score, donor_aid, donor_path))
-
-        # Sort by score descending; for equal scores, by asset_id for determinism
-        candidates.sort(key=lambda c: (-c[0], c[1]))
-
-        chosen_aid: Optional[str] = None
-        chosen_path: Optional[Path] = None
-
-        for _score, donor_aid, donor_path in candidates:
-            # Consecutive-duplicate check: no same clip as the neighbour before/after
-            pos = scene_id_order.index(missing_sid) if missing_sid in scene_id_order else -1
-            prev_sid = scene_id_order[pos - 1] if pos > 0 else None
-            next_sid = scene_id_order[pos + 1] if 0 <= pos < len(scene_id_order) - 1 else None
-            prev_assigned = assigned.get(prev_sid) if prev_sid else None
-            next_assigned = assigned.get(next_sid) if next_sid else None
-
-            if donor_aid == prev_assigned or donor_aid == next_assigned:
-                continue  # would create consecutive duplicate
-
-            chosen_aid = donor_aid
-            chosen_path = donor_path
-            break
-
-        if chosen_aid is None or chosen_path is None:
-            log.warn(
-                "clip_repair_strategy_a_skip",
-                episode_id=episode_id,
-                scene_id=missing_sid,
-                reason="no_eligible_donor",
-            )
-            continue
-
-        # Copy donor to the expected path for the missing scene
-        target_path = _expected_clip_path(missing_sid, scene_by_id.get(missing_sid, {}),
-                                           assets_root, episode_id)
-        if target_path is None:
-            log.warn(
-                "clip_repair_strategy_a_skip",
-                episode_id=episode_id,
-                scene_id=missing_sid,
-                reason="cannot_resolve_target_path",
-            )
-            continue
-
-        try:
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(chosen_path), str(target_path))
-        except OSError as exc:
-            log.warn(
-                "clip_repair_strategy_a_skip",
-                episode_id=episode_id,
-                scene_id=missing_sid,
-                reason=f"copy_failed: {exc}",
-            )
-            continue
-
-        donated_asset_ids.add(chosen_aid)
-        assigned[missing_sid] = chosen_aid
-        result.repaired_by_reuse.append(missing_sid)
-        still_missing.remove(missing_sid)
-
-        log.info(
-            "clip_repair_strategy_a_match",
-            episode_id=episode_id,
-            scene_id=missing_sid,
-            donor_asset_id=chosen_aid,
-            target_path=str(target_path),
-        )
-
-    log.info(
-        "clip_repair_strategy_a_done",
-        episode_id=episode_id,
-        repaired=len(result.repaired_by_reuse),
-        still_missing=len(still_missing),
-    )
-
     # ---------------------------------------------------------------------------
-    # Strategy B: Extra clip generation via MUAPI
+    # Strategy B: Regeneration via MUAPI — the ONLY repair path.
+    #
+    # A missing scene is regenerated from its own production_spec, or it stays
+    # missing and the episode fails closed downstream. There is no donor-copy /
+    # semantic-reuse fallback: perceptual repetition is a rejected rule
+    # (2026-09-02). A channel generated-outro scene is always regenerated,
+    # even past the CLIP_REPAIR_MAX_GENERATED cap, because a dropped outro
+    # clip trips the narration-completeness gate.
     # ---------------------------------------------------------------------------
     max_generated = getattr(config, "CLIP_REPAIR_MAX_GENERATED", 5)
 
-    if still_missing and max_generated > 0:
-        log.info(
-            "clip_repair_strategy_b_start",
-            episode_id=episode_id,
-            scenes_to_generate=min(len(still_missing), max_generated),
-            max_generated=max_generated,
-        )
+    def _is_outro_scene(sid: str) -> bool:
+        s = scene_by_id.get(sid, {})
+        ref = str(s.get("narration_reference", "") or s.get("narration_ref", ""))
+        return ref.startswith("b_outro")
 
+    if still_missing and max_generated > 0:
         # Prioritise main_episode scenes over short scenes; within each group by scene_index
         def _priority(sid: str) -> tuple:
             s = scene_by_id.get(sid, {})
             is_short = s.get("source_type") == "short"
             return (int(is_short), s.get("scene_index", 999))
 
-        to_generate = sorted(still_missing, key=_priority)[:max_generated]
+        _outro_missing = [s for s in still_missing if _is_outro_scene(s)]
+        _story_missing = [s for s in still_missing if not _is_outro_scene(s)]
+        to_generate = (
+            sorted(_story_missing, key=_priority)[:max_generated]
+            + sorted(_outro_missing, key=_priority)
+        )
+
+        log.info(
+            "clip_repair_strategy_b_start",
+            episode_id=episode_id,
+            scenes_to_generate=len(to_generate),
+            outro_scenes=len(_outro_missing),
+            max_generated=max_generated,
+        )
 
         for missing_sid in to_generate:
             missing_scene = scene_by_id.get(missing_sid, {})

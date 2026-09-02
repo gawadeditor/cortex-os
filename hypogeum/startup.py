@@ -205,11 +205,14 @@ def run_startup_checks(
         )
 
     # --- Check 2: YouTube OAuth token exchange ---
-    # Only attempted when all three OAuth credentials are present. A partial
-    # credential set (some keys set, others missing) is treated as unconfigured
-    # and results in a warning rather than a hard failure.
+    # Only relevant for the legacy direct-YouTube-Data-API publishing path.
+    # Every platform (YouTube included) now publishes through Zernio, so this
+    # check is skipped entirely unless YOUTUBE_DIRECT_PUBLISH_ENABLED is set —
+    # a stale Google refresh token is not an operator problem otherwise, and
+    # the recurring "re-authorize" warning was pure noise.
     youtube_creds_configured = bool(
-        config.YOUTUBE_CLIENT_ID
+        getattr(config, "YOUTUBE_DIRECT_PUBLISH_ENABLED", False)
+        and config.YOUTUBE_CLIENT_ID
         and config.YOUTUBE_CLIENT_SECRET
         and config.YOUTUBE_REFRESH_TOKEN
     )
@@ -225,7 +228,10 @@ def run_startup_checks(
                 "YouTube publishing will be unavailable for this run. "
                 "Re-authorize at the Google OAuth consent screen to restore publishing."
             )
-    elif any([config.YOUTUBE_CLIENT_ID, config.YOUTUBE_CLIENT_SECRET, config.YOUTUBE_REFRESH_TOKEN]):
+    elif (
+        getattr(config, "YOUTUBE_DIRECT_PUBLISH_ENABLED", False)
+        and any([config.YOUTUBE_CLIENT_ID, config.YOUTUBE_CLIENT_SECRET, config.YOUTUBE_REFRESH_TOKEN])
+    ):
         warnings.append(
             "YouTube credentials are partially configured "
             "(YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, YOUTUBE_REFRESH_TOKEN must all "

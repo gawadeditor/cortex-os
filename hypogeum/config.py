@@ -531,6 +531,14 @@ class Config:
         self.MUAPI_RUNWAY_ONLY_MODE = _get_bool("MUAPI_RUNWAY_ONLY_MODE", default=False)
         self.MUAPI_DRY_RUN = _get_bool("MUAPI_DRY_RUN", default=False)
         self.YOUTUBE_DRY_RUN = _get_bool("YOUTUBE_DRY_RUN", default=False)
+        # Direct YouTube Data API publishing (the legacy pre-Zernio path).
+        # OFF by default: every platform, YouTube included, now publishes
+        # through Zernio (AUTO_ZERNIO_PUBLISHING_ENABLED). When False the
+        # startup YouTube-OAuth check is skipped entirely — a stale/expired
+        # Google refresh token is not a problem the operator needs to see.
+        self.YOUTUBE_DIRECT_PUBLISH_ENABLED = _get_bool(
+            "YOUTUBE_DIRECT_PUBLISH_ENABLED", default=False
+        )
         self.MUAPI_ALLOW_PAID_FALLBACKS = _get_bool("MUAPI_ALLOW_PAID_FALLBACKS", default=False)
         self.ENABLE_DEDICATED_SHORT_GENERATION = _get_bool(
             "ENABLE_DEDICATED_SHORT_GENERATION", default=True

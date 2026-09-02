@@ -665,7 +665,9 @@ class TestFfmpegCheck:
 # TestYouTubeOAuthCheck
 # ---------------------------------------------------------------------------
 
-def make_config_with_youtube(*, all_three: bool = True, partial: bool = False) -> "Config":
+def make_config_with_youtube(
+    *, all_three: bool = True, partial: bool = False, direct_publish: bool = True,
+) -> "Config":
     """
     Build a Config with controlled YouTube credential state.
 
@@ -675,8 +677,12 @@ def make_config_with_youtube(*, all_three: bool = True, partial: bool = False) -
     all_three=True  → CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN all set.
     partial=True    → only CLIENT_ID set (simulate partial config).
     all_three=False, partial=False → all three are None.
+    direct_publish  → YOUTUBE_DIRECT_PUBLISH_ENABLED; the startup OAuth check
+                      only runs for the legacy direct path, so tests that
+                      exercise that check must set this True (the default here).
     """
     cfg = make_config(with_anthropic_key=True)
+    cfg.YOUTUBE_DIRECT_PUBLISH_ENABLED = direct_publish
     # Force YouTube attrs to a known state regardless of what .env loaded.
     cfg.YOUTUBE_CLIENT_ID = None
     cfg.YOUTUBE_CLIENT_SECRET = None
@@ -698,6 +704,7 @@ def run_checks_with_youtube(
     youtube_creds: str = "all",   # "all" | "partial" | "none"
     token_ok: bool = True,
     token_err: str = "token error",
+    direct_publish: bool = True,
 ):
     """
     Run run_startup_checks() with YouTube credential scenarios and mocked network.
@@ -706,11 +713,11 @@ def run_checks_with_youtube(
     token_ok / token_err control what _check_youtube_oauth returns.
     """
     if youtube_creds == "all":
-        cfg = make_config_with_youtube(all_three=True)
+        cfg = make_config_with_youtube(all_three=True, direct_publish=direct_publish)
     elif youtube_creds == "partial":
-        cfg = make_config_with_youtube(all_three=False, partial=True)
+        cfg = make_config_with_youtube(all_three=False, partial=True, direct_publish=direct_publish)
     else:
-        cfg = make_config_with_youtube(all_three=False, partial=False)
+        cfg = make_config_with_youtube(all_three=False, partial=False, direct_publish=direct_publish)
 
     token_result = (True, None) if token_ok else (False, token_err)
 
@@ -867,6 +874,32 @@ class TestYouTubeOAuthCheck:
         assert report.openrouter_reachable is True
         assert report.overall_status in ("healthy", "degraded")
         assert len(report.warnings) >= 1
+
+    # --- YOUTUBE_DIRECT_PUBLISH_ENABLED is off by default: check is skipped ---
+    # Every platform now publishes through Zernio; a stale Google refresh
+    # token is not something the operator needs to be told about every run.
+
+    def test_direct_publish_off_all_creds_check_not_run(self):
+        _, mock_yt, exc = run_checks_with_youtube(
+            youtube_creds="all", token_ok=False, direct_publish=False
+        )
+        assert exc is None
+        mock_yt.assert_not_called()
+
+    def test_direct_publish_off_all_creds_no_warning(self):
+        report, _, exc = run_checks_with_youtube(
+            youtube_creds="all", token_ok=False, direct_publish=False
+        )
+        assert exc is None
+        assert report.warnings == []
+        assert report.youtube_token_valid is None
+
+    def test_direct_publish_off_partial_creds_no_warning(self):
+        report, _, exc = run_checks_with_youtube(
+            youtube_creds="partial", direct_publish=False
+        )
+        assert exc is None
+        assert report.warnings == []
 
     # --- _check_youtube_oauth unit tests ---
 

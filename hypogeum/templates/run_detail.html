@@ -28,43 +28,47 @@
 <div class="container">
 
 
+{% from '_icons.html' import icon %}
 <div class="page-header">
-  <h1>Run <code>{{ d.run.run_id[:12] }}…</code></h1>
-  <span class="badge badge-{{ d.run.status }}">{{ d.run.status }}</span>
-  <a href="/runs" class="btn" style="margin-left:auto;">← All Runs</a>
+  <div>
+    <span class="eyebrow">Production run</span>
+    <h1>{{ (d.run.episode_id or d.run.run_id) | episode_name }}</h1>
+  </div>
+  <span class="badge badge-{{ d.run.status }}" style="margin-left:6px;">{{ d.run.status | plain_status }}</span>
+  <a href="/runs" class="btn" style="margin-left:auto;">← All runs</a>
 </div>
 
 {# ── Summary row ── #}
 <div class="card">
-  <div class="card-title">Summary</div>
+  <div class="card-title">This run</div>
   <div class="grid2">
     <div>
-      <div class="stat-row"><span class="stat-l">Run ID</span><code>{{ d.run.run_id }}</code></div>
-      <div class="stat-row"><span class="stat-l">Episode</span><span>{{ d.run.episode_id }}</span></div>
-      {% if d.episode.title %}
-      <div class="stat-row"><span class="stat-l">Title</span><span>{{ d.episode.title }}</span></div>
-      {% endif %}
       {% if d.episode.topic %}
       <div class="stat-row"><span class="stat-l">Topic</span><span>{{ d.episode.topic }}</span></div>
       {% endif %}
-      <div class="stat-row"><span class="stat-l">Started</span><span class="muted">{{ d.run.started_at[:19] if d.run.started_at else '—' }}</span></div>
-      <div class="stat-row"><span class="stat-l">Completed</span><span class="muted">{{ d.run.completed_at[:19] if d.run.completed_at else '—' }}</span></div>
+      <div class="stat-row"><span class="stat-l">Started</span><span class="muted">{{ d.run.started_at | rel_time if d.run.started_at else '—' }}</span></div>
+      <div class="stat-row"><span class="stat-l">Finished</span><span class="muted">{{ d.run.completed_at | rel_time if d.run.completed_at else 'still running' }}</span></div>
     </div>
     <div>
-      <div class="stat-row"><span class="stat-l">Status</span><span class="badge badge-{{ d.run.status }}">{{ d.run.status }}</span></div>
-      <div class="stat-row"><span class="stat-l">Exit code</span><span>{{ d.run.exit_code if d.run.exit_code is not none else '—' }}</span></div>
-      <div class="stat-row"><span class="stat-l">Stages</span><span>{{ d.stage_count }}</span></div>
-      <div class="stat-row"><span class="stat-l">Total cost</span>
-        <span>${{ "%.4f" | format(d.total_cost_usd) }}</span></div>
-      <div class="stat-row"><span class="stat-l">Assets</span><span>{{ d.assets | length }}</span></div>
+      <div class="stat-row"><span class="stat-l">Status</span><span class="badge badge-{{ d.run.status }}">{{ d.run.status | plain_status }}</span></div>
+      <div class="stat-row"><span class="stat-l">Steps</span><span>{{ d.stage_count }}</span></div>
+      <div class="stat-row"><span class="stat-l">Cost so far</span><span>{{ d.total_cost_usd | friendly_money }}</span></div>
+      <div class="stat-row"><span class="stat-l">Files produced</span><span>{{ d.assets | length }}</span></div>
     </div>
   </div>
   {% if d.run.error_message %}
-  <div style="margin-top:12px; padding:10px 12px; background:var(--critical-bg);
+  {% set _p = d.run.error_message | plain_problem %}
+  <div style="margin-top:12px; padding:12px 14px; background:var(--critical-bg);
               border:1px solid var(--critical); border-radius:var(--radius);">
-    <div style="font-size:11px; color:var(--red); text-transform:uppercase;
-                letter-spacing:.05em; margin-bottom:4px;">Error</div>
-    <pre style="font-size:12px; color:var(--red); white-space:pre-wrap; word-break:break-all;">{{ d.run.error_message }}</pre>
+    <div style="font-weight:700; color:var(--critical); margin-bottom:4px;">{{ icon('warning') }} {{ _p.label }}</div>
+    {% if _p.meaning %}<div style="font-size:13px; color:var(--text);">{{ _p.meaning }}</div>{% endif %}
+    <div style="font-size:12px; color:var(--muted); margin-top:6px;">{{ _p.action }}</div>
+    {% if not _p.known %}
+    <details style="margin-top:8px;">
+      <summary style="font-size:11px; color:var(--muted); cursor:pointer;">Technical detail</summary>
+      <pre style="font-size:11px; color:var(--muted); white-space:pre-wrap; word-break:break-all; margin-top:6px;">{{ d.run.error_message }}</pre>
+    </details>
+    {% endif %}
   </div>
   {% endif %}
 </div>
@@ -466,17 +470,16 @@ function submitRaiseCeiling(btn) {
 {% set _maxdur = (_timed | map(attribute='duration_ms') | max) %}
 {% set _maxcost = (d.stages | map(attribute='cost_usd') | map('default', 0) | map('float') | max) or 0 %}
 <div class="card">
-  <div class="card-title">Stage breakdown — {{ d.stage_count }} stages · ${{ "%.2f"|format(d.total_cost_usd) }} total</div>
+  <div class="card-title">Where the time and money went — {{ d.stage_count }} steps · {{ d.total_cost_usd | friendly_money }} total</div>
   <div class="table-wrap" style="border:none;">
   <table>
-    <thead><tr><th>Stage</th><th style="width:34%;">Duration</th><th style="width:26%;">Cost</th></tr></thead>
+    <thead><tr><th>Step</th><th style="width:34%;">Time</th><th style="width:26%;">Cost</th></tr></thead>
     <tbody>
       {% for s in d.stages %}
       {% if s.duration_ms or s.cost_usd %}
       <tr>
         <td>
-          <span class="{{ 'ok' if s.status == 'completed' else ('err' if s.status == 'failed' else 'muted') }}">{{ s.stage_name }}</span>
-          {% if s.model_slug %}<br><span class="mono muted" style="font-size:10.5px;">{{ s.model_slug }}</span>{% endif %}
+          <span class="{{ 'ok' if s.status == 'completed' else ('err' if s.status == 'failed' else 'muted') }}">{{ s.stage_name | stage_name }}</span>
         </td>
         <td>
           <div class="spread" style="gap:8px;">
@@ -488,7 +491,7 @@ function submitRaiseCeiling(btn) {
           {% if s.cost_usd and s.cost_usd > 0 %}
           <div class="spread" style="gap:8px;">
             <span style="flex:1;">{{ hbar(s.cost_usd, _maxcost, 'good') }}</span>
-            <span class="mono" style="font-size:11px; white-space:nowrap;">${{ "%.3f"|format(s.cost_usd) }}</span>
+            <span class="mono" style="font-size:11px; white-space:nowrap;">{{ s.cost_usd | friendly_money }}</span>
           </div>
           {% else %}<span class="muted" style="font-size:11px;">—</span>{% endif %}
         </td>
@@ -503,27 +506,26 @@ function submitRaiseCeiling(btn) {
 
 {# ── Stage timeline ── #}
 <div class="card">
-  <div class="card-title">Stage Timeline ({{ d.stage_count }} stages)</div>
+  <div class="card-title">Step by step ({{ d.stage_count }} steps)</div>
   {% if d.stages %}
   <ul class="timeline">
     {% for s in d.stages %}
-    {% if s.status == 'completed' %}{% set icon = '✓' %}{% set cls = 'ok' %}
-    {% elif s.status == 'failed'    %}{% set icon = '✗' %}{% set cls = 'err' %}
-    {% elif s.status == 'skipped'   %}{% set icon = '—' %}{% set cls = 'muted' %}
-    {% else                         %}{% set icon = '⟳' %}{% set cls = 'muted' %}
+    {% if s.status == 'completed' %}{% set tlicon = 'check' %}{% set cls = 'ok' %}
+    {% elif s.status == 'failed'    %}{% set tlicon = 'x' %}{% set cls = 'err' %}
+    {% elif s.status == 'skipped'   %}{% set tlicon = 'chevron-down' %}{% set cls = 'muted' %}
+    {% else                         %}{% set tlicon = 'refresh' %}{% set cls = 'muted' %}
     {% endif %}
     <li class="tl-item">
-      <div class="tl-icon {{ cls }}">{{ icon }}</div>
+      <div class="tl-icon {{ cls }}">{{ icon(tlicon) }}</div>
       <div class="tl-body">
-        <div class="tl-name {{ cls }}">{{ s.stage_name }}</div>
+        <div class="tl-name {{ cls }}">{{ s.stage_name | stage_name }}</div>
         <div class="tl-meta">
           {{ s.duration_fmt }}
-          {% if s.cost_usd and s.cost_usd > 0 %} · ${{ "%.4f"|format(s.cost_usd) }}{% endif %}
-          {% if s.model_slug %} · <span style="font-family:monospace;font-size:11px;">{{ s.model_slug }}</span>{% endif %}
+          {% if s.cost_usd and s.cost_usd > 0 %} · {{ s.cost_usd | friendly_money }}{% endif %}
           {% if s.skipped %} · <span class="muted">(skipped)</span>{% endif %}
         </div>
         {% if s.error_message %}
-        <div class="tl-error">{{ s.error_message[:300] }}</div>
+        <div class="tl-error">{{ s.error_message | plain_problem_label }}</div>
         {% endif %}
       </div>
       <div style="font-size:11px; color:var(--muted); white-space:nowrap; padding-top:2px;">
@@ -631,8 +633,8 @@ function submitRaiseCeiling(btn) {
       <div class="tl-icon muted">→</div>
       <div class="tl-body">
         <div class="tl-name">
-          <span class="muted">{{ t.from_state or '(start)' }}</span>
-          → <span class="badge badge-{{ t.to_state }}">{{ t.to_state }}</span>
+          <span class="muted">{{ (t.from_state or 'start') | plain_status }}</span>
+          → <span class="badge badge-{{ t.to_state }}">{{ t.to_state | plain_status }}</span>
         </div>
         <div class="tl-meta">
           {{ t.triggered_by or '—' }} · {{ t.trigger_source or '—' }}

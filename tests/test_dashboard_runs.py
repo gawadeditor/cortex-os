@@ -548,14 +548,15 @@ class TestFlaskRunRoutes:
         r = client.get(f"/run/{ids['run_ok']}")
         assert r.status_code == 200
         text = r.get_data(as_text=True)
-        assert "Stage Timeline" in text
+        assert "Step by step" in text
 
     def test_run_detail_shows_stages(self, flask_client):
         client, ids = flask_client
         r = client.get(f"/run/{ids['run_ok']}")
         text = r.get_data(as_text=True)
-        assert "research" in text
-        assert "narration" in text
+        # stage names render in plain language now
+        assert "Research" in text
+        assert "Voiceover" in text
 
     def test_run_detail_shows_costs(self, flask_client):
         client, ids = flask_client

@@ -332,6 +332,11 @@ def _f_channel_name(channel_id):
     return _hz.channel_display_name(channel_id, db_path=_db_path())
 
 
+@app.template_filter("stage_name")
+def _f_stage_name(value):
+    return _hz.plain_stage_name(value)
+
+
 @app.template_filter("friendly_count")
 def _f_friendly_count(value, singular, plural=None):
     return _hz.friendly_count(value, singular, plural)

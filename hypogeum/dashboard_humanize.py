@@ -504,6 +504,56 @@ def plain_dimension(value) -> str:
     return _DIMENSIONS.get(k, re.sub(r"[_\-]+", " ", k).strip().capitalize())
 
 
+_STAGE_NAMES = {
+    "executive_producer": "Topic check",
+    "research_director": "Research",
+    "narrative_architect": "Story structure",
+    "script_engine": "Script",
+    "script": "Script",
+    "thumbnail_strategy": "Thumbnail plan",
+    "visual_package_director": "Visuals",
+    "vpd": "Visuals",
+    "vpd_stage_a": "Visuals — planning",
+    "vpd_stage_b": "Visuals — generating clips",
+    "thumbnail_director": "Thumbnail",
+    "audio_agent": "Voiceover & music",
+    "audio": "Voiceover & music",
+    "narration": "Voiceover",
+    "assembly_agent": "Final video",
+    "assembly": "Final video",
+    "publishing_agent": "Publishing",
+    "publishing": "Publishing",
+    "archive_agent": "Archiving",
+    "archive": "Archiving",
+    "research": "Research",
+    "visuals": "Visuals",
+    "startup_checks": "Startup checks",
+    "finance_agent_authorization": "Budget approval",
+    "finance_authorization": "Budget approval",
+    "finance_approval": "Budget approval",
+    "source_enhancement": "Video polish",
+    "coverage_planning": "Shot planning",
+    "coverage_fill": "Extra shots",
+    "clip_repair": "Clip fixes",
+    "qa_agent": "Quality review",
+    "qa": "Quality review",
+    "compliance_agent": "Compliance check",
+    "brand_guardian": "Brand check",
+    "cross_platform_readiness": "Publish checks",
+}
+
+
+def plain_stage_name(value) -> str:
+    k = re.sub(r"[^a-z0-9_]+", "_", str(value or "").strip().lower()).strip("_")
+    if k in _STAGE_NAMES:
+        return _STAGE_NAMES[k]
+    # strip a trailing _agent / _director / _engine and retry
+    k2 = re.sub(r"_(agent|director|engine|stage)$", "", k)
+    if k2 in _STAGE_NAMES:
+        return _STAGE_NAMES[k2]
+    return re.sub(r"[_\-]+", " ", k).strip().capitalize()
+
+
 # ── Channel runtime blockers (free-text sentences from channel_runtime_status)
 _CHANNEL_BLOCKER_PATTERNS = [
     (r"consecutive failed runs",

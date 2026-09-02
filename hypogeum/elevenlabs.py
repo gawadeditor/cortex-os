@@ -128,7 +128,9 @@ _RETRY_AFTER_DEFAULT = 30.0     # seconds when 429 Retry-After header is absent
 _QUOTA_KEYWORDS = frozenset({"quota", "credits", "limit exceeded", "insufficient"})
 
 # SRT subtitle grouping
-_SRT_MAX_WORDS_PER_LINE = 7     # words per subtitle block
+# Words shown on screen at once. 3 = short-form / TikTok-style burn-in
+# (every channel is shorts-only now); callers may override per build_srt() call.
+_SRT_MAX_WORDS_PER_LINE = 3
 _SRT_MIN_GAP_SECONDS    = 0.05  # minimum gap between subtitle blocks
 
 # File extension map for output formats
@@ -1284,6 +1286,7 @@ def whisper_fallback(
 def build_srt(
     segments: List[NarrationSegmentResult],
     time_offsets_seconds: Optional[List[float]] = None,
+    max_words_per_block: int = _SRT_MAX_WORDS_PER_LINE,
 ) -> str:
     """
     Build a complete SRT subtitle file from a list of narration segments.
@@ -1326,7 +1329,7 @@ def build_srt(
         blocks = _words_to_srt_blocks(
             words=seg.word_timings,
             time_offset=offset,
-            max_words=_SRT_MAX_WORDS_PER_LINE,
+            max_words=max(1, int(max_words_per_block or _SRT_MAX_WORDS_PER_LINE)),
         )
         all_blocks.extend(blocks)
 

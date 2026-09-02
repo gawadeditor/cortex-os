@@ -45,6 +45,7 @@ Public API:
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
@@ -349,13 +350,30 @@ def check_cross_platform_readiness(
                         if _short_native and deliverable_class == "main_episode":
                             # A short-native main_episode is a Short with no
                             # separate caption asset — its visible text on
-                            # TikTok/IG/FB IS the resolved episode description
-                            # (already validated by A_METADATA). Don't demand
-                            # a shorts_captions entry that will never exist.
-                            caption = (
+                            # TikTok/IG/FB IS a SHORT-FORM cut of the episode
+                            # description (build_publish_package_from_episode_dir
+                            # applies the same _SHORT_FORM_CAPTION_MAX_CHARS
+                            # trim to what is actually submitted). Don't demand
+                            # a shorts_captions entry that will never exist,
+                            # and don't validate the full long-form text.
+                            _full = (
                                 resolved_metadata.description
                                 if resolved_metadata is not None else ""
                             ) or ""
+                            _cap = 900  # _SHORT_FORM_CAPTION_MAX_CHARS
+                            if len(_full) <= _cap:
+                                caption = _full
+                            else:
+                                _kept, _n = [], 0
+                                for _s in re.split(r"(?<=[.!?])\s+", _full):
+                                    _s = _s.strip()
+                                    if not _s:
+                                        continue
+                                    if _kept and _n + len(_s) + 1 > _cap:
+                                        break
+                                    _kept.append(_s)
+                                    _n += len(_s) + 1
+                                caption = " ".join(_kept)[:_cap].rstrip() or _full[:_cap].rstrip()
                         else:
                             captions = resolve_canonical_captions(final_render_package, [deliverable_id])
                             caption = captions[deliverable_id]

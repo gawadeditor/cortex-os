@@ -583,3 +583,88 @@ def record_ambiguous(
             raise
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Stale-attempt reconciliation
+# ---------------------------------------------------------------------------
+
+_STALE_ATTEMPT_MINUTES_DEFAULT = 15
+
+
+def reconcile_stale_publish_attempts(
+    db_path: Optional[Path] = None,
+    *,
+    stale_after_minutes: int = _STALE_ATTEMPT_MINUTES_DEFAULT,
+    now: Optional[str] = None,
+) -> list[dict]:
+    """Find publishing_attempts stuck in 'prepared'/'submitting' with NO
+    receipt and no update for `stale_after_minutes`, and transition them to
+    'cancelled' so guard_and_prepare_attempt() will start a fresh attempt
+    (the provider_request_key still de-dupes at the provider if the earlier
+    call actually landed).
+
+    A process that dies between the ledger transition to 'submitting' and
+    recording the provider result otherwise leaves that (episode, deliverable,
+    platform) permanently un-retryable ("platforms requiring reconciliation
+    before any new call"). This sweep is the safety net. Never touches an
+    attempt that already has a publishing_receipts row (that one is genuinely
+    acknowledged and must be reconciled by finalizing the receipt, not
+    cancelled). Never raises.
+
+    Returns one dict per reconciled attempt: {attempt_id, episode_id,
+    deliverable_id, platform, prior_state}.
+    """
+    reconciled: list[dict] = []
+    try:
+        initialize_schema(db_path)
+        conn = get_connection(db_path)
+    except Exception:
+        return reconciled
+    try:
+        conn.isolation_level = None
+        _now = now or _now_iso()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                """
+                SELECT a.attempt_id, a.episode_id, a.deliverable_id, a.platform, a.state
+                FROM publishing_attempts a
+                WHERE a.state IN ('prepared', 'submitting')
+                  AND (julianday(?) - julianday(a.updated_at)) * 1440.0 >= ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM publishing_receipts r WHERE r.attempt_id = a.attempt_id
+                  )
+                """,
+                (_now, float(stale_after_minutes)),
+            ).fetchall()
+            for row in rows:
+                r = dict(row)
+                _transition_attempt(
+                    conn, r["attempt_id"], "cancelled",
+                    last_error_category="stale_reconciliation",
+                    last_error_message=(
+                        f"attempt stuck in {r['state']!r} with no receipt for "
+                        f">= {stale_after_minutes} min — cancelled so a fresh attempt can proceed"
+                    ),
+                    now=_now,
+                )
+                conn.execute(
+                    "UPDATE publication_intents SET status = 'cancelled', updated_at = ? "
+                    "WHERE publication_intent_id = ("
+                    "  SELECT publication_intent_id FROM publishing_attempts WHERE attempt_id = ?"
+                    ") AND status = 'open'",
+                    (_now, r["attempt_id"]),
+                )
+                reconciled.append({
+                    "attempt_id": r["attempt_id"], "episode_id": r["episode_id"],
+                    "deliverable_id": r["deliverable_id"], "platform": r["platform"],
+                    "prior_state": r["state"],
+                })
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            return []
+    finally:
+        conn.close()
+    return reconciled

@@ -67,6 +67,7 @@ Public API:
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, replace as _dc_replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -429,6 +430,58 @@ def _pick_root_title_description(
     return fallback_title, fallback_description
 
 
+# Short-form caption cap. Well under Instagram's 2200 and TikTok's ~2200;
+# a Short's caption is a hook, not a document. Sentence-boundary trim.
+_SHORT_FORM_CAPTION_MAX_CHARS = 900
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+
+
+def _is_short_native_channel(channel_id: str, db_path: Optional[Path]) -> bool:
+    """videos_per_week == 0 and shorts_per_week >= 1 — same derivation the
+    rest of the factory uses. Fail-soft to False."""
+    try:
+        from hypogeum.channel_config import get_channel_operations_profile  # noqa: PLC0415
+        prof = get_channel_operations_profile(channel_id, db_path=db_path)
+        cad = (getattr(prof, "production_cadence", None) or {}) if prof else {}
+        return (
+            cad.get("videos_per_week") == 0
+            and isinstance(cad.get("shorts_per_week"), int)
+            and cad.get("shorts_per_week") >= 1
+        )
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _short_form_caption(text: str) -> str:
+    """Keep the leading whole sentences that fit _SHORT_FORM_CAPTION_MAX_CHARS
+    (always at least the first sentence); hard word-trim if that alone is
+    over cap. Strips any chapter/timestamp/source block a long-form
+    description would carry."""
+    text = (text or "").strip()
+    if len(text) <= _SHORT_FORM_CAPTION_MAX_CHARS:
+        return text
+    kept: list = []
+    for sentence in _SENTENCE_END.split(text):
+        s = sentence.strip()
+        if not s:
+            continue
+        candidate = (" ".join(kept + [s])).strip()
+        if kept and len(candidate) > _SHORT_FORM_CAPTION_MAX_CHARS:
+            break
+        kept.append(s)
+        if len(candidate) >= _SHORT_FORM_CAPTION_MAX_CHARS:
+            break
+    out = " ".join(kept).strip()
+    if len(out) > _SHORT_FORM_CAPTION_MAX_CHARS:
+        words = out.split()
+        out = ""
+        for w in words:
+            if len(out) + len(w) + 1 > _SHORT_FORM_CAPTION_MAX_CHARS:
+                break
+            out = f"{out} {w}".strip()
+    return out or text[:_SHORT_FORM_CAPTION_MAX_CHARS].rstrip()
+
+
 def build_publish_package_from_episode_dir(
     channel_id: str,
     episode_id: str,
@@ -560,6 +613,18 @@ def build_publish_package_from_episode_dir(
     main_title, main_description = _pick_root_title_description(
         final_render_package, MAIN_EPISODE_DELIVERABLE_ID, resolved_title, resolved_description,
     )
+
+    # Short-native: the main_episode is a vertical Short. A long-form
+    # description (base + chapters + sources, ~2-3k chars) blows the
+    # short-form platforms' caption limits (Instagram 2200) and fails the
+    # whole multi-platform batch. Use a short caption: the leading whole
+    # sentences that fit, hard-capped well under every platform's limit.
+    try:
+        if _is_short_native_channel(channel_id, db_path):
+            main_description = _short_form_caption(main_description)
+    except Exception:  # noqa: BLE001 — never fail package build on this
+        pass
+
     main_path = episode_dir / f"main_{episode_id}.mp4"
 
     short_deliverables: List[DeliverableFile] = []

@@ -1409,6 +1409,24 @@ def run_worker(
         except Exception as exc:
             log.warning("self_healing_sweep_error error=%s", exc)
 
+        # Publish-attempt reconciliation: a process that died between the
+        # submission_ledger 'submitting' transition and recording the
+        # provider result leaves that (episode, deliverable, platform)
+        # permanently un-retryable. Cancel stale-with-no-receipt attempts so
+        # a fresh attempt can proceed (the provider_request_key de-dupes at
+        # the provider if the earlier call actually landed). No-op when none.
+        try:
+            from hypogeum.publishing.submission_ledger import reconcile_stale_publish_attempts
+            _stale = reconcile_stale_publish_attempts(db_path=db_path)
+            if _stale:
+                log.info(
+                    "publish_attempt_reconciliation cancelled=%d items=%s",
+                    len(_stale),
+                    [f"{s['episode_id']}/{s['deliverable_id']}/{s['platform']}" for s in _stale],
+                )
+        except Exception as exc:
+            log.warning("publish_attempt_reconciliation_error error=%s", exc)
+
         # Heartbeat (2026-08-23): a periodic liveness timestamp distinct
         # from worker_status -- a worker hung or crashed mid-iteration
         # (no atexit, no signal) leaves worker_status stuck at its last

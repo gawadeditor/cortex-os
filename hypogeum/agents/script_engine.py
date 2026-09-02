@@ -175,8 +175,9 @@ def run_script_engine(
             "cta": "at most one short spoken line",
             "pacing": "open on the hook in the first sentence; no throat-clearing",
         }
-        if _generated_outro_policy(channel_id) is not None:
-            _tie = (_generated_outro_policy(channel_id) or {}).get(
+        _outro_pol = _generated_outro_policy(channel_id, config)
+        if _outro_pol is not None:
+            _tie = _outro_pol.get(
                 "tie_directive",
                 "one gentle sentence showing the story's main character now peacefully asleep",
             )
@@ -386,18 +387,100 @@ def _enforce_short_native_budget(
 
 OUTRO_BEAT_TYPE = "outro"
 
+# A generated closing beat is a GENERAL RULE for every short-native channel
+# (2026-09-02) — every shorts channel, hypogeum included, ends on a short
+# spoken follow/like line that gets its own generated shots. A channel can
+# override the wording with channel_packages/<id>/outro_policy.json, or opt
+# out entirely with {"mode": "none"} there.
+_OUTRO_OPT_OUT_MODES = {"none", "off", "static", "disabled"}
 
-def _generated_outro_policy(channel_id: Optional[str]) -> Optional[dict]:
-    """The channel's outro policy when it wants a *generated* outro (a closing
-    beat appended to every script that gets its own shots), else None."""
+_DEFAULT_OUTRO = {
+    "follow_line": (
+        "If you got something out of this, follow for more — see you in the next one."
+    ),
+    "tie_directive": (
+        "one calm closing shot that settles back on the story's final place"
+    ),
+}
+_GENTLE_OUTRO = {
+    "follow_line": (
+        "If you liked tonight's story, tap the little heart and follow for "
+        "another one tomorrow night. Sleep tight."
+    ),
+    "tie_directive": (
+        "one gentle sentence showing the story's main character now settled "
+        "and peacefully asleep, in the same place the story ended"
+    ),
+}
+_INVESTIGATIVE_OUTRO = {
+    "follow_line": (
+        "If this changed how you see it, subscribe — there's a new "
+        "investigation every week."
+    ),
+    "tie_directive": (
+        "one quiet closing shot that returns to the central artefact or "
+        "place and holds still"
+    ),
+}
+
+
+def _default_outro_for_channel(channel_id: Optional[str]) -> dict:
+    """The channel-appropriate default follow line + story-tie directive,
+    picked from the channel's tone. Never raises."""
+    try:
+        from hypogeum.channel_creative_brief import channel_brief_for  # noqa: PLC0415
+        tone = (channel_brief_for(channel_id) or {}).get("tone", "") or ""
+        from hypogeum.channel_creative_brief import _gentle, _investigative  # noqa: PLC0415
+        if _gentle(tone):
+            return dict(_GENTLE_OUTRO)
+        if _investigative(tone):
+            return dict(_INVESTIGATIVE_OUTRO)
+    except Exception:  # noqa: BLE001
+        pass
+    return dict(_DEFAULT_OUTRO)
+
+
+def _generated_outro_policy(
+    channel_id: Optional[str], config=None,
+) -> Optional[dict]:
+    """The resolved generated-outro policy for this channel, or None if the
+    channel gets no generated outro.
+
+    Resolution order:
+      1. channel_packages/<id>/outro_policy.json — {"mode": "none"} opts out
+         entirely; any recognised "follow_line" / "tie_directive" there
+         override the default wording.
+      2. Otherwise every SHORT_NATIVE channel gets a generated outro with a
+         tone-appropriate default line (the general rule).
+      3. A non-short-native channel gets one only via an explicit
+         {"mode": "generated"} file.
+    """
     if not channel_id:
         return None
+
+    file_pol: dict = {}
     try:
         from hypogeum.channel_package_scaffold import channel_outro_policy  # noqa: PLC0415
-        pol = channel_outro_policy(channel_id)
-        return pol if isinstance(pol, dict) and pol.get("mode") == "generated" else None
+        _p = channel_outro_policy(channel_id)
+        if isinstance(_p, dict):
+            file_pol = _p
     except Exception:  # noqa: BLE001
+        file_pol = {}
+
+    mode = str(file_pol.get("mode", "") or "").lower()
+    if mode in _OUTRO_OPT_OUT_MODES:
         return None
+
+    short_native = getattr(config, "SHORT_NATIVE_MODE", False) is True
+    if not short_native and mode != "generated":
+        return None
+
+    default = _default_outro_for_channel(channel_id)
+    return {
+        "mode": "generated",
+        "follow_line": (file_pol.get("follow_line") or default["follow_line"]).strip(),
+        "tie_directive": (file_pol.get("tie_directive") or default["tie_directive"]).strip(),
+    }
 
 
 def _append_generated_outro(
@@ -410,10 +493,11 @@ def _append_generated_outro(
     split into per-clip-sized beats so each gets its own generated shot
     through the normal pipeline (scene planner, cinematic director, VPD,
     assembly) — no static outro.mp4, no coverage-fill. Runs AFTER
-    _enforce_short_native_budget so the outro is never trimmed. No-op unless
-    the channel ships channel_packages/<id>/outro_policy.json {mode:generated}.
+    _enforce_short_native_budget so the outro is never trimmed. General rule
+    for every short-native channel; a channel opts out with
+    channel_packages/<id>/outro_policy.json {"mode": "none"}.
     """
-    pol = _generated_outro_policy(channel_id)
+    pol = _generated_outro_policy(channel_id, config)
     if pol is None:
         return
     follow_line = (pol.get("follow_line") or "").strip()

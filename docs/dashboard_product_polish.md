@@ -59,8 +59,18 @@ per-page `<style>` unless truly page-local.
 | 5 | Channels | `channels.html` | ✅ done | plain runtime block, friendly_week, plain_channel_blocker |
 | 6 | Episodes (queue) | `episodes.html` | ✅ done | hero, channel names, plain queue meta; fixed _is_test_episode |
 | 7 | Production (`/create`) | `create.html` | ✅ done | hero, plain queue rows, plain recovery panel |
-| 8 | Episode detail | `episode_detail.html` | ✅ pass 1 | header + steps + QA humanised; **Publishing tab now Zernio-aware** (reads submission ledger + bindings); thumbnails empty state |
-| — | consistency + bug sweep | remaining ~65 | todo | Providers/Infra/Governance/Storage + the deep episode_detail tabs (Branding audit is N/A for short-native, still shows "Missing" red) |
+| 8 | Episode detail | `episode_detail.html` | ✅ pass 1 | header + steps + QA humanised; **Publishing tab Zernio-aware**; thumbnails empty state |
+| 9 | Channel detail | `channel_detail.html` | ✅ done | hero, stat-grid, readiness w/ SVG marks, learning insight cards |
+| 10 | channel readiness data | `channel_readiness.py` | ✅ done | `_plainify()` scrubs worker/OIS/POST-api jargon from every item |
+| 11 | Runs → "Production history" | `runs.html` | ✅ done | hero, titles not run-ids, fixed the broken Duration column |
+| 12 | Run detail | `run_detail.html` | ✅ done | plain stage names (`stage_name` filter), plain_problem errors |
+| 13 | Discovery | `discover.html` | ✅ done | "Topic ideas for <channel>", dropped the 8-dimension engineer block |
+| 14 | Channel Publishing | `channel_publishing.html` | ✅ done | hero, friendly_platform, no `/platforms` OAuth link |
+| 15 | Live view | `live.html` | ✅ done | "What's happening now"; dropped Tokens; plain stage names in the 3s JS |
+| 16 | Analytics Sync Health | `analytics_sync.html` | ✅ done | hero; renamed the colliding `.stat-*` classes; friendly platforms/times |
+| 17 | Failures → "What went wrong" | `failures.html` | ✅ done | insight cards via plain_problem, traceback in a drawer |
+| 18 | Asset archive | `archive.html` | ✅ done | hero; renamed the colliding `.pill`; plainer columns |
+| — | consistency + bug sweep | remaining ~55 | todo | Providers / Infrastructure / Governance / Storage / decisions / setup / channel_builder / analytics_episode + analytics_platform / the deep episode_detail tabs |
 
 ## Known follow-ups (found while working)
 

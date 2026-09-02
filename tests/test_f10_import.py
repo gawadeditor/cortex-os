@@ -534,17 +534,20 @@ class TestLatestEpisodeFromPublishingOutcomes:
         assert ep.get("platform_video_id") == "yt_video_id_1"
         assert ep.get("url") == "https://youtube.com/watch?v=yt_video_id_1"
 
-    def test_dashboard_html_shows_platform_video_id_column(self, db_path):
+    def test_dashboard_html_links_published_video(self, db_path):
         import run_dashboard as _mod
         _mod.app.config["TESTING"] = True
         _mod.app.config["DB_PATH"] = str(db_path)
-        # "Platform ID" column header only renders when recent_episodes is non-empty
+        # The recent-episodes table shows a "Watch" link for a published
+        # episode that has a platform url (the raw "Platform ID" column was
+        # removed 2026-09-03).
         fake_overview = {
             "recent_episodes": [{
                 "episode_id": "ep_fake", "title": "Fake Episode",
                 "published_at": "2026-01-01T00:00:00", "status": "complete",
                 "views": 100, "ctr": None, "retention": None,
-                "platform_video_id": "vid_fake", "url": None,
+                "platform_video_id": "vid_fake",
+                "url": "https://youtube.com/watch?v=vid_fake",
             }],
             "production": {"current_episode": None, "display_title": None,
                            "current_stage": None, "progress_pct": 0, "queue_size": 0},
@@ -564,7 +567,8 @@ class TestLatestEpisodeFromPublishingOutcomes:
                         resp = client.get("/dashboard")
         assert resp.status_code == 200
         html = resp.data.decode()
-        assert "Platform ID" in html
+        assert "https://youtube.com/watch?v=vid_fake" in html
+        assert ">Watch<" in html
 
 
 # ===========================================================================

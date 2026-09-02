@@ -327,6 +327,11 @@ def _f_friendly_week(value):
     return _hz.friendly_week(value)
 
 
+@app.template_filter("channel_name")
+def _f_channel_name(channel_id):
+    return _hz.channel_display_name(channel_id, db_path=_db_path())
+
+
 @app.template_filter("friendly_count")
 def _f_friendly_count(value, singular, plural=None):
     return _hz.friendly_count(value, singular, plural)
@@ -6582,25 +6587,29 @@ def api_episode_resume_narration(episode_id: str):
 
 
 _TEST_EP_PATTERNS = (
-    "ep_test", "ep_smoke", "ep_review", "ep_val_",
-    "ep_xyz", "_lite",
+    "ep_test", "ep_smoke", "ep_review", "ep_val_", "ep_xyz", "_lite",
+    "ep_cli_", "ep_pub_", "ep_unknown",
 )
 
 
 def _is_test_episode(episode_id: str) -> bool:
     """
-    Return True when episode_id matches a known test/validation naming pattern.
-    Production episodes are ep_000, ep_001, ep_002, ep_003, ep_NNN format.
-    Test episodes use names like ep_test*, ep_smoke*, ep_review*, ep_val_*, ep_xyz.
-    Hash-like IDs (ep_be9664f5 — 8+ hex chars after ep_) are also treated as test.
+    Return True when episode_id looks like a test/validation/fixture, not a
+    real production episode. Real production episode ids are `ep_<8 hex>`
+    (uuid4-derived) or named slots like `ep_twinkle_sep10` — those are NOT
+    test. Fixtures are named (ep_test*, ep_cli_*, ep_pub_*, …) or are bare
+    UUIDs with no `ep_` prefix at all (left on disk by the publishing test
+    suites).
     """
     import re
-    eid = episode_id.lower()
+    eid = (episode_id or "").lower()
     for pat in _TEST_EP_PATTERNS:
         if pat in eid:
             return True
-    # Hash-like ID: ep_ followed by 7+ hex characters
-    if re.match(r"^ep_[0-9a-f]{7,}$", eid):
+    # bare UUID / hex blob with no ep_ prefix — never a production episode
+    if re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-", eid):
+        return True
+    if re.match(r"^[0-9a-f]{16,}$", eid):
         return True
     return False
 

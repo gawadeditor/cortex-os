@@ -253,8 +253,10 @@ class TestSections:
     def test_director_domains_section(self, html):
         assert "Director" in html and "Domain" in html
 
-    def test_api_link_in_footer(self, html):
-        assert "/api/state" in html
+    def test_no_api_debug_link_in_footer(self, html):
+        # /api/* debug links were removed from the client-facing Overview
+        # footer on 2026-09-03.
+        assert "/api/state" not in html
 
     def test_auto_refresh_meta_present(self, html):
         assert 'http-equiv="refresh"' in html

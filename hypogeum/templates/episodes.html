@@ -6,88 +6,38 @@
   <title>Episodes — Cortex</title>
   {% include '_base_style.html' %}
   <style>
-    /* Queue rows */
     .queue-item { display:flex; align-items:flex-start; gap:12px;
-                  padding:12px 16px; border-bottom:1px solid var(--border);
-                  position:relative; }
+                  padding:13px 16px; border-bottom:1px solid var(--hairline); position:relative; }
     .queue-item:last-child { border-bottom:none; }
-    .queue-rank { width:20px; flex-shrink:0; font-size:12px; font-weight:700;
-                  color:var(--muted); padding-top:3px; text-align:center; }
+    .queue-rank { width:22px; flex-shrink:0; font-size:12px; font-weight:700;
+                  color:var(--faint); padding-top:2px; text-align:center; font-variant-numeric:tabular-nums; }
     .queue-body { flex:1; min-width:0; }
-    .queue-text  { font-size:14px; font-weight:500; line-height:1.4; margin-bottom:4px; }
-    .queue-meta  { display:flex; gap:10px; flex-wrap:wrap; font-size:11px; color:var(--muted);
-                   align-items:center; }
-    .prov-disc   { color:var(--blue); font-weight:600; }
-    .score-chip  { font-family:monospace; font-size:11px; color:var(--green);
-                   background:rgba(63,185,80,.1); border:1px solid rgba(63,185,80,.25);
-                   border-radius:8px; padding:0 6px; }
-    .cand-chip   { font-family:monospace; font-size:10px; color:var(--muted);
-                   background:var(--surface); border:1px solid var(--border);
-                   border-radius:6px; padding:0 5px; }
-    .queue-actions { display:flex; gap:6px; flex-shrink:0; align-items:center; }
-
-    /* Claimed row */
-    .claimed-item { display:flex; align-items:flex-start; gap:12px;
-                    padding:10px 16px; border-bottom:1px solid var(--border);
-                    background:rgba(88,166,255,.03); }
+    .queue-text { font-size:14px; font-weight:600; line-height:1.4; margin-bottom:5px; }
+    .queue-meta { display:flex; gap:10px; flex-wrap:wrap; font-size:11.5px; color:var(--muted); align-items:center; }
+    .queue-actions { display:flex; gap:6px; flex-shrink:0; align-items:flex-start; }
+    .claimed-item { display:flex; align-items:flex-start; gap:12px; padding:12px 16px;
+                    border-bottom:1px solid var(--hairline); background:var(--info-bg); }
     .claimed-item:last-child { border-bottom:none; }
-
-    /* Section header inside card */
-    .card-section-hdr { font-size:11px; font-weight:600; text-transform:uppercase;
-                        letter-spacing:.05em; color:var(--muted);
-                        padding:8px 16px 6px; border-bottom:1px solid var(--border);
+    .card-section-hdr { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em;
+                        color:var(--faint); padding:11px 16px 8px; border-bottom:1px solid var(--border);
                         display:flex; align-items:center; gap:8px; }
-
-    /* Empty queue */
-    .queue-empty { padding:20px 16px; font-size:13px; color:var(--muted); text-align:center; }
-
-    /* Override form */
-    .override-form label { display:block; font-size:12px; font-weight:600;
-                           color:var(--muted); margin-bottom:4px; }
-    .override-form input[type="text"],
-    .override-form input[type="number"],
-    .override-form select,
-    .override-form textarea {
-      width:100%; padding:7px 10px; font-size:13px; font-family:inherit;
-      background:var(--bg); border:1px solid var(--border);
-      border-radius:var(--radius); color:var(--text); }
-    .override-form input:focus,
-    .override-form select:focus,
-    .override-form textarea:focus { outline:none; border-color:var(--blue); }
-
+    .queue-empty { padding:24px 16px; font-size:13px; color:var(--muted); text-align:center; }
     details > summary { list-style:none; cursor:pointer; }
     details > summary::-webkit-details-marker { display:none; }
 
-    /* ── Factory Pulse strip ─────────────────────────────────────────── */
-    .pulse {
-      display:flex; align-items:center; gap:var(--space-md); flex-wrap:wrap;
-      padding:10px 16px; margin-bottom:var(--gap);
-      background:var(--surface); border:1px solid var(--border);
-      border-left:3px solid var(--border-strong);
-      border-radius:var(--radius); font-size:13px;
-    }
-    .pulse.is-live   { border-left-color:var(--good); }
+    .pulse { display:flex; align-items:center; gap:var(--space-md); flex-wrap:wrap;
+             padding:11px 16px; margin-bottom:var(--gap); background:var(--surface);
+             border:1px solid var(--border); border-left:3px solid var(--border-strong);
+             border-radius:var(--radius); font-size:13px; }
+    .pulse.is-live { border-left-color:var(--good); }
     .pulse.is-paused { border-left-color:var(--warn); }
-    .pulse.is-down   { border-left-color:var(--critical); }
-    .pulse-dot {
-      width:9px; height:9px; border-radius:50%; flex-shrink:0;
-      background:var(--faint);
-    }
-    .pulse.is-live .pulse-dot {
-      background:var(--good);
-      box-shadow:0 0 0 0 rgba(78,194,111,.5);
-      animation:pulse-ring 2.4s var(--ease) infinite;
-    }
+    .pulse.is-down { border-left-color:var(--critical); }
+    .pulse-dot { width:9px; height:9px; border-radius:50%; flex-shrink:0; background:var(--faint); }
+    .pulse.is-live .pulse-dot { background:var(--good); animation:pulse-ring 2.4s var(--ease) infinite; }
     .pulse.is-paused .pulse-dot { background:var(--warn); }
-    .pulse.is-down   .pulse-dot { background:var(--critical); }
-    @keyframes pulse-ring {
-      0%   { box-shadow:0 0 0 0 rgba(78,194,111,.45); }
-      70%  { box-shadow:0 0 0 7px rgba(78,194,111,0); }
-      100% { box-shadow:0 0 0 0 rgba(78,194,111,0); }
-    }
-    @media (prefers-reduced-motion: reduce) {
-      .pulse .pulse-dot { animation:none; }
-    }
+    .pulse.is-down .pulse-dot { background:var(--critical); }
+    @keyframes pulse-ring { 0%{box-shadow:0 0 0 0 rgba(78,194,111,.45);} 70%{box-shadow:0 0 0 7px rgba(78,194,111,0);} 100%{box-shadow:0 0 0 0 rgba(78,194,111,0);} }
+    @media (prefers-reduced-motion: reduce) { .pulse .pulse-dot { animation:none; } }
     .pulse-status { font-weight:600; color:var(--text); }
     .pulse-activity { color:var(--muted); }
     .pulse-activity b { color:var(--text); font-weight:600; }
@@ -100,192 +50,146 @@
 <body>
 {% include '_nav.html' %}
 {% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
 
 {% from '_subnav.html' import subnav %}
 {{ subnav('review') }}
 <div class="container">
 
+{% set _q = queue_topics|length %}
+{% set _c = claimed_topics|length %}
+{% call hero(
+     eyebrow='Production',
+     title=('Making an episode now' if _c else ('Nothing in production right now' if not _q else 'The production line')),
+     lede='Cortex picks the next topic from this list on each channel\'s daily schedule, produces it end to end, and publishes it. You only step in to add topics or force one to start early.',
+     figure=_q,
+     figure_label='topic' ~ ('' if _q == 1 else 's') ~ ' waiting',
+     pill=(_c ~ ' in production') if _c else 'queue is steady',
+     pill_class='is-warn' if _c else 'is-good') %}
+  <a href="/discover" class="btn btn-primary">{{ icon('discovery') }} Find new topics</a>
+{% endcall %}
 
-<div class="page-header">
-  <h1>Episodes</h1>
-  <span class="page-meta">
-    {{ queue_topics|length }} queued{% if claimed_topics %} · {{ claimed_topics|length }} in production{% endif %}
-  </span>
-  <a href="/discover" style="margin-left:auto; font-size:12px; color:var(--blue);">
-    &#128270; Run Discovery &#8594;
-  </a>
-</div>
-
-{# ══════════════════════════════════════════════
-   FACTORY PULSE — what the factory is doing right now
-   Server-rendered from `pulse`, then refreshed by JS every 8s.
-   ══════════════════════════════════════════════ #}
+{# ── Factory pulse ── #}
 {% if pulse %}
 {% set _w = pulse.worker %}
 {% set _cls = 'is-live' if (_w.alive and not _w.paused) else ('is-paused' if _w.paused else 'is-down') %}
-<div id="pulse" class="pulse {{ _cls }}"
-     data-live-url="/api/factory/pulse"
-     role="status" aria-live="polite">
+<div id="pulse" class="pulse {{ _cls }}" data-live-url="/api/factory/pulse" role="status" aria-live="polite">
   <span class="pulse-dot" aria-hidden="true"></span>
   <span class="pulse-status" id="pulse-status">
-    {% if _w.paused %}Worker paused
-    {% elif _w.alive %}Worker running
-    {% else %}Worker not running{% endif %}
+    {% if _w.paused %}Production paused{% elif _w.alive %}Production running{% else %}Production not running{% endif %}
   </span>
   <span class="pulse-activity" id="pulse-activity">
-    {% if pulse.activity %}— <b>{{ pulse.activity.phrase }}</b>{% if pulse.activity.channel_id %} · {{ pulse.activity.channel_id }}{% endif %}
-    {% elif _w.alive %}— idle, waiting for the next scheduled slot{% endif %}
+    {% if pulse.activity %}— <b>{{ pulse.activity.phrase }}</b>{% if pulse.activity.channel_id %} · {{ pulse.activity.channel_id | channel_name }}{% endif %}
+    {% elif _w.alive %}— waiting for the next scheduled episode{% endif %}
   </span>
   <span class="pulse-counts" id="pulse-counts">
-    <span title="discovery cycles in the last 45 min"><b>{{ pulse.discovery|length }}</b> discovering</span>
-    <a href="#queue" title="topics queued to produce"><b>{{ pulse.queued.count }}</b> queued</a>
-    <a href="/runs?status=running" title="episodes in production now"><b>{{ (pulse.in_production.count or pulse.active_runs|length) }}</b> in production</a>
+    <a href="#queue"><b>{{ pulse.queued.count }}</b> waiting</a>
+    <a href="/runs?status=running"><b>{{ (pulse.in_production.count or pulse.active_runs|length) }}</b> in production</a>
   </span>
 </div>
 <script>
 (function () {
-  var el = document.getElementById('pulse');
-  if (!el) return;
-  function fmt(a) {
-    if (!a || !a.phrase) return '';
-    return '— <b>' + a.phrase + '</b>' + (a.channel_id ? ' · ' + a.channel_id : '');
-  }
+  var el = document.getElementById('pulse'); if (!el) return;
   function apply(p) {
     var w = p.worker || {};
-    el.classList.remove('is-live', 'is-paused', 'is-down');
+    el.classList.remove('is-live','is-paused','is-down');
     el.classList.add(w.paused ? 'is-paused' : (w.alive ? 'is-live' : 'is-down'));
     document.getElementById('pulse-status').textContent =
-      w.paused ? 'Worker paused' : (w.alive ? 'Worker running' : 'Worker not running');
+      w.paused ? 'Production paused' : (w.alive ? 'Production running' : 'Production not running');
     var act = document.getElementById('pulse-activity');
-    if (p.activity && p.activity.phrase) act.innerHTML = fmt(p.activity);
-    else if (w.alive) act.textContent = '— idle, waiting for the next scheduled slot';
+    if (p.activity && p.activity.phrase) act.innerHTML = '— <b>' + p.activity.phrase + '</b>';
+    else if (w.alive) act.textContent = '— waiting for the next scheduled episode';
     else act.textContent = '';
     var inProd = (p.in_production && p.in_production.count) || (p.active_runs || []).length;
     document.getElementById('pulse-counts').innerHTML =
-      '<span title="discovery cycles in the last 45 min"><b>' + (p.discovery || []).length + '</b> discovering</span>' +
-      '<a href="#queue" title="topics queued to produce"><b>' + ((p.queued && p.queued.count) || 0) + '</b> queued</a>' +
-      '<a href="/runs?status=running" title="episodes in production now"><b>' + inProd + '</b> in production</a>';
+      '<a href="#queue"><b>' + ((p.queued && p.queued.count) || 0) + '</b> waiting</a>' +
+      '<a href="/runs?status=running"><b>' + inProd + '</b> in production</a>';
   }
   function tick() {
     fetch(el.dataset.liveUrl, { headers: { 'Accept': 'application/json' } })
       .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (p) { if (p) apply(p); })
-      .catch(function () {});
+      .then(function (p) { if (p) apply(p); }).catch(function () {});
   }
   setInterval(tick, 8000);
 })();
 </script>
 {% endif %}
 
-{# ── Flash ── #}
 {% set eq = request.args.get('enqueue') %}
-{% if eq == 'ok' %}
-  <div class="flash flash-ok" style="margin-bottom:var(--gap);">Topic enqueued.</div>
-{% elif eq == 'duplicate' %}
-  <div class="flash flash-err" style="margin-bottom:var(--gap);">Duplicate — already queued for this channel.</div>
-{% elif eq and eq != 'ok' %}
-  <div class="flash flash-err" style="margin-bottom:var(--gap);">Enqueue failed ({{ eq }}).</div>
-{% endif %}
+{% if eq == 'ok' %}<div class="flash flash-ok">Topic added to the queue.</div>
+{% elif eq == 'duplicate' %}<div class="flash flash-err">That topic is already queued for this channel.</div>
+{% elif eq and eq != 'ok' %}<div class="flash flash-err">Couldn't add the topic ({{ eq }}).</div>{% endif %}
 
-{# ══════════════════════════════════════════════
-   1. PRODUCTION QUEUE — primary section
-   ══════════════════════════════════════════════ #}
-<div class="card" id="queue" style="padding:0; margin-bottom:var(--gap); scroll-margin-top:16px;">
-
-  {# In-production (claimed) #}
+{# ── Queue ── #}
+<div class="card" id="queue" style="padding:0; scroll-margin-top:16px;">
   {% if claimed_topics %}
   <div class="card-section-hdr">
-    <span style="width:8px; height:8px; border-radius:50%; background:var(--blue); flex-shrink:0;"></span>
-    In Production ({{ claimed_topics|length }})
+    <span class="perf-dot perf-dot-warn"></span> In production ({{ claimed_topics|length }})
   </div>
   {% for t in claimed_topics %}
   <div class="claimed-item">
-    <div class="queue-rank">{{ icon('chevron-down') }}</div>
+    <div class="queue-rank">{{ icon('play') }}</div>
     <div class="queue-body">
       <div class="queue-text">{{ t.topic_text }}</div>
       <div class="queue-meta">
-        {% if t.source == 'discovered' %}
-          <span class="prov-disc">{{ icon('discovery') }} discovered</span>
-          {% if t.discovery_score %}<span class="score-chip">{{ "%.2f"|format(t.discovery_score) }}</span>{% endif %}
-          {% if t.candidate_id %}<span class="cand-chip">cand {{ t.candidate_id[:8] }}</span>{% endif %}
-        {% else %}
-          <span>{{ icon('pencil') }} manual</span>
-        {% endif %}
-        <span>{{ t.channel_id }}</span>
-        {% if t.claimed_at %}<span>started {{ t.claimed_at[:10] }}</span>{% endif %}
+        <span>{{ t.channel_id | channel_name }}</span>
+        {% if t.source == 'discovered' %}<span>{{ icon('discovery') }} found by Cortex</span>{% else %}<span>{{ icon('pencil') }} added by you</span>{% endif %}
+        {% if t.claimed_at %}<span>started {{ t.claimed_at | rel_time }}</span>{% endif %}
       </div>
     </div>
-    <div class="queue-actions">
-      <span class="badge badge-claimed">running</span>
-    </div>
+    <div class="queue-actions"><span class="badge badge-claimed">Running</span></div>
   </div>
   {% endfor %}
   {% endif %}
 
-  {# Queued (waiting) #}
   <div class="card-section-hdr">
-    <span>Queued — Next to Produce ({{ queue_topics|length }})</span>
+    <span>Waiting to produce ({{ queue_topics|length }})</span>
     {% if not queue_topics %}
-    <a href="/discover" style="margin-left:auto; font-size:11px; color:var(--blue);">
-      Run discovery to add topics &#8594;
-    </a>
+    <a href="/discover" style="margin-left:auto; font-size:11px;">Run discovery to add topics →</a>
     {% endif %}
   </div>
   {% if queue_topics %}
-  <div style="padding:8px 16px 4px; font-size:12px; color:var(--muted);
-              border-bottom:1px solid var(--border);">
-    The run scheduler picks from this queue automatically on its configured schedule.
-    Use <strong>Options</strong> on any row only to force an immediate run.
+  <div style="padding:9px 16px; font-size:12px; color:var(--muted); border-bottom:1px solid var(--border);">
+    Cortex takes the next topic from here automatically on each channel's daily schedule.
+    Use <strong>Options</strong> on a row only to start one right now.
   </div>
-  {% endif %}
-
-  {% if queue_topics %}
   {% for t in queue_topics %}
   <div class="queue-item">
     <div class="queue-rank">{{ loop.index }}</div>
     <div class="queue-body">
       <div class="queue-text">{{ t.topic_text }}</div>
       <div class="queue-meta">
+        <span>{{ t.channel_id | channel_name }}</span>
         {% if t.source == 'discovered' %}
-          <span class="prov-disc">{{ icon('discovery') }} discovered</span>
-          {% if t.discovery_score %}<span class="score-chip">{{ "%.2f"|format(t.discovery_score) }}</span>{% endif %}
-          {% if t.candidate_id %}<span class="cand-chip">cand {{ t.candidate_id[:8] }}</span>{% endif %}
+          <span class="ok">{{ icon('discovery') }} found by Cortex</span>
+          {% if t.discovery_score %}<span>· {% if t.discovery_score >= 0.7 %}strong pick{% elif t.discovery_score >= 0.5 %}good pick{% else %}worth a try{% endif %}</span>{% endif %}
         {% else %}
-          <span>{{ icon('pencil') }} manual</span>
+          <span>{{ icon('pencil') }} added by you</span>
         {% endif %}
-        <span>{{ t.channel_id }}</span>
-        {% if t.created_at %}<span>queued {{ t.created_at[:10] }}</span>{% endif %}
-        <span>priority {{ t.priority }}</span>
+        {% if t.created_at %}<span>· added {{ t.created_at | rel_time }}</span>{% endif %}
+        {% if t.priority and t.priority < 0 %}<span class="warn">· jump the queue</span>{% endif %}
       </div>
     </div>
-    <div class="queue-actions" style="align-items:flex-start;">
-      <form method="POST" action="/api/topics/{{ t.topic_id }}/remove" style="display:inline;">
-        <button type="submit" class="btn"
-                onclick="return confirm('Remove this topic?')"
-                style="font-size:12px; padding:4px 8px; color:var(--muted);"
-                title="Remove from queue">&#10005;</button>
+    <div class="queue-actions">
+      <form method="POST" action="/api/topics/{{ t.topic_id }}/remove">
+        <button type="submit" class="btn btn-sm" onclick="return confirm('Remove this topic from the queue?')"
+                title="Remove from queue" style="color:var(--muted);">{{ icon('x') }}</button>
       </form>
       <details>
-        <summary style="list-style:none; cursor:pointer; font-size:11px; color:var(--muted);
-                        padding:4px 8px; border:1px solid var(--border); border-radius:var(--radius);
-                        white-space:nowrap; background:transparent;">
-          Options {{ icon('chevron-down') }}
-        </summary>
-        <div style="position:absolute; right:0; margin-top:4px; z-index:10;
-                    background:var(--surface); border:1px solid var(--border);
-                    border-radius:var(--radius); padding:8px 10px; min-width:180px;
-                    box-shadow:0 4px 12px rgba(0,0,0,.4);">
-          <div style="font-size:11px; color:var(--muted); margin-bottom:6px;">
-            The run scheduler picks this up automatically. Force-start only if needed.
+        <summary class="btn btn-sm" style="white-space:nowrap;">Options {{ icon('chevron-down') }}</summary>
+        <div style="position:absolute; right:0; margin-top:6px; z-index:10; background:var(--surface);
+                    border:1px solid var(--border-strong); border-radius:var(--radius); padding:10px 12px;
+                    min-width:200px; box-shadow:var(--shadow-lg);">
+          <div style="font-size:11px; color:var(--muted); margin-bottom:8px;">
+            This topic starts on its own at the next scheduled time. Only force it if you need it now.
           </div>
           <form method="POST" action="/create/launch">
-            <input type="hidden" name="channel_id"   value="{{ t.channel_id }}">
-            <input type="hidden" name="topic"        value="{{ t.topic_text }}">
-            <input type="hidden" name="video_type"   value="long_video">
+            <input type="hidden" name="channel_id" value="{{ t.channel_id }}">
+            <input type="hidden" name="topic" value="{{ t.topic_text }}">
+            <input type="hidden" name="video_type" value="long_video">
             <input type="hidden" name="quality_mode" value="balanced">
-            <input type="hidden" name="platforms"    value="youtube">
-            <button type="submit" class="btn btn-approve"
-                    style="font-size:11px; padding:4px 12px; width:100%;">{{ icon('chevron-down') }} Force-start now</button>
+            <input type="hidden" name="platforms" value="youtube">
+            <button type="submit" class="btn btn-primary btn-sm" style="width:100%;">{{ icon('play') }} Start this one now</button>
           </form>
         </div>
       </details>
@@ -294,124 +198,88 @@
   {% endfor %}
   {% else %}
   <div class="queue-empty">
-    No topics queued.
-    <a href="/discover" style="color:var(--blue);">Run a discovery cycle</a>
-    to score and queue topic candidates, or add one manually below.
+    Nothing waiting to produce.
+    <a href="/discover">Run a discovery cycle</a> to score and queue topics, or add one below.
   </div>
   {% endif %}
-
 </div>
 
-{# ══════════════════════════════════════════════
-   2. EPISODE HISTORY
-   ══════════════════════════════════════════════ #}
-<div class="card" style="margin-bottom:var(--gap);">
-  <div class="card-title" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
-    <span>Episode History ({{ episodes|length }})</span>
-    <span style="font-size:12px; font-weight:400; color:var(--muted);">
-      {% if show_test %}
-        Showing all including test runs.
-        <a href="{{ request.path }}{% if channel_filter %}?channel_id={{ channel_filter }}&{% else %}?{% endif %}show_test=0"
-           style="color:var(--muted); text-decoration:underline;">Hide test episodes</a>
-      {% elif test_count > 0 %}
-        {{ test_count }} test episode{{ 's' if test_count != 1 else '' }} hidden.
-        <a href="{{ request.path }}{% if channel_filter %}?channel_id={{ channel_filter }}&{% else %}?{% endif %}show_test=1"
-           style="color:var(--muted); text-decoration:underline;">Show test episodes</a>
-      {% endif %}
-    </span>
-  </div>
+{# ── History ── #}
+<div class="sec-head">
+  <h2>Episode history</h2>
+  <span class="sec-count">{{ episodes|length }}</span>
+  {% if show_test %}
+    <a class="sec-link" href="{{ request.path }}{% if channel_filter %}?channel_id={{ channel_filter }}&{% else %}?{% endif %}show_test=0">Hide test runs</a>
+  {% elif test_count > 0 %}
+    <a class="sec-link" href="{{ request.path }}{% if channel_filter %}?channel_id={{ channel_filter }}&{% else %}?{% endif %}show_test=1">Show {{ test_count }} test run{{ 's' if test_count != 1 }}</a>
+  {% endif %}
+</div>
+<div class="card" style="padding:0;">
   {% if episodes %}
-  <table>
+  <div class="table-wrap" style="border:none;"><table>
     <thead>
-      <tr>
-        <th>Episode</th>
-        <th>Title / Topic</th>
-        <th>Status</th>
-        <th>Run</th>
-        <th>Cost</th>
-        <th>Created</th>
-      </tr>
+      <tr><th>Episode</th><th>Status</th><th>Production</th><th style="text-align:right;">Cost</th><th>Created</th></tr>
     </thead>
     <tbody>
       {% for ep in episodes %}
       <tr>
-        <td><a href="/episode/{{ ep.episode_id }}">{{ ep.episode_id }}</a></td>
-        <td style="max-width:260px; word-break:break-word; font-size:13px;">
-          <a href="/episode/{{ ep.episode_id }}" style="color:var(--text);">
-            {{ ep.title or ep.topic or ep.episode_id }}
+        <td style="max-width:360px;">
+          <a href="/episode/{{ ep.episode_id }}" style="color:var(--text); font-weight:600;">
+            <span class="cell-title">{{ ep.episode_id | episode_name }}</span>
           </a>
         </td>
-        <td><span class="badge badge-{{ ep.status }}">{{ ep.status }}</span></td>
+        <td><span class="badge badge-{{ ep.status }}">{{ ep.status | plain_status }}</span></td>
         <td>
-          {% if ep.run_status %}<span class="badge badge-{{ ep.run_status }}">{{ ep.run_status }}</span>
+          {% if ep.run_status %}<span class="badge badge-{{ ep.run_status }}">{{ ep.run_status | plain_status }}</span>
           {% else %}<span class="muted">—</span>{% endif %}
         </td>
         <td style="text-align:right; font-variant-numeric:tabular-nums;">
-          {% if ep.total_cost_usd and ep.total_cost_usd > 0 %}
-            ${{ "%.4f"|format(ep.total_cost_usd) }}
-          {% else %}
-            <span class="muted">—</span>
-          {% endif %}
+          {% if ep.total_cost_usd and ep.total_cost_usd > 0 %}{{ ep.total_cost_usd | friendly_money }}{% else %}<span class="muted">—</span>{% endif %}
         </td>
-        <td class="muted" style="font-size:12px; white-space:nowrap;">
-          {{ ep.created_at[:16] if ep.created_at else '—' }}
-        </td>
+        <td class="muted" style="white-space:nowrap;">{{ ep.created_at | rel_time if ep.created_at else '—' }}</td>
       </tr>
       {% endfor %}
     </tbody>
-  </table>
+  </table></div>
   {% else %}
-  <div class="empty">No episodes yet.</div>
+  <div class="queue-empty">No episodes yet.</div>
   {% endif %}
 </div>
 
-{# ══════════════════════════════════════════════
-   3. MANUAL OVERRIDE — collapsed, secondary
-   ══════════════════════════════════════════════ #}
-<details style="margin-bottom:var(--gap);">
-  <summary style="padding:10px 16px; background:var(--surface);
-                  border:1px solid var(--border); border-radius:var(--radius);
-                  font-size:13px; color:var(--muted); display:flex; align-items:center; gap:6px;">
-    <span style="font-size:10px; display:inline-block; transition:transform .15s;">{{ icon('chevron-down') }}</span>
-    Advanced: queue a topic manually
-    <span style="font-size:11px; margin-left:4px;">(bypasses discovery scoring)</span>
+{# ── Manual add ── #}
+<details style="margin-top:var(--gap);">
+  <summary style="padding:11px 16px; background:var(--surface); border:1px solid var(--border);
+                  border-radius:var(--radius); font-size:13px; color:var(--muted); display:flex; align-items:center; gap:8px;">
+    {{ icon('plus') }} Add a topic yourself
+    <span style="font-size:11px;">(skips Cortex's scoring)</span>
   </summary>
-  <div class="card override-form" style="border-top:none; border-radius:0 0 var(--radius) var(--radius); padding:16px; margin-top:0;">
+  <div class="card" style="border-top:none; border-radius:0 0 var(--radius) var(--radius); margin-top:0;">
     {% if not preflight.ready %}
-    <div class="warn" style="font-size:12px; margin-bottom:10px;">
-      {{ icon('warning') }} Preflight has {{ preflight.blocker_count }} blocker(s) —
-      topics can be queued but pipeline won't start until resolved.
-      <a href="/preflight">View preflight &#8594;</a>
+    <div class="flash flash-err" style="font-size:12px;">
+      {{ icon('warning') }} {{ preflight.blocker_count }} thing{{ 's' if preflight.blocker_count != 1 }} must be fixed before production can start.
+      <a href="/preflight">See what →</a>
     </div>
     {% endif %}
-    <form method="POST" action="/episodes/enqueue"
-          style="display:flex; flex-direction:column; gap:12px; max-width:540px;">
-      <div>
+    <form method="POST" action="/episodes/enqueue" style="display:flex; flex-direction:column; gap:14px; max-width:540px;">
+      <div class="field">
         <label>Channel</label>
         {% if channels %}
           <select name="channel_id" required>
-            {% for ch in channels %}
-              <option value="{{ ch.channel_id }}">{{ ch.name }} ({{ ch.channel_id }})</option>
-            {% endfor %}
+            {% for ch in channels %}<option value="{{ ch.channel_id }}">{{ ch.name }}</option>{% endfor %}
           </select>
         {% else %}
-          <input type="text" name="channel_id" placeholder="channel_id" required>
+          <input type="text" name="channel_id" placeholder="channel" required>
         {% endif %}
       </div>
-      <div>
+      <div class="field">
         <label>Topic</label>
-        <textarea name="topic_text" rows="2"
-                  placeholder="e.g. The fall of the Library of Alexandria"
-                  required></textarea>
+        <textarea name="topic_text" rows="2" placeholder="e.g. The fall of the Library of Alexandria" required></textarea>
       </div>
-      <div>
-        <label>Priority <span style="font-weight:400; font-size:11px; color:var(--muted);">(0 = normal, lower = higher urgency)</span></label>
-        <input type="number" name="priority" value="0" min="0" max="100"
-               style="width:120px;">
+      <div class="field">
+        <label>Priority <span style="font-weight:400; font-size:11px; color:var(--muted);">(0 = normal, negative = jump the queue)</span></label>
+        <input type="number" name="priority" value="0" min="-100" max="100" style="width:120px;">
       </div>
-      <div>
-        <button type="submit" class="btn btn-save">+ Add to Queue</button>
-      </div>
+      <div><button type="submit" class="btn btn-save">{{ icon('plus') }} Add to queue</button></div>
     </form>
   </div>
 </details>

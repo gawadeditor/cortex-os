@@ -284,13 +284,16 @@ class TestDashboardUXElements:
         assert 'http-equiv="refresh"' in html
         assert 'content="30"' in html
 
-    def test_platform_connections_api_link_in_footer(self, client, db):
+    def test_no_raw_api_debug_links_on_client_page(self, client, db):
+        # The Overview page is client-facing — it must not expose raw
+        # /api/* debug links (they moved off the page 2026-09-03).
         html = _dashboard_html(client, db)
-        assert "/api/platform-connections" in html
+        assert "/api/platform-connections" not in html
+        assert "/api/state" not in html
 
-    def test_channel_profile_link_in_footer_or_dashboard(self, client, db):
+    def test_channels_reachable_from_dashboard(self, client, db):
         html = _dashboard_html(client, db)
-        assert "/channel-profile" in html
+        assert "/channels" in html or "/channel/" in html
 
 
 # ===========================================================================

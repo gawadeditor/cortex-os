@@ -287,9 +287,20 @@ class TestEpisodeTestFiltering:
         assert s._is_test_episode("ep_003") is False
         assert s._is_test_episode("ep_000") is False
 
-    def test_is_test_episode_true_for_hash_id(self):
+    def test_is_test_episode_false_for_hash_id(self):
+        # The production pipeline now generates ep_<8 hex> ids (uuid4-derived),
+        # so a hash-like id is a REAL episode, not a test fixture.
         import run_dashboard as s
-        assert s._is_test_episode("ep_be9664f5") is True   # 8 hex chars
+        assert s._is_test_episode("ep_be9664f5") is False
+        assert s._is_test_episode("ep_f38dc597") is False
+
+    def test_is_test_episode_true_for_bare_uuid(self):
+        # Publishing test suites leave bare-UUID episode dirs on disk; a real
+        # episode id always has the ep_ prefix.
+        import run_dashboard as s
+        assert s._is_test_episode("fc754be7-95db-442a-acb9-4037e12f9b88") is True
+        assert s._is_test_episode("ep_cli_ok") is True
+        assert s._is_test_episode("ep_pub_off") is True
 
     def test_episodes_page_hides_test_by_default(self, client):
         c, tmp_path = client

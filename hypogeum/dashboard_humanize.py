@@ -25,7 +25,14 @@ from typing import Optional
 # ─────────────────────────────────────────────────────────────────────────────
 
 _EP_TITLE_CACHE: dict = {}
-_ID_RE = re.compile(r"^(ep[_-]?[0-9a-f]{6,}|ep_[a-z0-9_]+)$", re.IGNORECASE)
+_ID_RE = re.compile(
+    r"^(?:"
+    r"ep[_-][a-z0-9_]+"                                  # ep_f38dc597 / ep_twinkle_sep10
+    r"|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"  # bare UUID
+    r"|[0-9a-f]{12,}"                                     # long hex blob
+    r")$",
+    re.IGNORECASE,
+)
 
 
 def looks_like_episode_id(value) -> bool:
@@ -55,12 +62,22 @@ def episode_display_name(episode_id, *, db_path=None,
                 "SELECT title, topic FROM episodes WHERE episode_id = ?",
                 (episode_id,),
             ).fetchone()
+            if row:
+                title = ((row["title"] or "").strip()
+                         or (row["topic"] or "").strip()
+                         or None)
+            if not title:
+                # the queued topic that spawned this episode still carries its name
+                trow = conn.execute(
+                    "SELECT topic_text FROM episode_topics "
+                    "WHERE episode_id = ? AND topic_text IS NOT NULL "
+                    "ORDER BY rowid DESC LIMIT 1",
+                    (episode_id,),
+                ).fetchone()
+                if trow and (trow["topic_text"] or "").strip():
+                    title = trow["topic_text"].strip()
         finally:
             conn.close()
-        if row:
-            title = ((row["title"] or "").strip()
-                     or (row["topic"] or "").strip()
-                     or None)
     except Exception:  # noqa: BLE001
         title = None
     if title:
@@ -71,6 +88,43 @@ def episode_display_name(episode_id, *, db_path=None,
 
 def clear_episode_title_cache() -> None:
     _EP_TITLE_CACHE.clear()
+
+
+_CHANNEL_NAME_CACHE: dict = {}
+
+
+def channel_display_name(channel_id, *, db_path=None) -> str:
+    """twinkle_mini_tales → 'Twinkle Mini Tales'. Falls back to a
+    title-cased slug so it never shows raw snake_case."""
+    if not channel_id:
+        return ""
+    cid = str(channel_id).strip()
+    key = (str(db_path or ""), cid)
+    if key in _CHANNEL_NAME_CACHE:
+        return _CHANNEL_NAME_CACHE[key]
+    name = None
+    try:
+        from hypogeum.db import get_connection
+        conn = get_connection(Path(db_path) if db_path else None)
+        try:
+            for tbl in ("channel_profiles", "channels", "channel_operations_profiles"):
+                try:
+                    row = conn.execute(
+                        f"SELECT name FROM {tbl} WHERE channel_id = ?", (cid,)
+                    ).fetchone()
+                except Exception:  # noqa: BLE001
+                    continue
+                if row and (row["name"] or "").strip():
+                    name = row["name"].strip()
+                    break
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        name = None
+    if not name:
+        name = re.sub(r"[_\-]+", " ", cid).strip().title()
+    _CHANNEL_NAME_CACHE[key] = name
+    return name
 
 
 # ─────────────────────────────────────────────────────────────────────────────

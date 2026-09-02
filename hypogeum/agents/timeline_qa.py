@@ -59,11 +59,16 @@ _DEFAULT_HOLD_FAIL_SECONDS: float = 45.0
 # Public API
 # ---------------------------------------------------------------------------
 
+_EXPECTED_SHORT_RATIO: float = 9 / 16
+
+
 def run_timeline_qa(
     timeline_plan: TimelinePlan,
     narration_package: Optional[dict] = None,
     hold_warn_threshold_seconds: float = _DEFAULT_HOLD_WARN_SECONDS,
     hold_fail_threshold_seconds: float = _DEFAULT_HOLD_FAIL_SECONDS,
+    *,
+    expected_portrait: bool = False,
 ) -> dict:
     """
     Run all four timeline QA checks and return a timeline_qa_report dict.
@@ -100,6 +105,12 @@ def run_timeline_qa(
     # ------------------------------------------------------------------
     # Check A — Clip Aspect Ratio
     # ------------------------------------------------------------------
+    # A SHORT_NATIVE episode's main deliverable is portrait 9:16, not the
+    # 16:9 default — the caller passes expected_portrait=True so a correct
+    # vertical clip is not flagged as an offender (and, conversely, a stray
+    # landscape clip in a vertical episode still is).
+    _want_ratio = _EXPECTED_SHORT_RATIO if expected_portrait else _EXPECTED_MAIN_RATIO
+    _want_label = "9:16=0.563" if expected_portrait else "16:9=1.778"
     aspect_offenders: list[dict] = []
     aspect_checked: int = 0
     aspect_unprobed: int = 0
@@ -113,27 +124,26 @@ def run_timeline_qa(
             continue
         aspect_checked += 1
         ratio = w / h
-        is_16_9 = abs(ratio - _EXPECTED_MAIN_RATIO) <= _ASPECT_RATIO_TOLERANCE
-        if not is_16_9:
+        if abs(ratio - _want_ratio) > _ASPECT_RATIO_TOLERANCE:
             aspect_offenders.append({
                 "scene_id": entry.scene_id,
                 "source_type": entry.source_type,
                 "resolution": f"{w}x{h}",
                 "actual_ratio": round(ratio, 4),
-                "expected_ratio": round(_EXPECTED_MAIN_RATIO, 4),
+                "expected_ratio": round(_want_ratio, 4),
             })
 
     if aspect_offenders:
         detail = (
             f"{len(aspect_offenders)}/{aspect_checked + len(aspect_offenders)} "
-            f"clip(s) are not 16:9"
+            f"clip(s) are not {_want_label.split('=')[0]}"
         )
         _add_check(checks, "c_clip_aspect_ratio", "warn", detail)
         for off in aspect_offenders:
             warnings.append(
                 f"clip_aspect_ratio: scene={off['scene_id']} "
                 f"resolution={off['resolution']} ratio={off['actual_ratio']:.3f} "
-                f"(expected 16:9=1.778)"
+                f"(expected {_want_label})"
             )
     elif aspect_checked == 0:
         _add_check(checks, "c_clip_aspect_ratio", "warn",
@@ -141,7 +151,7 @@ def run_timeline_qa(
         warnings.append("clip_aspect_ratio: no clip files found on disk to inspect")
     else:
         _add_check(checks, "c_clip_aspect_ratio", "pass",
-                   f"all {aspect_checked} probed clip(s) are 16:9")
+                   f"all {aspect_checked} probed clip(s) are {_want_label.split('=')[0]}")
 
     # ------------------------------------------------------------------
     # Check B — Freeze/Hold Duration

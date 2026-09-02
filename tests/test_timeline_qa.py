@@ -130,6 +130,39 @@ class TestCheckClipAspectRatio:
         assert check["status"] == "pass"
         assert report["clip_aspect_ratio_offenders"] == []
 
+    def test_portrait_clip_passes_when_expected_portrait(self, tmp_path):
+        """A SHORT_NATIVE episode's 1080×1920 (9:16) clips must NOT be flagged
+        when the caller passes expected_portrait=True."""
+        clip = tmp_path / "sc_001.mp4"
+        clip.write_bytes(b"x")
+        entry = _make_entry(clip_path=clip, duration_seconds=10.0, clip_duration_seconds=10.0)
+        plan = _make_plan([entry])
+        with patch(_PROBE_DIM_TARGET) as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="width=1080\nheight=1920\n")
+            report = run_timeline_qa(
+                plan, narration_package=_make_narration_package(["b_001"]),
+                expected_portrait=True,
+            )
+        check = next(c for c in report["checks"] if c["check_id"] == "c_clip_aspect_ratio")
+        assert check["status"] == "pass"
+        assert report["clip_aspect_ratio_offenders"] == []
+
+    def test_landscape_clip_flagged_in_a_portrait_episode(self, tmp_path):
+        """A stray 16:9 clip in a SHORT_NATIVE episode is still an offender."""
+        clip = tmp_path / "sc_001.mp4"
+        clip.write_bytes(b"x")
+        entry = _make_entry(clip_path=clip, narration_reference="",
+                            duration_seconds=8.0, clip_duration_seconds=8.0)
+        plan = _make_plan([entry])
+        with patch(_PROBE_DIM_TARGET) as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="width=1280\nheight=720\n")
+            report = run_timeline_qa(
+                plan, narration_package=_make_narration_package([]),
+                expected_portrait=True,
+            )
+        assert len(report["clip_aspect_ratio_offenders"]) == 1
+        assert "9:16" in report["warnings"][0]
+
     def test_no_clip_files_triggers_warn(self):
         """Entries with clip_path=None → warn that no clips could be inspected."""
         entry = _make_entry(clip_path=None)

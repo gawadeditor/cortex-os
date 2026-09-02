@@ -774,6 +774,7 @@ def run_assembly_agent(
     timeline_qa_report = run_timeline_qa(
         timeline_plan=timeline_plan,
         narration_package=narration_package,
+        expected_portrait=(getattr(config, "SHORT_NATIVE_MODE", False) is True),
     )
 
     log.info(

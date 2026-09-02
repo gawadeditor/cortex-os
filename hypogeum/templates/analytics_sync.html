@@ -18,8 +18,8 @@
     .platform-stat { display: flex; justify-content: space-between; align-items: baseline;
                      font-size: 12px; padding: 3px 0; border-bottom: 1px solid var(--border); }
     .platform-stat:last-child { border-bottom: none; }
-    .stat-lbl { color: var(--muted); }
-    .stat-val { font-family: monospace; font-weight: 600; }
+    .sync-lbl { color: var(--muted); }
+    .sync-v { font-weight: 600; }
     .sync-log-row { display: grid;
                     grid-template-columns: 90px 90px 60px 1fr auto;
                     gap: 8px; align-items: baseline;
@@ -43,12 +43,11 @@
   <a href="/intelligence/sync{{ _q }}"               class="sub-nav-link active">Sync Health</a>
 </div>
 
-<div class="page-header">
-  <h1>Analytics Sync Status</h1>
-  <span class="page-meta">
-    {% if scope_channel %}{{ scope_channel }} · {% endif %}auto-sync state per platform
-  </span>
-</div>
+{% from '_hero.html' import hero %}
+{{ hero(
+   eyebrow='Analytics',
+   title=('Analytics for ' ~ (scope_channel | channel_name)) if scope_channel else 'Where analytics come from',
+   lede='Cortex pulls views, watch-time and click rate from every connected platform automatically. This is the state of that sync.') }}
 
 <div class="card" style="margin-bottom:var(--gap);">
   <p style="font-size:12px; color:var(--muted); line-height:1.55; margin:0;">
@@ -75,18 +74,18 @@
   <div class="platform-card {% if cb.bound %}platform-card-ok{% endif %}">
     <div class="platform-name">
       <span class="perf-dot {% if cb.bound %}perf-dot-ok{% else %}perf-dot-warn{% endif %}"></span>
-      {{ p | capitalize }}
+      {{ p | friendly_platform }}
     </div>
     <div class="platform-stat">
-      <span class="stat-lbl">Account</span>
-      <span class="stat-val {% if cb.bound %}ok{% else %}warn{% endif %}" style="font-family:sans-serif;">
+      <span class="sync-lbl">Account</span>
+      <span class="sync-v {% if cb.bound %}ok{% else %}warn{% endif %}">
         {% if cb.bound %}{{ cb.account.display_label if cb.account else 'connected' }}{% else %}not connected{% endif %}
       </span>
     </div>
     <div class="platform-stat">
-      <span class="stat-lbl">Last sync</span>
-      <span class="stat-val" style="font-family:sans-serif; font-size:11px;">
-        {% if last %}{{ last.synced_at[:19].replace("T"," ") }}{% else %}—{% endif %}
+      <span class="sync-lbl">Last sync</span>
+      <span class="sync-v" style="font-size:11px;">
+        {% if last %}{{ last.synced_at | rel_time }}{% else %}never{% endif %}
       </span>
     </div>
     <div style="margin-top:8px;">
@@ -118,18 +117,18 @@
       {% for a in factory_accounts %}
       {% set last = last_sync_by_platform.get(a.platform) %}
       <tr>
-        <td style="text-transform:capitalize; font-weight:600;">{{ a.platform }}</td>
+        <td style="font-weight:600;">{{ a.platform | friendly_platform }}</td>
         <td>
           {{ a.display_label or a.username or '—' }}
           {% if a.username %}<br><span class="muted" style="font-size:11px;">@{{ a.username }}</span>{% endif %}
         </td>
         <td>
           {% if a.needs_reconnection %}
-            <span class="badge badge-failed">reconnect</span>
+            <span class="badge badge-failed">Needs reconnecting</span>
           {% elif a.status == 'active' %}
-            <span class="badge badge-complete">active</span>
+            <span class="badge badge-complete">Connected</span>
           {% else %}
-            <span class="badge">{{ a.status or 'unknown' }}</span>
+            <span class="badge">{{ a.status | plain_status }}</span>
           {% endif %}
         </td>
         <td class="muted" style="font-variant-numeric:tabular-nums;">
@@ -143,10 +142,9 @@
           {% endif %}
         </td>
         <td class="muted" style="font-size:11px;">
-          {% if last %}{{ last.synced_at[:19].replace("T"," ") }}
-            {%- if last.records_imported %} · {{ last.records_imported }} rec{% endif %}
-          {% elif a.synced_at %}{{ a.synced_at[:19].replace("T"," ") }} (profile)
-          {% else %}—{% endif %}
+          {% if last %}{{ last.synced_at | rel_time }}{% if last.records_imported %} · {{ last.records_imported }} data points{% endif %}
+          {% elif a.synced_at %}{{ a.synced_at | rel_time }}
+          {% else %}never{% endif %}
         </td>
       </tr>
       {% endfor %}
@@ -168,14 +166,14 @@
   {% if sync_log %}
   {% for row in sync_log %}
   <div class="sync-log-row">
-    <span style="color:var(--muted);">{{ row.synced_at[:19] | replace("T", " ") if row.synced_at else '—' }}</span>
-    <span style="text-transform:capitalize; font-weight:600;">{{ row.platform }}</span>
-    <span class="badge badge-{{ row.status }}">{{ row.status }}</span>
+    <span style="color:var(--muted);">{{ row.synced_at | rel_time if row.synced_at else '—' }}</span>
+    <span style="font-weight:600;">{{ row.platform | friendly_platform }}</span>
+    <span class="badge badge-{{ row.status }}">{{ row.status | plain_status }}</span>
     <span style="color:var(--muted);">
-      {% if row.records_imported %}{{ row.records_imported }} records{% endif %}
-      {% if row.triggered_by %}· {{ row.triggered_by }}{% endif %}
+      {% if row.records_imported %}{{ row.records_imported }} data points{% endif %}
+      
     </span>
-    <span style="color:var(--muted); font-size:11px;">{{ row.window_days }}d window</span>
+    
   </div>
   {% endfor %}
   {% else %}
@@ -192,15 +190,13 @@
   <summary style="padding:10px 16px; background:var(--surface); border:1px solid var(--border);
                   border-radius:var(--radius); font-size:13px; color:var(--muted);
                   list-style:none; cursor:pointer; display:flex; align-items:center; gap:6px;">
-    <span style="font-size:10px;">&#9654;</span>
-    Emergency: force sync now
-    <span style="font-size:11px; margin-left:4px;">(background worker handles this automatically)</span>
+    Refresh analytics now
+    <span style="font-size:11px; margin-left:4px;">(Cortex does this automatically)</span>
   </summary>
   <div class="card" style="border-top:none; border-radius:0 0 var(--radius) var(--radius);
                             padding:16px; margin-top:0;">
     <div style="font-size:12px; color:var(--muted); margin-bottom:12px;">
-      Analytics sync runs automatically on a background schedule. Only trigger manually to debug a
-      sync issue or force a one-off pull outside the normal cycle.
+      Cortex refreshes analytics on its own. Use this only if you want the latest numbers right now.
     </div>
     <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
       <button id="btn-sync-quick" class="btn btn-save" onclick="runSync(event, 28)">

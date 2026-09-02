@@ -433,6 +433,12 @@ def _try_promote_from_archive(
         )
         return False
 
+    # A candidate quarantined only for landing a few px short (1092x1902) is
+    # one geometric cover+crop away from compliant, at zero new provider
+    # cost. Same tolerance as the fresh-enhance path — a genuinely
+    # under-resolution archive is left to fail revalidation below.
+    _normalize_to_exact_resolution(archived_path, required_width, required_height, log, scene_id)
+
     probe = _probe_video_stream(archived_path)
     valid = bool(
         probe

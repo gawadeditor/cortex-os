@@ -142,26 +142,42 @@ def compute_next_publish_slot(
     hypogeum.dashboard_control.next_thursday_publish_slot()'s "next weekday
     at fixed time" pattern to any channel-configured day/time/timezone.
 
+    Two schedule shapes are accepted:
+      - Weekly: {"day_of_week": "thursday", "time_of_day": "18:00"} — the
+        next occurrence of that weekday at that time (the original behavior).
+      - Daily:  {"time_of_day": "15:00"} with day_of_week absent, or
+        day_of_week set to "daily"/"every"/"any"/"*" — the next occurrence
+        of that time today (if still ahead) or tomorrow. This is what a
+        shorts-only channel (production_cadence.videos_per_week == 0) needs:
+        one release per day at a fixed wall-clock time, which the weekly
+        7-slot recurrence cannot express.
+
     Args:
-        publishing_schedule: e.g. {"day_of_week": "thursday", "time_of_day": "18:00"}.
+        publishing_schedule: see the two shapes above.
         tz_name:             IANA timezone name (ChannelOperationsProfile.timezone).
         from_dt:              Timezone-aware reference datetime.
 
     Returns:
-        A timezone-aware UTC datetime, or None if day_of_week/time_of_day is
-        missing or unparseable, or tz_name is invalid — never fabricates a
-        value; the caller (queue.consume_scheduled_runs) treats None as
-        "nothing to persist," matching worker_integration.py's existing
-        fail-closed behavior for scheduled runs with no target_publish_at.
+        A timezone-aware UTC datetime, or None if time_of_day is missing or
+        unparseable, day_of_week is present-but-unrecognized, or tz_name is
+        invalid — never fabricates a value; the caller
+        (queue.consume_scheduled_runs) treats None as "nothing to persist,"
+        matching worker_integration.py's existing fail-closed behavior for
+        scheduled runs with no target_publish_at.
     """
     day_raw = publishing_schedule.get("day_of_week")
     time_raw = publishing_schedule.get("time_of_day")
-    if not day_raw or not time_raw:
+    if not time_raw:
         return None
 
-    weekday = _WEEKDAY_NAMES.get(str(day_raw).strip().lower())
-    if weekday is None:
-        return None
+    _daily_tokens = {"daily", "every", "everyday", "every_day", "any", "*"}
+    is_daily = (not day_raw) or (str(day_raw).strip().lower() in _daily_tokens)
+
+    weekday = None
+    if not is_daily:
+        weekday = _WEEKDAY_NAMES.get(str(day_raw).strip().lower())
+        if weekday is None:
+            return None
 
     if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", str(time_raw)):
         return None
@@ -174,6 +190,12 @@ def compute_next_publish_slot(
         return None
 
     local_from = from_dt.astimezone(tz)
+    if is_daily:
+        candidate = local_from.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if candidate <= local_from:
+            candidate += timedelta(days=1)
+        return candidate.astimezone(timezone.utc)
+
     days_ahead = (weekday - local_from.weekday()) % 7
     candidate = (local_from + timedelta(days=days_ahead)).replace(
         hour=hour, minute=minute, second=0, microsecond=0,

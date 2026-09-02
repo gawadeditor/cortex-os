@@ -191,9 +191,35 @@ class TestComputeNextPublishSlot:
         )
         assert result == _utc(2026, 6, 25, 18, 0, 0)
 
-    def test_missing_day_of_week_returns_none(self):
-        result = compute_next_publish_slot({"time_of_day": "18:00"}, "UTC", _now())
-        assert result is None
+    def test_missing_day_of_week_is_daily_slot(self):
+        # No day_of_week + a time_of_day == a daily release schedule: the
+        # next occurrence of that time today (if still ahead) or tomorrow.
+        # 2026-06-18 09:00 UTC, slot 18:00 -> today.
+        result = compute_next_publish_slot(
+            {"time_of_day": "18:00"}, "UTC", _utc(2026, 6, 18, 9, 0, 0),
+        )
+        assert result == _utc(2026, 6, 18, 18, 0, 0)
+
+    def test_daily_slot_after_time_rolls_to_tomorrow(self):
+        result = compute_next_publish_slot(
+            {"time_of_day": "18:00"}, "UTC", _utc(2026, 6, 18, 20, 0, 0),
+        )
+        assert result == _utc(2026, 6, 19, 18, 0, 0)
+
+    def test_daily_token_day_of_week_is_daily_slot(self):
+        for token in ("daily", "every", "any", "*"):
+            result = compute_next_publish_slot(
+                {"day_of_week": token, "time_of_day": "16:00"}, "UTC",
+                _utc(2026, 6, 18, 9, 0, 0),
+            )
+            assert result == _utc(2026, 6, 18, 16, 0, 0), token
+
+    def test_daily_slot_non_utc_timezone(self):
+        # 19:00 Asia/Dubai (UTC+4) == 15:00 UTC.
+        result = compute_next_publish_slot(
+            {"time_of_day": "19:00"}, "Asia/Dubai", _utc(2026, 6, 18, 9, 0, 0),
+        )
+        assert result == _utc(2026, 6, 18, 15, 0, 0)
 
     def test_missing_time_of_day_returns_none(self):
         result = compute_next_publish_slot({"day_of_week": "thursday"}, "UTC", _now())

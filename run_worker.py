@@ -512,15 +512,22 @@ def _process_channel_publishing(db_path: Path, assets_root: Path) -> dict:
             continue
 
         # A shorts-only channel (videos_per_week == 0, shorts_per_week >= 1)
-        # publishes each freshly produced Short immediately — there is no
-        # weekly bundle drop to schedule against, and compute_next_publish_slot()
-        # (weekly-only) cannot express a daily release. Any mixed/long-form
-        # channel keeps the scheduled path (publish_now=False).
+        # releases one episode per day. When the channel has a
+        # deliverable_schedule_policy entry (a daily {"time_of_day": "HH:MM"}
+        # slot — compute_next_publish_slot() now understands the daily shape),
+        # each finished episode is SCHEDULED into its next daily slot on
+        # Zernio (publish_now=False), not fired the moment it finishes
+        # producing. Only a shorts channel with NO schedule policy at all
+        # falls back to publish-on-completion (publish_now=True) so it is
+        # never stuck producing Shorts it can't release. Any mixed/long-form
+        # channel keeps the weekly scheduled path (publish_now=False).
         _cad = (ops_profile.production_cadence or {})
         _spw = _cad.get("shorts_per_week")
-        publish_immediately = (
+        _is_shorts_only = (
             _cad.get("videos_per_week") == 0 and isinstance(_spw, int) and _spw >= 1
         )
+        _has_schedule_policy = bool(ops_profile.deliverable_schedule_policy)
+        publish_immediately = _is_shorts_only and not _has_schedule_policy
 
         try:
             channel_results = []

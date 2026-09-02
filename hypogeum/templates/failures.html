@@ -3,88 +3,79 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Failures — Cortex</title>
+  <title>What went wrong — Cortex</title>
   {% include '_base_style.html' %}
 </head>
 <body>
 {% include '_nav.html' %}
+{% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
 
 {% from '_subnav.html' import subnav %}
 {{ subnav('production') }}
 <div class="container">
 
+{% set _n = failures.runs | length %}
+{{ hero(
+   eyebrow='Production',
+   title=('Nothing has gone wrong lately' if _n == 0 else ('1 episode stopped' if _n == 1 else _n ~ ' episodes stopped')),
+   lede='Episodes that stopped before finishing, with what happened and what to do. Cortex usually retries these on its own.',
+   figure=(_n if _n else ''),
+   figure_label='stopped' if _n else '',
+   pill='all clear' if _n == 0 else 'needs a look',
+   pill_class='is-good' if _n == 0 else 'is-warn') }}
 
-<div class="page-header">
-  <h1>Failure Inspection</h1>
-  <span class="page-meta">{{ failures.runs | length }} failed run{% if failures.runs|length != 1 %}s{% endif %},
-    {{ failures.stages | length }} failed stage{% if failures.stages|length != 1 %}s{% endif %}</span>
-</div>
-
-{# ── Failed runs ── #}
-<div class="card-title" style="margin-bottom:8px;">Failed Runs</div>
 {% if failures.runs %}
-<div class="card" style="padding:0; margin-bottom:var(--gap);">
-  <table>
-    <thead>
-      <tr>
-        <th>Run ID</th>
-        <th>Episode</th>
-        <th>Title / Topic</th>
-        <th>Started</th>
-        <th>Error</th>
-        <th></th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for r in failures.runs %}
-      <tr>
-        <td><a href="/run/{{ r.run_id }}">{{ r.run_id[:12] }}…</a></td>
-        <td class="muted" style="font-size:12px;">{{ r.episode_id }}</td>
-        <td style="max-width:200px; font-size:12px; word-break:break-word;">
-          {{ r.title or r.topic or '—' }}
-        </td>
-        <td class="muted" style="font-size:12px; white-space:nowrap;">{{ r.started_at[:16] if r.started_at else '—' }}</td>
-        <td style="font-size:12px; color:var(--red); max-width:300px; word-break:break-word; font-family:monospace;">
-          {{ r.error_message[:140] if r.error_message else '—' }}
-        </td>
-        <td><a href="/run/{{ r.run_id }}" class="btn" style="font-size:11px;">Inspect →</a></td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+<div class="sec-head"><h2>Stopped episodes</h2></div>
+<div class="insight-list">
+  {% for r in failures.runs %}
+  {% set _p = r.error_message | plain_problem %}
+  <article class="insight-card dir-down">
+    <div class="insight-head">
+      <span class="insight-dir dir-down">{{ icon('warning') }} {{ _p.label }}</span>
+      <span class="insight-ep">· {{ (r.episode_id or r.topic or r.run_id) | episode_name }}</span>
+      <span style="margin-left:auto; font-size:11.5px; color:var(--faint);">{{ r.started_at | rel_time if r.started_at else '' }}</span>
+    </div>
+    {% if _p.meaning %}<p class="insight-body">{{ _p.meaning }}</p>{% endif %}
+    <div class="insight-foot">
+      <span>{{ _p.action }}</span>
+      <a href="/run/{{ r.run_id }}" style="margin-left:auto;">See the full log →</a>
+    </div>
+    {% if not _p.known and r.error_message %}
+    <details style="margin-top:8px;">
+      <summary style="font-size:11px; color:var(--muted); cursor:pointer;">Technical detail</summary>
+      <pre style="font-size:11px; color:var(--muted); white-space:pre-wrap; word-break:break-all; margin-top:6px;">{{ r.error_message }}</pre>
+    </details>
+    {% endif %}
+  </article>
+  {% endfor %}
 </div>
 {% else %}
-<div class="empty" style="margin-bottom:var(--gap);">No failed runs.</div>
+<div class="dv-empty">
+  {{ icon('check') }}
+  <div class="dv-empty-title">Every recent episode finished cleanly</div>
+</div>
 {% endif %}
 
-{# ── Failed stages ── #}
-<div class="card-title" style="margin-bottom:8px;">Failed Stage Executions</div>
 {% if failures.stages %}
-<div class="card" style="padding:0;">
-  <table>
-    <thead>
-      <tr><th>Stage</th><th>Run</th><th>Episode</th><th>Started</th><th>Duration</th><th>Error</th></tr>
-    </thead>
-    <tbody>
-      {% for s in failures.stages %}
-      <tr>
-        <td style="font-weight:500;">{{ s.stage_name }}</td>
-        <td><a href="/run/{{ s.run_id }}">{{ s.run_id[:10] }}…</a></td>
-        <td class="muted" style="font-size:12px;">{{ s.episode_id }}</td>
-        <td class="muted" style="font-size:12px; white-space:nowrap;">{{ s.started_at[:16] if s.started_at else '—' }}</td>
-        <td class="muted" style="font-size:12px;">
-          {% if s.duration_ms %}{{ s.duration_ms }}ms{% else %}—{% endif %}
-        </td>
-        <td style="font-size:12px; color:var(--red); max-width:320px; word-break:break-word; font-family:monospace;">
-          {{ s.error_message[:160] if s.error_message else '—' }}
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</div>
-{% else %}
-<div class="empty">No failed stage executions.</div>
+<details style="margin-top:var(--gap);">
+  <summary class="btn btn-sm">Step-level detail ({{ failures.stages | length }})</summary>
+  <div class="card" style="padding:0; margin-top:8px;">
+    <div class="table-wrap" style="border:none;"><table>
+      <thead><tr><th>Step</th><th>Episode</th><th>When</th><th>What happened</th></tr></thead>
+      <tbody>
+        {% for s in failures.stages %}
+        <tr>
+          <td style="font-weight:600;">{{ s.stage_name | stage_name }}</td>
+          <td class="muted"><a href="/run/{{ s.run_id }}" style="color:var(--muted);">{{ (s.episode_id or s.run_id) | episode_name }}</a></td>
+          <td class="muted" style="white-space:nowrap;">{{ s.started_at | rel_time if s.started_at else '—' }}</td>
+          <td style="max-width:340px;">{{ s.error_message | plain_problem_label if s.error_message else '—' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table></div>
+  </div>
+</details>
 {% endif %}
 
 </div><!-- /.container -->

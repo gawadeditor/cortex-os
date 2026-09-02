@@ -452,7 +452,7 @@ class TestFlaskLiveRoutes:
         r = client.get("/failures")
         assert r.status_code == 200
         text = r.get_data(as_text=True)
-        assert "Failure Inspection" in text
+        assert "stopped" in text or "Nothing has gone wrong" in text
 
     def test_failures_page_shows_failed_run(self, flask_client):
         client, ids = flask_client

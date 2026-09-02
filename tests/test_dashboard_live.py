@@ -381,7 +381,7 @@ class TestFlaskLiveRoutes:
         r = client.get("/live")
         assert r.status_code == 200
         text = r.get_data(as_text=True)
-        assert "Live Operations" in text
+        assert "What's happening now" in text
 
     def test_live_page_has_active_run(self, flask_client):
         client, ids = flask_client
@@ -393,8 +393,8 @@ class TestFlaskLiveRoutes:
         client, _ = flask_client
         r = client.get("/live")
         text = r.get_data(as_text=True)
-        assert "Active runs" in text
-        assert "Cost today" in text
+        assert "In production" in text
+        assert "Spent today" in text
 
     def test_live_page_polls_js_present(self, flask_client):
         client, _ = flask_client

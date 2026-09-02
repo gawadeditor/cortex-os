@@ -87,7 +87,17 @@ per-page `<style>` unless truly page-local.
   empty state.
 - 2026-09-03 (cont.): Analytics/Performance rebuilt (hero, stat-grid, new
   `areachart` macro, per-platform stat cards, episode TITLES everywhere,
-  dropped YouTube-OAuth copy). Overview pass 1 (Recent + Latest Episodes
-  humanised, "Platform ID" column + /api debug footer removed).
-  Attention/Review rebuilt (hero, plain learning items, SVG icons).
-  4 commits total. Next: Channels, Episodes queue, Episode detail.
+  dropped YouTube-OAuth copy). Overview pass 1. Attention/Review rebuilt.
+- 2026-09-03 (session 2): Channels, Episodes queue, Production (`/create`),
+  Episode detail header + **Publishing tab made Zernio-aware** (reads
+  submission ledger + bindings, no more "Connect YouTube" OAuth),
+  Channel detail, `channel_readiness` plainify pass, Runs → "Production
+  history", Run detail (plain stage names via `stage_name` filter,
+  plain_problem for errors), Discovery ("Topic ideas for <channel>",
+  dropped the "rubric-based / 8 dimensions / Backlog:" engineer block),
+  channel Publishing page. ~16 commits.
+  New humanize helpers: `channel_display_name`, `plain_stage_name`,
+  `plain_channel_blocker`, `friendly_week`, `clean_rationale`,
+  `signal_strength_words`, `_zernio_publish_outcomes` (episode_detail.py).
+  Next: live view, analytics sub-pages, archive, then the engineer set
+  (Providers / Infrastructure / Governance / Storage).

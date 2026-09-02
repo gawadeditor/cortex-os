@@ -21,13 +21,18 @@
 </head>
 <body>
 {% include '_nav.html' %}
+{% from '_hero.html' import hero %}
 
 <div class="container">
-  <div class="page-header">
-    <span class="eyebrow">{{ channel.name }}</span>
-    <h1>Publishing</h1>
-    <span class="page-meta">Connect the platform accounts this channel publishes to</span>
-  </div>
+  {% set _connected = bound.values() | select | list | length %}
+  {{ hero(
+     eyebrow=channel.name,
+     title='Where this channel publishes',
+     lede='Cortex publishes every episode through Zernio. Connect each social account in your Zernio account, refresh, then link it to this channel here.',
+     figure=_connected,
+     figure_label='of ' ~ (wanted_platforms|length) ~ ' platforms connected',
+     pill='ready to publish' if _connected == wanted_platforms|length and wanted_platforms else 'needs connecting',
+     pill_class='is-good' if (_connected == wanted_platforms|length and wanted_platforms) else 'is-warn') }}
 
   {% if flash == 'bound' %}<div class="flash flash-ok">Platform connected for {{ channel.name }}.</div>{% endif %}
   {% if flash == 'unbound' %}<div class="flash flash-ok">Platform disconnected.</div>{% endif %}
@@ -57,13 +62,13 @@
     {% set b = bound.get(plat) %}
     {% set pool = accounts_by_platform.get(plat, []) %}
     <div class="pl-row">
-      <div class="pl-plat">{{ plat }}</div>
+      <div class="pl-plat">{{ plat | friendly_platform }}</div>
       <div class="pl-state">
         {% if b %}
-          <span class="pl-ok">✓ connected</span> —
+          <span class="pl-ok">{{ icon('check') }} connected</span> —
           {% set acct = (pool | selectattr('provider_account_id','equalto', b.provider_account_id) | first) %}
           {{ (acct.display_label if acct else b.provider_account_id) }}
-          <span style="color:var(--faint)">via {{ b.provider_id }}</span>
+          
         {% else %}
           <span class="pl-none">not connected</span>
         {% endif %}
@@ -84,15 +89,14 @@
           <button type="submit" class="btn btn-primary">{{ 'Change' if b else 'Connect' }}</button>
         </form>
         {% if b %}
-        <form method="post" onsubmit="return confirm('Disconnect {{ plat }} for {{ channel.name }}?');">
+        <form method="post" onsubmit="return confirm('Disconnect {{ plat | friendly_platform }} for {{ channel.name }}?');">
           <input type="hidden" name="platform" value="{{ plat }}">
           <input type="hidden" name="action" value="unbind">
           <button type="submit" class="btn">Disconnect</button>
         </form>
         {% endif %}
         {% else %}
-        <span class="pl-hint" style="margin:0;">No {{ plat }} account in the pool —
-          <a href="/platforms">connect it in Zernio</a>, then Sync.</span>
+        <span class="pl-hint" style="margin:0;">No {{ plat | friendly_platform }} account yet — connect it in your Zernio account, then hit <strong>Refresh from Zernio</strong>.</span>
         {% endif %}
       </div>
     </div>

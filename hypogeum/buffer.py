@@ -359,6 +359,7 @@ def gather_channel_demand_items(
                 # unaffected by whether any other platform has ever been
                 # attempted at all.
                 zernio_fully_published = bool(all_required_deliverable_ids)
+                _any_platform_routed_a_deliverable = False
                 for platform in platforms:
                     required_deliverable_ids = _required_ids_for_platform(all_required_deliverable_ids, platform)
                     if not required_deliverable_ids:
@@ -367,6 +368,7 @@ def gather_channel_demand_items(
                         # 'shorts' but this item genuinely has none) --
                         # nothing to wait for, never blocks completeness.
                         continue
+                    _any_platform_routed_a_deliverable = True
                     succeeded_rows = conn.execute(
                         """
                         SELECT DISTINCT deliverable_id FROM publication_intents
@@ -378,6 +380,16 @@ def gather_channel_demand_items(
                     if not required_deliverable_ids.issubset(succeeded_deliverable_ids):
                         zernio_fully_published = False
                         break
+                if zernio_fully_published and not _any_platform_routed_a_deliverable:
+                    # The item HAS required deliverables but the channel's
+                    # platform_deliverable_policy routes NONE of them to ANY
+                    # requested platform -- a misconfiguration (e.g. a
+                    # short-native episode whose single 'main_episode'
+                    # deliverable IS the vertical short, against a policy
+                    # that only enables 'shorts'). This is "nothing was
+                    # published and nothing can be", never "fully
+                    # published" -- do not let it silently retire the item.
+                    zernio_fully_published = False
             else:
                 # No specific platform requested (legacy/platform-agnostic
                 # callers) -- preserve the original behavior: any

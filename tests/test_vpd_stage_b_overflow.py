@@ -75,6 +75,27 @@ def _no_real_cinematic_director_calls():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _stub_deliverable_contract(monkeypatch):
+    """This file tests Stage B batch overflow / schema-retry / resume — not
+    Channel Package deliverable-shape validation (covered in
+    tests/test_production_plan.py). Stub compile_production_plan()'s
+    Channel-Package lookup so these call sites (none pass channel_id, none ship
+    a channel_packages/ fixture) aren't blocked by a contract check unrelated
+    to what they exercise. Mirrors tests/test_visual_package_director.py."""
+    import hypogeum.production_plan as pp
+
+    def _permissive_contract(channel_id, *, packages_root=None):
+        return {"allow_standalone_shorts": True, "deliverables": [
+            {"deliverable_id": "main_episode", "kind": "main_episode",
+             "aspect_ratio": "16:9", "required": True, "derived_from": None},
+        ]}
+
+    monkeypatch.setattr(pp, "load_deliverable_contract", _permissive_contract)
+    monkeypatch.setattr(pp, "validate_deliverable_shape", lambda *a, **k: None)
+    monkeypatch.setenv("MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE", "1")
+
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -451,6 +472,120 @@ class TestStageBAutoRetry:
         assert len(batch_sizes) >= 3, "expected 2 failures + at least 1 success"
         assert batch_sizes[1] == batch_sizes[0] // 2
         assert batch_sizes[2] == batch_sizes[1] // 2
+
+
+# ---------------------------------------------------------------------------
+# TestStageBSchemaRetry — an LLM response that parses but fails output-schema
+# validation (e.g. a dropped scene_prompts[N].fallback_prompt) must not kill
+# the run: halve the batch, then re-sample the size-1 batch a bounded number
+# of times before failing.
+# ---------------------------------------------------------------------------
+
+class TestStageBSchemaRetry:
+
+    def _wire(self, all_scenes, meta, prompts_side_effect):
+        def mock_run_agent(**kwargs):
+            schema = kwargs.get("output_schema")
+            if schema == "vpd_skeleton_meta":
+                return meta
+            if schema == "vpd_skeleton_scene_batch":
+                start = kwargs["input_package"]["start_scene_index"]
+                return {"scenes": all_scenes[start: start + len(kwargs["input_package"]["beats"])]}
+            if schema == "vpd_scene_prompts_batch":
+                return prompts_side_effect(kwargs["input_package"]["scenes"])
+            return {}
+        return mock_run_agent
+
+    def test_schema_invalid_first_batch_halves_then_succeeds(self, tmp_path):
+        from hypogeum.schemas import SchemaError
+        config = make_config()
+        n_scenes = _SCENE_PROMPT_BATCH_SIZE
+        episode_id = "ep_b_schema"
+        script_pkg = _make_script_package(episode_id, n_main_beats=n_scenes)
+        meta = _make_meta_package(episode_id)
+        all_scenes = [_make_scene(f"s{i:02d}", i) for i in range(n_scenes)]
+
+        batch_sizes: list[int] = []
+        failed_once = {"done": False}
+
+        def prompts(scenes):
+            batch_sizes.append(len(scenes))
+            if not failed_once["done"]:
+                failed_once["done"] = True
+                raise SchemaError("vpd_scene_prompts_batch",
+                                  "scene_prompts[4].fallback_prompt", "missing required field")
+            return _make_prompts_batch(scenes)
+
+        with patch("hypogeum.agents.visual_package_director.run_agent",
+                   side_effect=self._wire(all_scenes, meta, prompts)), \
+             patch("hypogeum.agents.image_generation_agent.generate_reference_image",
+                   return_value=ReferenceImageResult("ep/ref", "https://cdn/r.jpg")), \
+             patch("hypogeum.agents.video_generation_agent.submit_scene",
+                   return_value=_make_submit_result()):
+            result = run_visual_package_director(script_pkg, config, episode_id, tmp_path)
+
+        assert batch_sizes[0] == n_scenes
+        assert batch_sizes[1] == n_scenes // 2, "batch halved after the schema failure"
+        scenes_out = result.get("scenes", [])
+        assert len(scenes_out) == n_scenes
+        for s in scenes_out:
+            assert s.get("production_spec", {}).get("provider_routing", {}).get("primary_prompt")
+
+    def test_schema_invalid_at_size_one_resamples_then_succeeds(self, tmp_path):
+        from hypogeum.schemas import SchemaError
+        config = make_config()
+        episode_id = "ep_b_schema1"
+        script_pkg = _make_script_package(episode_id, n_main_beats=1)
+        meta = _make_meta_package(episode_id)
+        all_scenes = [_make_scene("s00", 0)]
+
+        calls = {"n": 0}
+
+        def prompts(scenes):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise SchemaError("vpd_scene_prompts_batch",
+                                  "scene_prompts[0].fallback_prompt", "missing required field")
+            return _make_prompts_batch(scenes)
+
+        with patch("hypogeum.agents.visual_package_director.run_agent",
+                   side_effect=self._wire(all_scenes, meta, prompts)), \
+             patch("hypogeum.agents.image_generation_agent.generate_reference_image",
+                   return_value=ReferenceImageResult("ep/ref", "https://cdn/r.jpg")), \
+             patch("hypogeum.agents.video_generation_agent.submit_scene",
+                   return_value=_make_submit_result()):
+            result = run_visual_package_director(script_pkg, config, episode_id, tmp_path)
+
+        assert calls["n"] == 2, "one re-sample after the schema failure"
+        assert len(result.get("scenes", [])) == 1
+
+    def test_persistent_schema_invalid_at_size_one_eventually_raises(self, tmp_path):
+        from hypogeum.schemas import SchemaError
+        from hypogeum.agents.visual_package_director import _STAGE_B_SCHEMA_RETRIES
+        config = make_config()
+        episode_id = "ep_b_schema_bad"
+        script_pkg = _make_script_package(episode_id, n_main_beats=1)
+        meta = _make_meta_package(episode_id)
+        all_scenes = [_make_scene("s00", 0)]
+
+        calls = {"n": 0}
+
+        def prompts(scenes):
+            calls["n"] += 1
+            raise SchemaError("vpd_scene_prompts_batch",
+                              "scene_prompts[0].fallback_prompt", "missing required field")
+
+        with patch("hypogeum.agents.visual_package_director.run_agent",
+                   side_effect=self._wire(all_scenes, meta, prompts)), \
+             patch("hypogeum.agents.image_generation_agent.generate_reference_image",
+                   return_value=ReferenceImageResult("ep/ref", "https://cdn/r.jpg")), \
+             patch("hypogeum.agents.video_generation_agent.submit_scene",
+                   return_value=_make_submit_result()), \
+             pytest.raises(SchemaError):
+            run_visual_package_director(script_pkg, config, episode_id, tmp_path)
+
+        # 1 initial + _STAGE_B_SCHEMA_RETRIES re-samples (batch never > 1 here)
+        assert calls["n"] == 1 + _STAGE_B_SCHEMA_RETRIES
 
 
 # ---------------------------------------------------------------------------

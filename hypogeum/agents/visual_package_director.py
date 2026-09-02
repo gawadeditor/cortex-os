@@ -194,6 +194,11 @@ _A2_OUTPUT_BUDGET_RATIO              = 0.80
 _VPD_PROMPT_BATCH_MAX_TOKENS = 8_192
 # Scenes per Stage B batch (10 × ~580 tok/scene ≈ 5,800 tok output — safe)
 _SCENE_PROMPT_BATCH_SIZE    = 10
+# Stage B: re-sample a size-1 batch this many times when the LLM returns a
+# response that parses but fails schema validation (e.g. a dropped
+# scene_prompts[N].fallback_prompt) before failing the run. Larger batches are
+# halved first (see the SchemaError handler); this bounds the size-1 tail.
+_STAGE_B_SCHEMA_RETRIES     = 2
 
 # Legacy constant kept for run_visual_package_director_from_plan (no Stage A/B needed there)
 _VPD_MAX_TOKENS  = 32_768
@@ -1005,6 +1010,7 @@ def run_visual_package_director(
     scene_cursor = 0
     batch_idx = 0
     _b_batch_size = _SCENE_PROMPT_BATCH_SIZE  # local mutable — may be halved on overflow
+    _schema_retries_here = 0  # SchemaError re-samples at the current scene_cursor
 
     while scene_cursor < len(scenes):
         batch = scenes[scene_cursor : scene_cursor + _b_batch_size]
@@ -1027,6 +1033,7 @@ def run_visual_package_director(
             # Advance by actual count in checkpoint (may differ if batch_size changed)
             scene_cursor += n_in_ckpt if n_in_ckpt > 0 else len(batch)
             batch_idx += 1
+            _schema_retries_here = 0
             continue
 
         batch_input = {
@@ -1104,7 +1111,53 @@ def run_visual_package_director(
                 scene_cursor=scene_cursor,
             )
             _b_batch_size = new_size
+            _schema_retries_here = 0
             continue  # retry same scene_cursor with smaller batch
+        except SchemaError as exc:
+            # The LLM returned a response that parsed as JSON but failed
+            # output-schema validation (e.g. a dropped
+            # scene_prompts[N].fallback_prompt) — almost always a sampling
+            # fluke, not a size problem. Mirror the TruncatedResponse ladder:
+            # halve the batch first (fewer scenes = less for the model to
+            # track), then re-sample the size-1 batch a bounded number of
+            # times before failing the run. Without this, one malformed
+            # response kills the whole episode and only the whole-run
+            # auto_retry recovers it.
+            if len(batch) > 1:
+                new_size = max(1, len(batch) // 2)
+                log.warn(
+                    "vpd_stage_b_batch_schema_invalid",
+                    batch=batch_idx,
+                    path=exc.path,
+                    reason=exc.reason,
+                    old_batch_size=len(batch),
+                    new_batch_size=new_size,
+                    scene_cursor=scene_cursor,
+                )
+                _b_batch_size = new_size
+                _schema_retries_here = 0
+                continue
+            if _schema_retries_here < _STAGE_B_SCHEMA_RETRIES:
+                _schema_retries_here += 1
+                log.warn(
+                    "vpd_stage_b_scene_schema_retry",
+                    batch=batch_idx,
+                    path=exc.path,
+                    reason=exc.reason,
+                    attempt=_schema_retries_here,
+                    max_attempts=_STAGE_B_SCHEMA_RETRIES,
+                    scene_cursor=scene_cursor,
+                )
+                continue  # re-sample the single-scene batch
+            log.error(
+                "vpd_stage_b_scene_schema_unrecoverable",
+                batch=batch_idx,
+                path=exc.path,
+                reason=exc.reason,
+                scene_cursor=scene_cursor,
+                attempts=_schema_retries_here,
+            )
+            raise
 
         batch_path.write_text(
             json.dumps(prompts_result, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -1118,6 +1171,7 @@ def run_visual_package_director(
         )
         scene_cursor += len(batch)
         batch_idx += 1
+        _schema_retries_here = 0
 
     # ------------------------------------------------------------------
     # Coverage Plan shot prompts (2026-08-07 refactor) — must run after

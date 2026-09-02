@@ -67,18 +67,21 @@
 <body>
 {% include '_nav.html' %}
 {% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
 
 {% from '_subnav.html' import subnav %}
 {{ subnav('production') }}
 <div class="container">
 
-<div class="page-header">
-  <div>
-    <span class="eyebrow">Create</span>
-    <h1>Production Queue</h1>
-  </div>
-  <span class="page-meta">Topics queued for autonomous production</span>
-</div>
+{% set _qn = queued_topics|length %}
+{{ hero(
+   eyebrow='Production',
+   title='The production queue',
+   lede='Cortex takes the top topic on each channel\'s daily schedule and makes the whole episode — script, voice, video, thumbnail — then publishes it. Adding or removing topics here is all the steering it needs.',
+   figure=_qn,
+   figure_label='topic' ~ ('' if _qn == 1 else 's') ~ ' waiting',
+   pill='queue is healthy' if _qn else 'queue is empty',
+   pill_class='is-good' if _qn else 'is-warn') }}
 
 {% if error %}
 <div class="card" style="border-color:var(--red); margin-bottom:var(--gap);">
@@ -123,11 +126,11 @@
 <div class="action-banner" style="border-color:var(--warn);">
   <div class="action-banner-body">
     <div class="action-banner-title">
-      {% if queue_paused %}Queue is paused{% else %}Worker is stopped{% endif %}
+      {% if queue_paused %}Production is paused{% else %}Production is stopped{% endif %}
     </div>
-    <div class="action-banner-sub">Queued topics won't produce until the worker is running and the queue is live.</div>
+    <div class="action-banner-sub">Nothing in the queue will be made until production is running again.</div>
   </div>
-  <button class="btn btn-primary" id="start-worker-btn">Start the worker</button>
+  <button class="btn btn-primary" id="start-worker-btn">Start production</button>
 </div>
 <script>
 document.getElementById('start-worker-btn').addEventListener('click', function(){
@@ -135,16 +138,10 @@ document.getElementById('start-worker-btn').addEventListener('click', function()
   fetch('/api/worker/resume-queue',{method:'POST'}).then(function(){
     return fetch('/api/worker/start',{method:'POST'});
   }).then(function(){ setTimeout(function(){ location.reload(); }, 1500); })
-    .catch(function(){ b.disabled=false; b.textContent='Start the worker'; });
+    .catch(function(){ b.disabled=false; b.textContent='Start production'; });
 });
 </script>
 {% endif %}
-
-{# ── Autonomous-operation note ── #}
-<p style="font-size:12px; color:var(--muted); margin-bottom:var(--gap);">
-  The worker picks the next topic automatically on schedule.
-  <strong>Start now</strong> just moves a queued topic to the front of the line.
-</p>
 
 {# ── Primary: Production Queue ── #}
 <div class="card" style="padding:0; margin-bottom:var(--gap);">
@@ -167,90 +164,61 @@ document.getElementById('start-worker-btn').addEventListener('click', function()
       <div class="queue-text">{{ t.topic_text }}</div>
       <div class="queue-provenance">
         {% if t.source == 'rerun' %}
-          <span style="font-size:11px; color:var(--yellow); background:rgba(210,153,34,.12);
-                       border:1px solid rgba(210,153,34,.3); border-radius:10px; padding:1px 7px;
-                       font-weight:600;">{{ icon('refresh') }} recover</span>
-          {% if t.episode_id %}
-          <span style="font-size:11px; color:var(--muted);">
-            <code style="font-size:10px;">{{ t.episode_id }}</code>
-          </span>
-          {% endif %}
+          <span class="pill is-warn" style="padding:1px 8px; font-size:10px;">{{ icon('refresh') }} picking up a stopped run</span>
         {% elif t.source == 'discovered' %}
-          <span class="prov-discovered">{{ icon('discovery') }} discovered</span>
-          {% if t.discovery_score %}<span class="score-chip">{{ "%.2f"|format(t.discovery_score) }}</span>{% endif %}
+          <span class="prov-discovered">{{ icon('discovery') }} found by Cortex</span>
+          {% if t.discovery_score %}<span>· {% if t.discovery_score >= 0.7 %}strong pick{% elif t.discovery_score >= 0.5 %}good pick{% else %}worth a try{% endif %}</span>{% endif %}
         {% else %}
-          <span>{{ icon('pencil') }} manual</span>
+          <span>{{ icon('pencil') }} added by you</span>
         {% endif %}
-        {% if t.created_at %}<span>added {{ t.created_at[:10] }}</span>{% endif %}
-        <span>priority {{ t.priority }}</span>
-        <span>{{ t.channel_id }}</span>
+        <span>{{ t.channel_id | channel_name }}</span>
+        {% if t.created_at %}<span>· added {{ t.created_at | rel_time }}</span>{% endif %}
+        {% if t.priority and t.priority < 0 %}<span class="warn">· jump the queue</span>{% endif %}
       </div>
 
       {# Rerun context panel #}
       {% if t.source == 'rerun' %}
-      <div style="margin-top:6px; padding:8px 10px; background:rgba(210,153,34,.06);
-                  border:1px solid rgba(210,153,34,.2); border-radius:var(--radius); font-size:11px;">
-        <div style="font-weight:600; color:var(--yellow); margin-bottom:4px;">{{ icon('refresh') }} Recovery run — what will happen:</div>
-        <ul style="margin:0; padding-left:14px; color:var(--muted); line-height:1.8;">
-          <li>Same episode_id preserved: <code style="font-size:10px;">{{ t.episode_id or '(set at pickup)' }}</code></li>
-          <li>Completed Stage A skeleton + Stage B prompt batches reused from disk</li>
-          <li>EP, Research, Script stages skip (output files already on disk)</li>
-          <li>VPD resumes Stage B from next uncompleted batch at halved batch size</li>
-          <li>No re-billing for completed checkpointed work</li>
-        </ul>
-        <div style="margin-top:4px; color:var(--muted);">
-          The worker picks this up automatically. Use the button below only to start immediately.
-        </div>
+      <div style="margin-top:8px; padding:9px 12px; background:var(--warn-bg);
+                  border:1px solid color-mix(in srgb, var(--warn) 30%, transparent);
+                  border-radius:var(--radius); font-size:12px; color:var(--muted);">
+        {{ icon('refresh') }} This run stopped partway. Cortex will pick up exactly where it
+        left off — no work repeated, no extra cost.
       </div>
       {% endif %}
 
       {% if t.target_publish_at or t.production_deadline_at %}
-      <div style="display:flex; gap:14px; margin-top:5px; font-size:11px; flex-wrap:wrap;">
+      <div style="display:flex; gap:16px; margin-top:6px; font-size:11.5px; flex-wrap:wrap;">
         {% if t.production_deadline_at %}
-        <span style="color:var(--yellow);">
-          &#9201; Produce by
-          <strong>{{ t.production_deadline_at[:16].replace('T',' ') }} UTC</strong>
-        </span>
+        <span class="warn">{{ icon('clock') }} finish by {{ t.production_deadline_at | friendly_dt }}</span>
         {% endif %}
         {% if t.target_publish_at %}
-        <span style="color:var(--green);">
-          &#128197; Publish slot
-          <strong>{{ t.target_publish_at[:16].replace('T',' ') }} UTC</strong>
-        </span>
+        <span class="ok">{{ icon('calendar') }} goes live {{ t.target_publish_at | friendly_dt }}</span>
         {% endif %}
       </div>
       {% endif %}
     </div>
     <div class="queue-actions" style="align-items:flex-start;">
       <form method="POST" action="/api/topics/{{ t.topic_id }}/remove">
-        <button type="submit" class="btn"
-                onclick="return confirm('Remove this topic from queue?')"
-                style="font-size:12px; padding:5px 8px; color:var(--muted);"
-                title="Remove from queue">&#10005;</button>
+        <button type="submit" class="btn btn-sm"
+                onclick="return confirm('Remove this topic from the queue?')"
+                style="color:var(--muted);"
+                title="Remove from queue">{{ icon('x') }}</button>
       </form>
       <details>
-        <summary style="list-style:none; cursor:pointer; font-size:11px; color:var(--muted);
-                        padding:5px 8px; border:1px solid var(--border); border-radius:var(--radius);
-                        white-space:nowrap; background:transparent;">
-          Options &#9654;
+        <summary class="btn btn-sm" style="white-space:nowrap;">
+          Options {{ icon('chevron-down') }}
         </summary>
         <div style="position:absolute; right:0; margin-top:4px; z-index:10;
                     background:var(--surface); border:1px solid var(--border);
                     border-radius:var(--radius); padding:8px 10px; min-width:200px;
                     box-shadow:0 4px 12px rgba(0,0,0,.4);">
-          {% if t.source == 'rerun' %}
-          <div style="font-size:11px; color:var(--yellow); font-weight:600; margin-bottom:5px;">
-            {{ icon('refresh') }} Recovery run
-          </div>
           <div style="font-size:11px; color:var(--muted); margin-bottom:8px;">
-            Worker will resume using saved checkpoints.
-            Click below to start immediately instead of waiting for the scheduler.
+            {% if t.source == 'rerun' %}
+              This picks up where the stopped run left off. Start it now, or leave it for the next scheduled time.
+            {% else %}
+              This starts on its own at the next scheduled time. Only start it now if you can't wait.
+            {% endif %}
           </div>
-          {% else %}
-          <div style="font-size:11px; color:var(--muted); margin-bottom:6px;">
-            The worker starts this automatically. Use the button below only to bypass the scheduler.
-          </div>
-          {% endif %}
           {% if not launch_blocked %}
           {% if t.source == 'rerun' %}
           <form method="POST" action="/create/launch">
@@ -294,9 +262,8 @@ document.getElementById('start-worker-btn').addEventListener('click', function()
   <summary style="cursor:pointer; padding:10px 16px; background:var(--surface);
                   border:1px solid var(--border); border-radius:var(--radius);
                   font-size:13px; color:var(--muted); display:flex; align-items:center; gap:6px;">
-    <span class="arrow">&#9654;</span>
-    Emergency: launch with custom topic
-    <span style="font-size:11px; margin-left:4px;">(bypasses queue)</span>
+    {{ icon("plus") }} Start a one-off episode with your own topic
+    <span style="font-size:11px; margin-left:4px;">(skips the queue)</span>
   </summary>
   <div class="card override-wrap" style="margin-top:4px; border-top:none; border-radius:0 0 var(--radius) var(--radius);">
     <form method="POST" action="/create/launch">
@@ -312,7 +279,7 @@ document.getElementById('start-worker-btn').addEventListener('click', function()
         {% else %}
         <select disabled><option>No channels configured</option></select>
         <div style="font-size:12px; color:var(--muted); margin-top:4px;">
-          <a href="/channel-profile">Set up a channel →</a>
+          <a href="/channels/new">Set up a channel →</a>
         </div>
         {% endif %}
       </div>

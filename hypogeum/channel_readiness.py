@@ -128,21 +128,21 @@ def get_channel_readiness(channel_id: str, db_path: Optional[Path] = None) -> di
     if ops.get("operator_enabled"):
         if not grant.get("active"):
             items.append(_item(
-                "grant.active", "blocker", "Channel Operating Grant",
+                "grant.active", "blocker", "Payment authorization",
                 "no active grant — autonomous paid work cannot be authorized. "
                 "This is a deliberate money decision.",
                 _dash_fix if _dash_sign else _cli_fix,
             ))
         elif grant.get("ceiling_matches_config") is False:
             items.append(_item(
-                "grant.ceiling", "blocker", "Channel Operating Grant",
+                "grant.ceiling", "blocker", "Payment authorization",
                 "grant weekly ceiling no longer matches the configured budget.",
                 (_dash_fix if _dash_sign else _cli_fix)
                 + "  Re-sign after the budget change.",
             ))
         else:
             items.append(_item(
-                "grant.active", "ok", "Channel Operating Grant",
+                "grant.active", "ok", "Payment authorization",
                 f"active — {grant.get('days_left', '?')} days left, "
                 f"${grant.get('weekly_exposure_ceiling_usd', '?')}/wk.",
             ))
@@ -217,7 +217,7 @@ def get_channel_readiness(channel_id: str, db_path: Optional[Path] = None) -> di
             items.append(_item(
                 "publishing.bindings",
                 "blocker" if ops.get("operator_enabled") else "warn",
-                "Channel platform connections",
+                "Social accounts",
                 f"not connected for: {', '.join(unbound)} — this channel cannot "
                 f"publish to {'them' if len(unbound) > 1 else 'it'} yet.",
                 f"Open {channel_id}'s Publishing tab and connect each platform "
@@ -225,7 +225,7 @@ def get_channel_readiness(channel_id: str, db_path: Optional[Path] = None) -> di
             ))
         elif wanted_b:
             items.append(_item(
-                "publishing.bindings", "ok", "Channel platform connections",
+                "publishing.bindings", "ok", "Social accounts",
                 f"connected: {', '.join(wanted_b)}.",
             ))
     except Exception:  # noqa: BLE001
@@ -239,7 +239,7 @@ def get_channel_readiness(channel_id: str, db_path: Optional[Path] = None) -> di
         wanted = _enabled_platforms(channel_id, db_path)
         if not by_p:
             items.append(_item(
-                "zernio.accounts", "warn", "Publishing (Zernio)",
+                "zernio.accounts", "warn", "Publishing setup",
                 "Zernio has not reported any connected platform accounts yet.",
                 "Open Platform Connections and Sync from Zernio.",
             ))
@@ -248,21 +248,27 @@ def get_channel_readiness(channel_id: str, db_path: Optional[Path] = None) -> di
             missing = [p for p in wanted if p not in by_p]
             if bad or missing:
                 items.append(_item(
-                    "zernio.accounts", "warn", "Publishing (Zernio)",
+                    "zernio.accounts", "warn", "Publishing setup",
                     "some target platforms are not linked/active on Zernio: "
                     + ", ".join(bad + missing) + ".",
                     "Reconnect them in the Zernio dashboard, then Sync.",
                 ))
             else:
                 items.append(_item(
-                    "zernio.accounts", "ok", "Publishing (Zernio)",
+                    "zernio.accounts", "ok", "Publishing setup",
                     f"{len([p for p in by_p.values() if p.get('status') == 'active'])} platform "
                     f"account(s) active"
                     + (" · analytics add-on on" if snap.get("has_analytics_access") else "") + ".",
                 ))
     except Exception as exc:  # noqa: BLE001
-        items.append(_item("zernio.error", "warn", "Publishing (Zernio)",
+        items.append(_item("zernio.error", "warn", "Publishing setup",
                            f"could not read the Zernio snapshot: {exc}"))
+
+    # ── plain-language pass: this panel is shown to non-technical channel
+    #    owners, so scrub the internal vocabulary out of every item ───────
+    for i in items:
+        i["detail"] = _plainify(i.get("detail"))
+        i["fix"] = _plainify(i.get("fix"))
 
     # ── order: blockers, then warnings, then ok ────────────────────────
     order = {"blocker": 0, "warn": 1, "ok": 2}
@@ -283,6 +289,42 @@ def get_channel_readiness(channel_id: str, db_path: Optional[Path] = None) -> di
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+import re as _re
+
+_PLAIN_SUBS = [
+    (_re.compile(r"\s*\(or POST [^)]*\)"), ""),
+    (_re.compile(r"\s*\(POST [^)]*\)"), ""),
+    (_re.compile(r",?\s*or POST [^\s.]+"), ""),
+    (_re.compile(r"\bthe autonomous worker\b", _re.I), "Cortex"),
+    (_re.compile(r"\bautonomous worker\b", _re.I), "Cortex"),
+    (_re.compile(r"\bthe worker\b", _re.I), "Cortex"),
+    (_re.compile(r"\bproduction worker\b", _re.I), "production"),
+    (_re.compile(r"\bworker\b", _re.I), "Cortex"),
+    (_re.compile(r"\bblocking OIS signals?\b", _re.I), "operational alerts"),
+    (_re.compile(r"\bOIS signals?\b", _re.I), "operational alerts"),
+    (_re.compile(r"\bOIS\b"), "operations monitor"),
+    (_re.compile(r"\bsub-profiles?\b", _re.I), "setup sections"),
+    (_re.compile(r"\bheartbeat\b", _re.I), "recent activity"),
+    (_re.compile(r"\bdispatching\b", _re.I), "running episodes"),
+    (_re.compile(r"\bdispatch\b", _re.I), "run"),
+    (_re.compile(r"\bevery (tick|cycle)\b", _re.I), "each time it checks"),
+    (_re.compile(r"\bStart the worker from the top bar\b", _re.I),
+     "Start production from the button in the sidebar"),
+    (_re.compile(r"\bClick Activate on this channel's page\b", _re.I),
+     "Use the “Turn this channel on” button above"),
+    (_re.compile(r"\s{2,}"), " "),
+]
+
+
+def _plainify(text):
+    if not text:
+        return text
+    s = str(text)
+    for pat, repl in _PLAIN_SUBS:
+        s = pat.sub(repl, s)
+    return s.strip()
+
 
 def _resolve_effective_per_episode_ceiling(channel_id, ops, db_path) -> Optional[float]:
     chan = ops.get("cost_ceiling_usd_per_episode")
@@ -317,10 +359,10 @@ def _enabled_platforms(channel_id, db_path) -> list:
 
 _GATE_TITLE = {
     "channel_exists": "Channel record",
-    "profile_complete": "Configuration profiles",
-    "credentials": "Provider credentials",
+    "profile_complete": "Setup sections",
+    "credentials": "Creative tools connected",
     "budget": "Budget ceiling",
-    "ois_clear": "Operational blocks",
+    "ois_clear": "Operational alerts",
 }
 _GATE_FIX = {
     "profile_complete": "Finish the wizard — brand, models and publishing must all be set.",

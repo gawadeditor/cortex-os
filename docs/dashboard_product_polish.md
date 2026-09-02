@@ -56,11 +56,21 @@ per-page `<style>` unless truly page-local.
 | 2 | Analytics / Performance | `analytics.html` | ✅ done | hero, stat-grid, full-width areachart, platform cards, titles not ids |
 | 3 | Overview / Control room | `exec_dashboard.html` | ✅ pass 1 | Recent/Latest Episodes humanised, dropped Platform-ID col + debug footer |
 | 4 | Attention / Review | `attention.html` | ✅ done | hero, plain learning items, icons not emoji |
-| 5 | Channels | `channels.html` | todo | humanise NEXT SLOT / budget week |
-| 6 | Episodes (queue) | `episodes.html` | todo | hero, humanise priority/slug |
-| 7 | Episode detail | `episode_detail.html` | todo | 118KB — audit for bugs |
-| 8 | Production | `command.html` | todo | — |
-| — | consistency + bug sweep | all 73 | todo | after the above |
+| 5 | Channels | `channels.html` | ✅ done | plain runtime block, friendly_week, plain_channel_blocker |
+| 6 | Episodes (queue) | `episodes.html` | ✅ done | hero, channel names, plain queue meta; fixed _is_test_episode |
+| 7 | Production (`/create`) | `create.html` | ✅ done | hero, plain queue rows, plain recovery panel |
+| 8 | Episode detail | `episode_detail.html` | ✅ pass 1 | header + steps + QA humanised; **Publishing tab now Zernio-aware** (reads submission ledger + bindings); thumbnails empty state |
+| — | consistency + bug sweep | remaining ~65 | todo | Providers/Infra/Governance/Storage + the deep episode_detail tabs (Branding audit is N/A for short-native, still shows "Missing" red) |
+
+## Known follow-ups (found while working)
+
+- `episode_detail` Branding tab runs the full-length branding audit on
+  short-native episodes → "0 assets found / Missing verdict" in red when
+  short-form genuinely needs none. Needs a short-native branch.
+- Publishing card shows the raw Zernio "Post ID" — fine in a record
+  context but could be de-emphasised.
+- `/episodes` and `/create` both render the production queue (IA overlap).
+- ~10 old disk-only episodes have no title anywhere → "Untitled episode".
 
 ## Log
 

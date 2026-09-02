@@ -278,15 +278,25 @@ def order_and_filter_scenes(
             )
         scenes_sorted = [s for s in scenes_sorted if s.get("source_type") != "short"]
 
-    # M5.6 — Episode Zero scene cap
+    # M5.6 — Episode Zero scene cap. A channel generated-outro's scenes
+    # (narration_reference "b_outro*") are ALWAYS kept: the cap trims only the
+    # story, so the narration-completeness gate always has a video scene for
+    # every outro beat. Matches build_scene_plan_input's max_main_scenes.
     max_scenes = config.EPISODE_ZERO_MAX_SCENES
-    if max_scenes > 0 and len(scenes_sorted) > max_scenes:
-        log.warn(
-            "vpd_scene_cap_applied",
-            total_planned=len(scenes_sorted),
-            cap=max_scenes,
-            skipped=len(scenes_sorted) - max_scenes,
-        )
-        scenes_sorted = scenes_sorted[:max_scenes]
+    if max_scenes > 0:
+        def _is_outro(sc: dict) -> bool:
+            return str(sc.get("narration_reference", "")).startswith("b_outro")
+        _story = [s for s in scenes_sorted if not _is_outro(s)]
+        _outro = [s for s in scenes_sorted if _is_outro(s)]
+        if len(_story) > max_scenes:
+            log.warn(
+                "vpd_scene_cap_applied",
+                total_planned=len(_story),
+                cap=max_scenes,
+                skipped=len(_story) - max_scenes,
+                outro_kept=len(_outro),
+            )
+            _story = _story[:max_scenes]
+        scenes_sorted = _story + _outro
 
     return scenes_sorted

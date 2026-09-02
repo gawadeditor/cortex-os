@@ -1,0 +1,64 @@
+{
+  "ep_001": {
+    "version_a": {
+      "real_condition": "A",
+      "candidate_id": "tc_001",
+      "original_rank": 1,
+      "is_challenger": false,
+      "generation_mode": "single_image",
+      "source_prompt_artifact": "/Users/gawadeditor/hypogeum-brain/.hypogeum-assets/episodes/val_thumbnail_prompt_ep_001/validation/thumbnail_prompt_ab/condition_a/thumbnail_generation_plan_val_thumbnail_prompt_ep_001.json"
+    },
+    "version_b": {
+      "real_condition": "C",
+      "candidate_id": "tc_001",
+      "original_rank": 1,
+      "is_challenger": false,
+      "generation_mode": "single_image",
+      "source_prompt_artifact": "/Users/gawadeditor/hypogeum-brain/.hypogeum-assets/episodes/val_thumbnail_prompt_ep_001/validation/thumbnail_prompt_ab/condition_c/thumbnail_generation_plan_val_thumbnail_prompt_ep_001.json"
+    },
+    "version_x": {
+      "real_condition": "C",
+      "candidate_id": "tc_004",
+      "original_rank": 2,
+      "is_challenger": true,
+      "generation_mode": "single_image",
+      "source_prompt_artifact": "/Users/gawadeditor/hypogeum-brain/.hypogeum-assets/episodes/val_thumbnail_prompt_ep_001/validation/thumbnail_prompt_ab/condition_c/thumbnail_generation_plan_val_thumbnail_prompt_ep_001.json"
+    }
+  },
+  "ep_002": {
+    "version_b": {
+      "real_condition": "A",
+      "candidate_id": "tc_001",
+      "original_rank": 1,
+      "is_challenger": false,
+      "generation_mode": "single_image",
+      "source_prompt_artifact": "/Users/gawadeditor/hypogeum-brain/.hypogeum-assets/episodes/val_thumbnail_prompt_ep_002/validation/thumbnail_prompt_ab/condition_a/thumbnail_generation_plan_val_thumbnail_prompt_ep_002.json"
+    },
+    "version_a": {
+      "real_condition": "C",
+      "candidate_id": "tc_001",
+      "original_rank": 1,
+      "is_challenger": false,
+      "generation_mode": "single_image",
+      "source_prompt_artifact": "/Users/gawadeditor/hypogeum-brain/.hypogeum-assets/episodes/val_thumbnail_prompt_ep_002/validation/thumbnail_prompt_ab/condition_c/thumbnail_generation_plan_val_thumbnail_prompt_ep_002.json"
+    }
+  },
+  "ep_003": {
+    "version_b": {
+      "real_condition": "A",
+      "candidate_id": "tsc_ep_003_A",
+      "original_rank": 1,
+      "is_challenger": false,
+      "generation_mode": "layered",
+      "source_prompt_artifact": "/Users/gawadeditor/hypogeum-brain/.hypogeum-assets/episodes/val_thumbnail_prompt_ep_003/validation/thumbnail_prompt_ab/condition_a/thumbnail_generation_plan_val_thumbnail_prompt_ep_003.json"
+    },
+    "version_a": {
+      "real_condition": "C",
+      "candidate_id": "tsc_ep_003_A",
+      "original_rank": 1,
+      "is_challenger": false,
+      "generation_mode": "layered",
+      "source_prompt_artifact": "/Users/gawadeditor/hypogeum-brain/.hypogeum-assets/episodes/val_thumbnail_prompt_ep_003/validation/thumbnail_prompt_ab/condition_c/thumbnail_generation_plan_val_thumbnail_prompt_ep_003.json"
+    }
+  }
+}

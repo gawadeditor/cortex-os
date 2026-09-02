@@ -1,0 +1,111 @@
+{
+  "updated_at": "2026-07-19T00:00:00Z",
+  "current_priority": "COMPLETE as of 2026-07-19: V5.1 has now been tested against the real MUAPI provider (via two full supervised pipeline validation runs, not a single standalone generation) and the prompt-length/duplication fix is confirmed resolved -- no more 'Internal Error' / 'content could not be processed' rejections. That real-provider test surfaced one new, now-fixed issue: thumbnail_composition_distinctness (see composition_distinctness_resolution_2026_07_19 below). With that fixed, the Brand Bible / Thumbnail DNA / unified-integrated-thumbnail quality system is considered frozen and production-active. See composition_distinctness_resolution_2026_07_19 for the root cause and fix. Next roadmap priority to be chosen separately (not full episode generation by default -- see production_gate).",
+
+  "brand_bible_status": "active",
+  "brand_bible_version": "v1.1",
+  "brand_bible_path": "docs/brand_guardian/brand_bible_hypogeum.json",
+  "brand_bible_approved_by": "Mohamed Abdelgawad",
+  "brand_bible_approved_date": "2026-07-13",
+
+  "visual_identity_modes": {
+    "full": {
+      "status": "active",
+      "used_by": ["thumbnail", "thumbnail_compositor", "thumbnail_typography", "thumbnail_prompt_writer", "endscreen", "channel_artwork", "generic"],
+      "loader": "hypogeum/brand/visual_identity.py",
+      "verbose_builder": "build_visual_identity_directive()",
+      "compact_builder": "build_visual_identity_directive_compact()"
+    },
+    "adaptive": {
+      "status": "active",
+      "used_by": ["video_scene"],
+      "wired_into": "hypogeum/muapi.py::submit_scene()"
+    },
+    "light": {
+      "status": "active",
+      "used_by": ["reference_image"],
+      "wired_into": "hypogeum/agents/entity_continuity_manager.py::build_visual_spec_text()"
+    }
+  },
+
+  "thumbnail_dna_version": "v2",
+  "thumbnail_dna_module": "hypogeum/agents/thumbnail_composition_planner.py",
+  "thumbnail_dna_validator": "hypogeum/agents/thumbnail_plan_validator.py::validate_thumbnail_dna()",
+  "thumbnail_dna_validator_wired_into_production_gate": true,
+  "thumbnail_dna_validator_call_site": "hypogeum/agents/thumbnail_director.py::run_thumbnail_director()",
+
+  "unified_thumbnail_route_active": true,
+  "unified_thumbnail_function": "hypogeum/agents/thumbnail_compositor.py::generate_unified_integrated_thumbnail()",
+  "unified_thumbnail_routing": "hypogeum/agents/thumbnail_prompt_writer.py::_attach_concept_plans() sets composite_mode=False for every recognized emotional_trigger; hypogeum/agents/thumbnail_generation_agent.py::generate_thumbnails() dispatches composite_mode=False + typography_integration='embedded' candidates to generate_unified_integrated_thumbnail()",
+  "layered_path_preserved": true,
+  "layered_path_function": "hypogeum/agents/thumbnail_compositor.py::generate_and_composite()",
+
+  "video_brand_mode": "adaptive",
+  "reference_image_brand_mode": "light",
+
+  "provider_safe_prompt_status": "complete",
+  "provider_safe_prompt_ceiling_chars": 4500,
+  "provider_safe_prompt_v5_1_length_chars": 2467,
+  "provider_safe_prompt_blueprint": "docs/validation/thumbnail_image_generation_validation/ANTIKYTHERA_COMPOSITION_BLUEPRINT_V5_1.md",
+  "compact_dna_builder": "hypogeum/agents/thumbnail_composition_planner.py::describe_dna_constraints_compact()",
+  "compact_brand_builder": "hypogeum/brand/visual_identity.py::build_visual_identity_directive_compact()",
+
+  "full_production_enabled": false,
+  "production_mode": "validation",
+  "production_gate_module": "hypogeum/production_gate.py",
+  "production_gate_wired_into": "hypogeum/pipeline.py::run_pipeline() (single choke point — Dashboard, worker, and CLI all funnel through this function via hypogeum/queue.py)",
+  "production_gate_requires": [
+    "Config.FULL_PRODUCTION_ENABLED == True",
+    "Config.PRODUCTION_MODE != 'validation'",
+    "Config.FINANCE_BUDGET_CEILING_USD > 0 or Config.MUAPI_EPISODE_BUDGET_CREDITS > 0",
+    "hypogeum.setup_preflight.get_setup_preflight_status()['ready'] == True"
+  ],
+
+  "single_review_generation_pattern": "Standalone script calling hypogeum.agents.thumbnail_compositor.generate_unified_integrated_thumbnail() (or similar single-function call) directly via a real Config() and MUAPI_DRY_RUN=false process env override — never through hypogeum.pipeline.run_pipeline(), so it is unaffected by and does not require the production_gate. Requires explicit per-run user authorization in conversation before execution (established convention this session, not a code-level lock).",
+
+  "validation_mode": true,
+
+  "composition_distinctness_resolution_2026_07_19": {
+    "trigger": "Supervised e2e Validation Run 2 (episode ep_74237788, topic 'The Voynich Manuscript') was rejected by thumbnail_qa.py's c_thumbnail_composition_distinctness check: all 3 ranked A/B/C candidates (triggers impossibility, betrayal, discovery) shared composition_plan.focal_zone='center_right'. This was the real-provider V5.1 test this file's prior 'next_action' had been waiting for -- it succeeded at the generation level and failed at this one downstream QA check.",
+    "root_cause": "Two separate, individually deliberate design decisions, made 10 days apart by the same author, were never reconciled. (1) commit 8cbc1d0 (2026-06-21, same day thumbnail_composition_planner.py was created) intentionally consolidated _TRIGGER_MAP's focal_zone values under a 'CTR-first composition' redesign ('Drives CTR through subject readability and contrast, not void maximisation') -- 6 of 7 triggers ended up sharing focal_zone='center_right', down from 3 distinct values in the original map. (2) commit 7ee79f8 (2026-07-01) added c_thumbnail_composition_distinctness, requiring the 3 ranked candidates to have non-identical focal_zone, with no cross-check against the already-consolidated trigger map and no corresponding change to it. The 2026-07-13 Antikythera V3-V5 blueprints only validated that the pre-existing 'impossibility' trigger value reproduces a good single-thumbnail composition -- they did not originate 'center_right' and say nothing about cross-candidate distinctness. Full evidence trail (git history, blueprint doc quotes) preserved in the session transcript; not duplicated in code comments beyond the summary in thumbnail_composition_planner.py.",
+    "fix": "Candidate-assembly-layer fix, not a DNA change. _TRIGGER_MAP is untouched (still frozen, still CTR-first). New resolve_composition_distinctness() in hypogeum/agents/thumbnail_composition_planner.py runs once over the assembled ranked_candidates list in hypogeum/agents/thumbnail_prompt_writer.py::_attach_concept_plans() (the real candidate-assembly layer). Rank 1's composition_plan is never modified (provably, not just by convention -- it's always the first candidate processed against an empty claimed-zones set). Ranks 2/3 are deterministically reassigned, only on actual collision, to the first unclaimed zone in a fixed 3-zone pool: FOCAL_ZONE_RESOLUTION_POOL = ('center_left', 'center', 'center_right') -- all three zones already proven safe/meaningful in this system (two already used in _TRIGGER_MAP itself; 'center_left' is the exact term from the hand-authored, provider-validated Antikythera V3/V4 blueprint's doorway/figure zone). No randomness, no topic-specific logic. Confirmed that focal_zone is structural metadata only in the current codebase -- it drives no image_prompt text (describe_dna_constraints() and build_layer_prompts() never read it), so this fix has zero effect on what the generated image actually looks like; it only changes which validator bucket a lower-ranked candidate's plan falls into.",
+    "verification": "Directly reproduced Run 2's exact failing scenario (impossibility/betrayal/discovery, all center_right) and confirmed the real thumbnail_qa.py Check I logic now passes against the resolved output. 20 new regression tests added to tests/test_thumbnail_composition_typography.py (TestResolveCompositionDistinctness + TestConceptCandidatePlansDistinctness): collision resolution for 3-shared / 2-shared / already-distinct cases, rank-1 immutability (including out-of-order input), field-preservation (only focal_zone changes), determinism across repeated runs, _TRIGGER_MAP immutability, empty/single/no-plan edge cases, and compatibility with both validate_thumbnail_dna() and validate_composition_typography_pre_generation(). Targeted thumbnail suite (640 tests across 14 files) passes; full suite result recorded separately below.",
+    "files_changed": [
+      "hypogeum/agents/thumbnail_composition_planner.py — added FOCAL_ZONE_RESOLUTION_POOL and resolve_composition_distinctness(); _TRIGGER_MAP unchanged",
+      "hypogeum/agents/thumbnail_prompt_writer.py — _attach_concept_plans() calls resolve_composition_distinctness() once after its per-candidate loop",
+      "tests/test_thumbnail_composition_typography.py — 20 new tests"
+    ]
+  },
+
+  "last_successful_test_count": 1101,
+  "last_successful_test_scope": "targeted suite across every system touched this session (thumbnail composition/typography/DNA, brand visual identity, unified integrated path, compositor regression, prompt writer, director, generation agent, recovery, strategy, VPD, brand guardian, provider registry, entity continuity, muapi, production gate, pipeline, config)",
+  "last_full_suite_result": "2026-07-19 (after the composition_distinctness_resolution_2026_07_19 fix): 10940 passed, 8 failed, 0 new failures. The 8 failures are the same pre-existing/unrelated set as before (test_prompt_files_phase2a.py + test_prompt_registry_phase2b.py stale v3 prompt-version headers; test_reuse_engine.py wall-clock-time-flaky scoring assertions) — confirmed unrelated to this fix via direct comparison against the pre-fix baseline. Targeted thumbnail suite (14 files, 640 tests, includes the 20 new composition-distinctness tests) also passes in full.",
+
+  "last_provider_attempt": {
+    "episode_id": "ep_74237788 and ep_1f827369 (2026-07-19 supervised validation runs, superseding the ep_003 V5.1 standalone-generation plan below — the real 3-candidate-per-episode production route was exercised twice instead)",
+    "candidate": "V5.1-equivalent unified integrated prompts (real topics: Voynich Manuscript, Baghdad Battery), generated via the actual production route (thumbnail_generation_agent.generate_thumbnails() -> generate_unified_integrated_thumbnail()), not a standalone script",
+    "provider": "muapi",
+    "model": "gpt-image-2-text-to-image",
+    "result": "No 'Internal Error' or 'content could not be processed' rejections in either run — the V5.1 length/duplication fix is confirmed resolved. Run 2 was blocked downstream by thumbnail_composition_distinctness (see composition_distinctness_resolution_2026_07_19 — now fixed). Run 3 completed with QA verdict WARNING/approved=True, thumbnail generation fully successful.",
+    "prior_attempt_ep_003": {
+      "attempts": 2,
+      "attempt_1_request_id": "2dbba9cf-6dd7-4364-887b-e2dd848e9cba",
+      "attempt_2_request_id": "3d19cc49-d7ec-4737-8a35-e97185180b43",
+      "error": "Attempt 1: generic 'Internal Error, Please try again later.' (HTTP 400 x3, early-abort). Attempt 2 (new request_id, genuinely new submission): 'The current content could not be processed. Please revise your input and try again.' (HTTP 400 x3, early-abort) after reaching 'processing' status. Root cause: composed prompt was 6,730 characters (~1,010 words) against a documented design target of 30-60 words, with several concepts restated 2-7 times. Fixed in V5.1 (2,467 chars) — confirmed resolved by the 2026-07-19 runs above."
+    }
+  },
+
+  "next_action": "None pending for this workstream — see current_priority above. The next Hypogeum roadmap priority is chosen separately, outside this file's scope.",
+
+  "blockers": [
+    "None code-side for the Brand Bible / Thumbnail DNA system itself. Full production intentionally remains disabled by default (FULL_PRODUCTION_ENABLED=false, PRODUCTION_MODE=validation) — the 2026-07-19 validation runs used a temporary, explicitly-authorized, immediately-reverted override; see the music-architecture validation report in the session transcript for that procedure.",
+    "Two unrelated blockers to a real published episode were found during the 2026-07-19 validation runs (neither is a Brand Bible/Thumbnail DNA issue): (1) YouTube OAuth token refresh failing (HTTP 400) — the DB-stored credential verified working 2026-06-27 has expired again, needs re-authorization. (2) none else outstanding for this workstream."
+  ],
+
+  "known_unrelated_failures": [
+    "tests/test_prompt_files_phase2a.py / test_prompt_registry_phase2b.py — thumbnail_director.txt and vpd_scene_prompts carry PROMPT_VERSION='v3' but these tests assert v1/v2 only. Confirmed via git diff to be pre-existing, from an earlier 'conditional prompt skill selection' task this session, untouched by any Brand Bible/Thumbnail DNA/safety-gate work.",
+    "tests/test_reuse_engine.py — several TestScoreAsset/TestScoringEdgeCases assertions are wall-clock-time-dependent (recency-decay scoring) and have failed intermittently on different sub-tests across different full-suite runs this session. Confirmed via git diff: reuse_engine.py and its test file were never touched this session."
+  ],
+
+  "prohibition": "Do not run a full episode. Do not enable FULL_PRODUCTION_ENABLED without explicit user instruction. Do not make a paid provider call without explicit per-run authorization in conversation."
+}

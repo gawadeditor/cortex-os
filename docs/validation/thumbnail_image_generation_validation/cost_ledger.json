@@ -1,0 +1,154 @@
+{
+  "ledger": [
+    {
+      "job_index": 1,
+      "episode": "ep_001",
+      "group_key": "ep_001_legacy_rank1",
+      "sample_num": 1,
+      "provider_calls": 1,
+      "cost_usd": 0.09,
+      "running_total_usd": 0.09
+    },
+    {
+      "job_index": 2,
+      "episode": "ep_001",
+      "group_key": "ep_001_legacy_rank1",
+      "sample_num": 2,
+      "provider_calls": 1,
+      "cost_usd": 0.09,
+      "running_total_usd": 0.18
+    },
+    {
+      "job_index": 3,
+      "episode": "ep_001",
+      "group_key": "ep_001_legacy_rank1",
+      "sample_num": 3,
+      "provider_calls": 1,
+      "cost_usd": 0.09,
+      "running_total_usd": 0.27
+    },
+    {
+      "job_index": 4,
+      "episode": "ep_001",
+      "group_key": "ep_001_new_rank1",
+      "sample_num": 1,
+      "provider_calls": 1,
+      "cost_usd": 0.09,
+      "running_total_usd": 0.36
+    },
+    {
+      "job_index": 5,
+      "episode": "ep_001",
+      "group_key": "ep_001_new_rank1",
+      "sample_num": 2,
+      "provider_calls": 1,
+      "cost_usd": 0.09,
+      "running_total_usd": 0.45
+    },
+    {
+      "job_index": 6,
+      "episode": "ep_001",
+      "group_key": "ep_001_new_rank1",
+      "sample_num": 3,
+      "provider_calls": 1,
+      "cost_usd": 0.09,
+      "running_total_usd": 0.54
+    },
+    {
+      "job_index": 7,
+      "episode": "ep_001",
+      "group_key": "ep_001_new_challenger_tc004",
+      "sample_num": 1,
+      "provider_calls": 1,
+      "cost_usd": 0.09,
+      "running_total_usd": 0.63
+    },
+    {
+      "job_index": 8,
+      "episode": "ep_001",
+      "group_key": "ep_001_new_challenger_tc004",
+      "sample_num": 2,
+      "provider_calls": 1,
+      "cost_usd": 0.09,
+      "running_total_usd": 0.72
+    },
+    {
+      "job_index": 9,
+      "episode": "ep_001",
+      "group_key": "ep_001_new_challenger_tc004",
+      "sample_num": 3,
+      "provider_calls": 1,
+      "cost_usd": 0.09,
+      "running_total_usd": 0.81
+    },
+    {
+      "job_index": 10,
+      "episode": "ep_002",
+      "group_key": "ep_002_legacy_rank1",
+      "sample_num": 1,
+      "provider_calls": 1,
+      "cost_usd": 0.09,
+      "running_total_usd": 0.9
+    },
+    {
+      "job_index": 11,
+      "episode": "ep_002",
+      "group_key": "ep_002_legacy_rank1",
+      "sample_num": 2,
+      "provider_calls": 1,
+      "cost_usd": 0.09,
+      "running_total_usd": 0.99
+    },
+    {
+      "job_index": 12,
+      "episode": "ep_002",
+      "group_key": "ep_002_legacy_rank1",
+      "sample_num": 3,
+      "provider_calls": 1,
+      "cost_usd": 0.09,
+      "running_total_usd": 1.08
+    },
+    {
+      "job_index": 13,
+      "episode": "ep_002",
+      "group_key": "ep_002_new_rank1",
+      "sample_num": 1,
+      "provider_calls": 1,
+      "cost_usd": 0.09,
+      "running_total_usd": 1.17
+    },
+    {
+      "job_index": 14,
+      "episode": "ep_002",
+      "group_key": "ep_002_new_rank1",
+      "sample_num": 2,
+      "provider_calls": 1,
+      "cost_usd": 0.09,
+      "running_total_usd": 1.26
+    },
+    {
+      "job_index": 15,
+      "episode": "ep_002",
+      "group_key": "ep_002_new_rank1",
+      "sample_num": 3,
+      "provider_calls": 1,
+      "cost_usd": 0.09,
+      "running_total_usd": 1.35
+    },
+    {
+      "job_index": 16,
+      "episode": "ep_003",
+      "group_key": "ep_003_legacy_rank1",
+      "sample_num": 1,
+      "provider_calls": 1,
+      "cost_usd": 0.09,
+      "running_total_usd": 1.44,
+      "note": "partial/interrupted \u2014 only base_scene layer confirmed"
+    }
+  ],
+  "documented_cost_per_call_usd": 0.09,
+  "spend_cap_usd": 5.0,
+  "final_running_total_usd": 1.44,
+  "confirmed_provider_calls": 16,
+  "note": "Cost is estimated from the documented per-call rate ($0.09/gen, ARCHITECTURE_AUDIT.md), not independently confirmed against MUAPI's own billing dashboard."
+}

@@ -1,0 +1,41 @@
+# Input Reference — EP 002
+
+- **Trial identifier:** `ep_002`
+- **Topic:** The Antikythera Mechanism: Who Really Built the Future?
+- **Central question:** Was the Antikythera Mechanism a one-off miracle, or the sole survivor of an entire technological civilisation we never knew existed?
+- **Central answer (must not be spoiled early):** Literary, calendrical, and cargo evidence converge to show the mechanism was not unique — it was a bespoke product of a broader Hellenistic precision-instrument tradition that was systematically erased by bronze recycling and the collapse of the ancient world.
+
+## Narrative Arc (must be preserved)
+
+- **Setup:** Sections s_001 and s_002 establish the familiar framing — a singular, inexplicable device whose maker cannot be identified — and then show why the individual-attribution debate is a dead end. The viewer is loaded with awe and frustration in equal measure.
+- **Escalation:** Sections s_003 and s_004 build the case that the mechanism was not unique. Cicero's testimony, the bespoke calendar, the luxury cargo context, and the bronze-recycling explanation accumulate into an inference that an entire precision-instrument industry existed and was erased. Tension peaks when the viewer realises the absence of evidence is itself evidence of destruction.
+- **Revelation:** Section s_005 lands the central reframe: the mechanism was not a miracle but a product — and a product implies a civilisation-scale infrastructure of workshops, supply chains, and trained craftsmen that we cannot see because it was systematically melted down. The 2021 Nature paper's conclusion that this is the earliest mechanisation of scientific theory gains new weight when understood as the output of a tradition, not a flash of individual genius.
+- **Resolution:** Section s_006 elevates the mystery rather than closing it. If one shipwreck preserved one device, the implication is that the ancient world's technological capability was far greater than the archaeological record shows. The viewer leaves with a permanently altered model of antiquity and a set of open questions that resist easy answers.
+
+## Section Structure (order and purpose must be preserved)
+
+- **Hook** — Present the accepted version of the Antikythera Mechanism as a singular, inexplicable miracle — the 'lone genius' framing that dominates every other video. Establish the 1,400-year gap as the headline shock. The viewer should feel the familiar awe but also sense that something about this framing is about to be challenged. (tension: medium)
+- **False Lead** — Explore the dominant attribution debate — Archimedes vs. Hipparchus vs. anonymous genius — and show why the 'who built it' question, as usually framed, is a dead end. No inscription names the maker. Every attribution is a hypothesis. The viewer should feel the frustration of a mystery that resists individual-hero answers. Introduce the dating contradiction to deepen uncertainty. (tension: medium)
+- **Evidence Gathering** — Shift the investigation from 'who' to 'what world'. Build the case that the mechanism was not a one-off by layering three pieces of indirect evidence: (1) Cicero's testimony that multiple geared devices existed, (2) the Corinthian calendar customisation implying bespoke manufacture for a distant client, (3) the shipwreck cargo context showing the device travelled alongside luxury goods as elite trade. Each piece alone is suggestive; together they outline a production culture. (tension: high)
+- **Contradiction** — The accepted version breaks. If the mechanism was part of a tradition, why is it the only one? Deliver the answer: systematic bronze recycling in antiquity destroyed the evidence. The absence is not proof of non-existence — it is proof of destruction. Layer the jamming-simulation claim to humanise the makers: even within this tradition, tolerances were imperfect, devices failed. This is not a story of gods; it is a story of craftsmen working at the edge of what bronze could do. (tension: high)
+- **True Revelation** — Land the central reveal. The 2021 Nature paper concluded the device 'mechanised the predictions of scientific theories' — the earliest known instance. But the real revelation is the reframing: this was not a miracle. It was a product. A product implies a supply chain, a client, a workshop, a tradition of training, a market. The mechanism is not the story — the invisible civilisation that produced it is the story. The viewer's mental model of the ancient world should shift: from a world of scattered geniuses to a world with an industrial layer we cannot see because it was melted down. (tension: high)
+- **Implications** — Elevate the mystery. If one shipwreck preserved one device, what did the thousands of un-wrecked ships carry? What technologies existed that left no trace? The mechanism is a keyhole into a technological world we can barely glimpse. Close with the open questions that remain: the unknown recipient, the missing workshops, the planetary displays we still cannot fully reconstruct. The viewer should leave not with closure but with a permanently altered sense of what the ancient world was capable of. (tension: medium)
+
+## Key Reveals (facts that must land correctly)
+
+- The 1,400-year gap is the episode's opening shock — it establishes the scale of the mystery and primes the viewer to ask 'why?' This question will not be answered until s_004. (type: supporting)
+- The anonymity of the maker closes the 'individual genius' path and forces the viewer to consider systemic explanations. It answers 'who built it?' with 'we literally cannot know' — which is itself a reveal. (type: supporting)
+- Cicero's testimony is the first hard evidence that the mechanism was not unique. It answers 'was this a one-off?' with 'no — multiple devices were known in antiquity.' This is the hinge that turns the investigation from individual to systemic. (type: supporting)
+- The Corinthian calendar customisation implies bespoke manufacture — a workshop taking orders from distant clients. It answers 'was there a production culture?' with 'the device itself is evidence of one.' (type: supporting)
+- The bronze-recycling explanation reframes the 1,400-year gap from 'proof of non-existence' to 'proof of destruction.' It answers the hook's central shock with a systemic explanation that changes the viewer's entire interpretive framework. (type: reframing)
+- The jamming simulation humanises the makers and grounds the 'invisible industry' in physical reality — these were craftsmen with tolerances, not mythical figures. It answers 'were these makers superhuman?' with 'no, they struggled with the same material limits we do.' (type: supporting)
+- The 2021 Nature conclusion — 'mechanised the predictions of scientific theories' — is the intellectual capstone. Combined with the accumulated evidence from s_003–s_004, it lands not as a fact about one device but as a fact about a civilisation. This is the central reveal: the mechanism is the earliest known mechanisation of science, and it was a product of an industry, not a miracle. (type: central)
+- The social-function debate (teaching tool vs. prestige object vs. calendar instrument) reframes the device as something that had a market — someone commissioned it, someone paid for it, someone expected to use it. This answers 'what was it for?' with 'it had clients,' which is the final brick in the 'invisible industry' argument. (type: reframing)
+
+## Shorts Requirements
+
+- **The Ancient Computer That Jammed** — anchor: Close-up of corroded bronze gears from the mechanism; animated simulation of gears seizing mid-rotation.; spoiler policy: no_central_answer
+- **The Shipwreck That Saved the Future** — anchor: Underwater wreck site imagery; bronze statues and glassware from the Antikythera cargo; the corroded mechanism fragment against a backdrop of luxury goods.; spoiler policy: no_central_answer
+- **1,400 Years of Nothing** — anchor: Timeline graphic spanning from ~100 BCE to ~1300 CE with a stark empty gap; the corroded mechanism on one end, medieval clockwork on the other.; spoiler policy: no_central_answer
+
+*This reference describes the source material only. It intentionally does not describe how any script version was produced.*

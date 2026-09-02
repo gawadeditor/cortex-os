@@ -1,0 +1,9 @@
+{
+  "job_index": 1,
+  "success": true,
+  "final_path_exists": true,
+  "provider": "muapi",
+  "model": "gpt-image-2-text-to-image",
+  "no_fallback_used": true,
+  "final_path": "/Users/gawadeditor/hypogeum-brain/.hypogeum-assets/episodes/val_thumbnail_image_gen/ep_001/ep_001_legacy_rank1/thumbnails/ep_001_legacy_rank1_sample01.jpg"
+}

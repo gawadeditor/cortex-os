@@ -1,0 +1,22 @@
+{
+  "synthetic": {
+    "version_a": "A",
+    "version_b": "C",
+    "version_c": "B"
+  },
+  "ep_001": {
+    "version_a": "C",
+    "version_b": "A",
+    "version_c": "B"
+  },
+  "ep_002": {
+    "version_a": "B",
+    "version_b": "A",
+    "version_c": "C"
+  },
+  "ep_003": {
+    "version_a": "A",
+    "version_b": "C",
+    "version_c": "B"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "provider": "muapi",
+  "model": "gpt-image-2-text-to-image",
+  "fallback_suppressed_for_validation": true,
+  "fallback_suppression_method": "Harness calls hypogeum.muapi._attempt_thumbnail_generation() directly with fallback_model='' (single-image path) and hypogeum.agents.thumbnail_compositor.generate_and_composite() (layered path, which has no fallback logic at all). generate_thumbnail()'s production provider chain (openrouter/openai/muapi) is never invoked by this harness. Production fallback order is unchanged.",
+  "aspect_ratio": "16:9",
+  "resolution": "2K",
+  "quality": "high",
+  "image_format": "jpg (post-normalization)",
+  "deterministic_seed_supported": false,
+  "seed_note": "The gpt-image-2-text-to-image MUAPI payload (prompt, aspect_ratio, resolution, quality) exposes no seed parameter. Paired Condition A/C samples are NOT deterministically seeded \u2014 three independent samples per prompt are generated instead to reduce the influence of random generation variance.",
+  "retry_policy": "Up to 3 attempts per sample, GPT Image 2 only, no cross-model fallback.",
+  "prompt_enhancement": "None \u2014 MUAPI payload sends the prompt string verbatim.",
+  "reference_image_input": "None used in this validation.",
+  "documented_cost_per_call_usd": 0.09,
+  "spend_cap_usd": 5.0,
+  "captured_at": "2026-07-12T18:29:37.763329+00:00"
+}

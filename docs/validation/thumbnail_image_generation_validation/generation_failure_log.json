@@ -1,0 +1,10 @@
+[
+  {
+    "reason": "STOP_REQUEST_INTERRUPTION",
+    "job_index": 16,
+    "episode": "ep_003",
+    "group_key": "ep_003_legacy_rank1",
+    "sample_num": 1,
+    "detail": "User issued an explicit stop request. Process was SIGTERM-killed mid-generation. This was not a generation failure \u2014 it was an intentional termination."
+  }
+]

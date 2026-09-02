@@ -1,0 +1,17 @@
+{
+  "ep_001": {
+    "version_a": "C",
+    "version_b": "B",
+    "version_c": "A"
+  },
+  "ep_002": {
+    "version_a": "C",
+    "version_b": "B",
+    "version_c": "A"
+  },
+  "ep_003": {
+    "version_a": "C",
+    "version_b": "B",
+    "version_c": "A"
+  }
+}

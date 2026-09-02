@@ -914,9 +914,26 @@ def run_assembly_agent(
         )
 
     # Resolve end-page path: auto-discover from assets_root/end-page.png.
-    # Only passed to the renderer when the file actually exists on disk.
+    # Passed to the renderer only when the file exists on disk AND the channel
+    # has no branded outro of its own. channel_packages/<id>/outro.mp4 is the
+    # per-channel sign-off and supersedes the shared generic end-page card —
+    # otherwise a channel gets two end cards (and a shorts-native episode a
+    # 30s+ tail on a ~35s story, plus the shared card is Hypogeum-branded).
     _end_page_path = assets_root / "end-page.png"
     _end_page_duration = float(getattr(config, "END_PAGE_DURATION_SECONDS", 20))
+    try:
+        from hypogeum.channel_package_scaffold import channel_outro_path
+        _channel_has_own_outro = channel_outro_path(channel_id) is not None
+    except Exception:  # noqa: BLE001
+        _channel_has_own_outro = False
+    _use_end_page = _end_page_path.exists() and not _channel_has_own_outro
+    if _end_page_path.exists() and _channel_has_own_outro:
+        log.info(
+            "assembly_end_page_skipped",
+            episode_id=episode_id,
+            reason="channel_has_own_branded_outro",
+            channel_id=channel_id,
+        )
 
     # Shorts burned-in captions (2026-08-01 quality rejection: Shorts had
     # platform CC only). Reuses the same asset-id lookup already used for
@@ -956,7 +973,7 @@ def run_assembly_agent(
         episode_id=episode_id,
         ffmpeg_timeout=ffmpeg_timeout,
         log=log,
-        end_page_path=_end_page_path if _end_page_path.exists() else None,
+        end_page_path=_end_page_path if _use_end_page else None,
         end_page_duration=_end_page_duration,
         music_segments=music_segments,
         short_srt_paths=short_srt_paths,
@@ -1043,7 +1060,11 @@ def run_assembly_agent(
     )
     episode_render = {
         "video_asset_id": main_video_asset_id,
-        "duration_seconds": sum_timeline_duration(main_timeline) + _outro_seconds,
+        "duration_seconds": (
+            sum_timeline_duration(main_timeline)
+            + float(render_manifest.get("end_page_seconds") or 0.0)
+            + _outro_seconds
+        ),
         "resolution": render_manifest["main_resolution"],
         "frame_rate": render_manifest["frame_rate"],
         "scene_count": len(main_timeline),

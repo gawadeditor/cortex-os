@@ -3406,3 +3406,47 @@ class TestChannelBrandedOutro:
                                       get_logger(episode_id="t", agent="t"))
         assert 1.5 < added < 2.5
         assert _probe_seconds(main) > base + 1.5  # main grew by ~the outro length
+
+    # --- the generic end-page card is suppressed when the channel has its own outro ---
+
+    def _drive_assembly_capturing_end_page(self, tmp_path, monkeypatch, channel_has_outro: bool):
+        cfg = _make_config()
+        visual = _make_visual_package()
+        narration = _make_narration_package()
+        thumbnails = _make_thumbnail_package()
+
+        assets_root = tmp_path / ".hypogeum-assets"
+        _setup_clips_on_disk(visual, assets_root, "ep_001")
+        _setup_narration_on_disk(narration, assets_root)
+        (assets_root / "end-page.png").write_bytes(b"FAKEPNG")  # generic card present
+
+        pkgs = tmp_path / "channel_packages"
+        if channel_has_outro:
+            (pkgs / "ch1").mkdir(parents=True)
+            self._outro_clip(pkgs / "ch1" / "outro.mp4")
+        else:
+            pkgs.mkdir(parents=True)
+        monkeypatch.setattr("hypogeum.channel_package_scaffold._PACKAGES", pkgs)
+
+        _real_render = __import__(
+            "hypogeum.agents.video_renderer", fromlist=["render_episode"]
+        ).render_episode
+        with patch("subprocess.run", side_effect=_mock_ffmpeg_success()), \
+             patch("hypogeum.agents.music_agent.generate_music_track",
+                   side_effect=lambda **kw: _make_music_track_result(category=kw.get("category", "Mystery"), tmp_path=tmp_path)), \
+             patch("hypogeum.agents.assembly_agent.render_episode", wraps=_real_render) as mock_render:
+            run_assembly_agent(
+                visual_package=visual, narration_package=narration,
+                thumbnail_package=thumbnails, config=cfg, episode_id="ep_001",
+                output_dir=tmp_path / "episodes" / "ep_001", channel_id="ch1",
+            )
+        assert mock_render.call_count == 1
+        return mock_render.call_args.kwargs["end_page_path"]
+
+    def test_end_page_suppressed_when_channel_has_own_outro(self, tmp_path, monkeypatch):
+        end_page_path = self._drive_assembly_capturing_end_page(tmp_path, monkeypatch, channel_has_outro=True)
+        assert end_page_path is None, "the generic end-page must be skipped for a channel with its own outro"
+
+    def test_end_page_used_when_channel_has_no_outro(self, tmp_path, monkeypatch):
+        end_page_path = self._drive_assembly_capturing_end_page(tmp_path, monkeypatch, channel_has_outro=False)
+        assert end_page_path is not None and end_page_path.name == "end-page.png"

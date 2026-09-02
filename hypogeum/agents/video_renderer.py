@@ -338,6 +338,7 @@ def render_episode(
             resolution=main_resolution,
             vertical=main_vertical,
         )
+    _end_page_seconds_added = 0.0
     if not main_timeline:
         pass
     elif not (main_success and main_output_path.exists() and main_output_path.stat().st_size > 0):
@@ -369,6 +370,7 @@ def render_episode(
                 end_page_path=str(end_page_path),
             )
         else:
+            _end_page_seconds_added = float(end_page_duration)
             log.info(
                 "assembly_end_page_appended",
                 episode_id=episode_id,
@@ -466,6 +468,10 @@ def render_episode(
     )
     manifest["music_duration_used_s"] = round(music_dur_used, 3)
     manifest["music_continues_under_end_page"] = music_continues
+    # Seconds the end-page card actually added to the main render (0.0 when no
+    # end page, or the append failed) — the caller folds this into the
+    # recorded episode duration, which otherwise counts only the timeline.
+    manifest["end_page_seconds"] = round(_end_page_seconds_added, 3)
 
     return manifest
 

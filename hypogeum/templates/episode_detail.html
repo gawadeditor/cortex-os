@@ -524,7 +524,7 @@
   <span class="breadcrumb-sep">/</span>
   <a href="/episodes">Episodes</a>
   <span class="breadcrumb-sep">/</span>
-  <span>{{ d.display_title or d.episode_id }}</span>
+  <span>{{ d.display_title or (d.episode_id | episode_name) }}</span>
 </div>
 
 {# ════════════════════════════════════════════════════════════════
@@ -533,51 +533,33 @@
 <div class="ep-header">
 
   {# Title + topic #}
-  <div class="ep-title">{{ d.display_title or d.episode_id }}</div>
+  <div class="ep-title">{{ d.display_title or (d.episode_id | episode_name) }}</div>
   {% if d.topic and d.topic != d.display_title %}
-  <div class="ep-topic">Topic: {{ d.topic }}</div>
+  <div class="ep-topic">{{ d.topic }}</div>
   {% endif %}
 
-  {# Meta: id · created · published · four-way status #}
+  {# Meta: created · published · current step #}
   <div class="ep-meta-row">
-    <span class="ep-id-chip">{{ d.episode_id }}</span>
-    {% if d.created_at %}
-    <span>Created {{ d.created_at[:10] }}</span>
-    {% endif %}
-    {% if d.published_at %}
-    <span>Published {{ d.published_at[:10] }}</span>
-    {% endif %}
-    {% if d.current_stage %}
-    <span style="color: var(--blue);">⟳ {{ d.current_stage }}</span>
-    {% endif %}
+    {% if d.created_at %}<span>Started {{ d.created_at | rel_time }}</span>{% endif %}
+    {% if d.published_at %}<span>Published {{ d.published_at | friendly_date }}</span>{% endif %}
+    {% if d.current_stage %}<span style="color: var(--blue);">Now: {{ d.current_stage | plain_status }}</span>{% endif %}
   </div>
 
-  {# Four-way status row (production / release / publish / analytics) #}
+  {# Journey status — production → release → publish → analytics #}
   {% if d.production_status %}
-  <div class="ep-meta-row" style="margin-top:6px; gap:12px; flex-wrap:wrap;">
-    {# Production #}
+  {% set rs = d.release_status %}
+  <div class="ep-meta-row" style="margin-top:8px; gap:8px; flex-wrap:wrap;">
     {% set ps = d.production_status %}
-    <span style="font-size:11px; color:var(--muted);">Production:&nbsp;
-      <span style="font-weight:700; color:{% if ps == 'COMPLETE' %}var(--green){% elif ps == 'FAILED' %}var(--red){% else %}var(--muted){% endif %};">{{ ps }}</span>
-    </span>
-    {# Release #}
-    {% set rs = d.release_status %}
-    <span style="font-size:11px; color:var(--muted);">Release:&nbsp;
-      <span style="font-weight:700; color:{% if rs == 'READY' %}var(--green){% elif rs == 'BLOCKED' %}var(--red){% else %}var(--yellow){% endif %};">{{ rs }}</span>
-      {% if d.release_blocker %}
-      <span style="color:var(--muted); font-size:10px;"> — {{ d.release_blocker }}</span>
-      {% endif %}
-    </span>
-    {# Publish #}
+    <span class="pill {{ 'is-good' if ps == 'COMPLETE' else ('is-critical' if ps == 'FAILED' else 'is-warn') }}"
+          style="padding:3px 10px; font-size:11px;">Made · {{ ps | plain_status }}</span>
+    <span class="pill {{ 'is-good' if rs == 'READY' else ('is-critical' if rs == 'BLOCKED' else 'is-warn') }}"
+          style="padding:3px 10px; font-size:11px;">Ready to publish · {{ rs | plain_status }}</span>
     {% set pub = d.publish_status %}
-    <span style="font-size:11px; color:var(--muted);">Publish:&nbsp;
-      <span style="font-weight:700; color:{% if pub == 'PUBLISHED' %}var(--green){% elif pub == 'READY' %}var(--blue){% elif pub == 'PARTIAL' %}var(--yellow){% else %}var(--muted){% endif %};">{{ pub }}</span>
-    </span>
-    {# Analytics #}
+    <span class="pill {{ 'is-good' if pub == 'PUBLISHED' else ('is-warn' if pub in ('PARTIAL','READY') else '') }}"
+          style="padding:3px 10px; font-size:11px;">Published · {{ pub | plain_status }}</span>
     {% set anl = d.analytics_status %}
-    <span style="font-size:11px; color:var(--muted);">Analytics:&nbsp;
-      <span style="font-weight:700; color:{% if anl == 'API_CONNECTED' %}var(--green){% elif anl == 'MANUAL_IMPORT' %}var(--blue){% else %}var(--muted){% endif %};">{{ anl }}</span>
-    </span>
+    <span class="pill {{ 'is-good' if anl == 'API_CONNECTED' else '' }}"
+          style="padding:3px 10px; font-size:11px;">Analytics · {{ anl | plain_status }}</span>
   </div>
   {# Release blocker banner #}
   {% if d.release_blocker_label and rs == 'BLOCKED' %}
@@ -612,7 +594,7 @@
     {% else %}{% set pcls = 'none' %}{% endif %}
     <span class="plat-pill plat-pill-{{ pcls }}">
       <span class="plat-dot plat-dot-{{ pcls }}"></span>
-      {{ p.platform | capitalize }}
+      {{ p.platform | friendly_platform }}
       {% if ps == 'success' %}· {{ p.status_label }}
       {% elif ps == 'failed' %}· Failed
       {% elif ps == 'pending' %}· Uploading
@@ -626,13 +608,9 @@
   <div class="ep-kpis">
     <div class="ep-kpi">
       <div class="ep-kpi-val">
-        {% if d.total_cost_usd %}
-          ${{ "%.2f" | format(d.total_cost_usd) }}
-        {% else %}
-          <span style="color:var(--muted)">—</span>
-        {% endif %}
+        {% if d.total_cost_usd %}{{ d.total_cost_usd | friendly_money }}{% else %}<span style="color:var(--muted)">—</span>{% endif %}
       </div>
-      <div class="ep-kpi-lbl">Production Cost</div>
+      <div class="ep-kpi-lbl">Cost to make</div>
     </div>
     <div class="ep-kpi">
       <div class="ep-kpi-val">
@@ -653,11 +631,11 @@
           <span style="color:var(--muted)">—</span>
         {% endif %}
       </div>
-      <div class="ep-kpi-lbl">Platforms Published</div>
+      <div class="ep-kpi-lbl">Platforms live</div>
     </div>
     <div class="ep-kpi">
       <div class="ep-kpi-val">{{ d.stage_groups | length }}</div>
-      <div class="ep-kpi-lbl">Stages</div>
+      <div class="ep-kpi-lbl">Production steps</div>
     </div>
   </div>
 
@@ -666,14 +644,14 @@
     {% for p in d.platforms %}
       {% if p.url and p.publishing_status == 'success' %}
       <a href="{{ p.url }}" target="_blank" rel="noopener" class="btn btn-approve">
-        ▶ Watch on {{ p.platform | capitalize }} ↗
+        {{ icon('play') }} Watch on {{ p.platform | friendly_platform }}
       </a>
       {% endif %}
     {% endfor %}
     {% if d.run_id %}
-    <a href="/run/{{ d.run_id }}" class="btn">View run log</a>
+    <a href="/run/{{ d.run_id }}" class="btn">Production log</a>
     {% endif %}
-    <a href="/analytics/episode/{{ d.episode_id }}" class="btn">Analytics</a>
+    <a href="/analytics/episode/{{ d.episode_id }}" class="btn">Performance</a>
     <a href="/analytics/import?episode_id={{ d.episode_id }}" class="btn">Import analytics</a>
   </div>
 
@@ -762,16 +740,16 @@
         {{ icon }}
       </span>
       <span class="stage-name">{{ g.group_name }}</span>
-      <span class="badge {{ badge_cls }}" style="font-size:10px;">{{ s }}</span>
+      <span class="badge {{ badge_cls }}" style="font-size:10px;">{{ s | plain_status }}</span>
       <div class="stage-meta">
         {% if g.duration_fmt and g.duration_fmt != '—' %}
         <span>{{ g.duration_fmt }}</span>
         {% endif %}
         {% if g.total_cost_usd and g.total_cost_usd > 0 %}
-        <span>${{ "%.4f" | format(g.total_cost_usd) }}</span>
+        <span>{{ g.total_cost_usd | friendly_money }}</span>
         {% endif %}
         {% if g.stage_count > 1 %}
-        <span>{{ g.stage_count }} sub-stages</span>
+        <span>{{ g.stage_count }} steps</span>
         {% endif %}
       </div>
     </div>
@@ -806,7 +784,7 @@
       color:{% if qa.verdict in ('APPROVED','PASS','pass') %}var(--green)
             {% elif qa.verdict in ('WARNING','warn') %}var(--yellow)
             {% else %}var(--red){% endif %}">
-      {{ qa.verdict }}
+      {{ qa.verdict | plain_status }}
     </span>
     {% if qa.check_count is defined %}
     <span style="font-size:12px; color:var(--muted)">{{ qa.check_count }} checks</span>
@@ -822,7 +800,7 @@
       {% for c in qa.checks %}
       <div style="display:flex; gap:8px; font-size:12px; padding:3px 0; border-bottom:1px solid var(--border);">
         <span style="color:{% if c.status in ('pass','PASS') %}var(--green){% elif c.status in ('warn','WARNING') %}var(--yellow){% else %}var(--red){% endif %}; flex-shrink:0;">
-          {% if c.status in ('pass','PASS') %}✓{% elif c.status in ('warn','WARNING') %}⚠{% else %}✗{% endif %}
+          {% if c.status in ('pass','PASS') %}{{ icon('check') }}{% elif c.status in ('warn','WARNING') %}{{ icon('warning') }}{% else %}{{ icon('x') }}{% endif %}
         </span>
         <span style="flex:1; min-width:0;">
           <span style="color:var(--muted); font-family:monospace; font-size:11px;">{{ c.name }}</span>

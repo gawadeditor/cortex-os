@@ -339,6 +339,13 @@ _STATUS_WORDS: dict[str, str] = {
     "succeeded": "Done",
     "submitting": "Sending to the platform",
     "not_planned": "Not scheduled",
+    "ready": "Ready",
+    "not_ready": "Not ready",
+    "api_connected": "Connected",
+    "manual_import": "Imported by hand",
+    "no_data": "No data yet",
+    "in_progress": "In production",
+    "in_production": "In production",
 }
 
 

@@ -631,7 +631,8 @@ class TestFourWayStateInHeader:
              patch.object(server, "get_episode_detail", return_value=None):
             resp = c.get(f"/episode/{ep_id}")
         body = resp.data.decode()
-        assert "COMPLETE" in body or "PARTIAL" in body
+        # header renders the plain-language production pill (2026-09-03)
+        assert "Made ·" in body
 
     def test_episode_header_shows_release_status(self, client):
         c, tmp_path = client
@@ -644,7 +645,7 @@ class TestFourWayStateInHeader:
              patch.object(server, "get_episode_detail", return_value=None):
             resp = c.get(f"/episode/{ep_id}")
         body = resp.data.decode()
-        assert "Release:" in body or "READY" in body or "BLOCKED" in body
+        assert "Ready to publish ·" in body
 
     def test_ep003_like_header_shows_tig_blocker(self, client):
         c, tmp_path = client
@@ -666,5 +667,6 @@ class TestFourWayStateInHeader:
              patch.object(server, "get_episode_detail", return_value=None):
             resp = c.get(f"/episode/{ep_id}")
         body = resp.data.decode()
-        assert "THUMBNAIL_TIG_BLOCKED" in body or "thumbnail" in body.lower()
-        assert "BLOCKED" in body
+        assert "thumbnail" in body.lower()
+        # release is held — plain-language pill + blocker banner
+        assert "Held" in body or "blocked" in body.lower()

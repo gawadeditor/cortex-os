@@ -349,13 +349,11 @@
     <div style="flex:1; min-width:0">
       <div class="exec-channel-name">{{ ch_name }}</div>
       <div class="exec-meta">
-        <span>Status: <strong>{{ (state.factory_status or "active") | upper }}</strong></span>
+        <span>Status: <strong>{{ (state.factory_status or "active") | plain_status }}</strong></span>
         {% if cp and cp.content_niche %}
         <span>{{ cp.content_niche }}</span>
         {% endif %}
-        <span>Updated:
-          {% if state.checked_at %}{{ state.checked_at[:10] }}{% else %}—{% endif %}
-        </span>
+        <span>Checked {{ state.checked_at | rel_time if state.checked_at else "—" }}</span>
       </div>
     </div>
     {% if report %}
@@ -448,7 +446,7 @@
       </div>
       {% if cstate == "connected" %}
         <div class="plat-connected">Connected</div>
-        <div class="plat-data">{{ p.real_count }} analytics record{{ '' if p.real_count == 1 else 's' }}</div>
+        <div class="plat-data">{{ p.real_count }} data point{{ '' if p.real_count == 1 else 's' }} synced</div>
       {% elif cstate == "connected_no_data" %}
         <div class="plat-connected">Connected</div>
         {% if pkey in ('facebook', 'instagram', 'tiktok') %}
@@ -537,37 +535,32 @@
     <table>
       <thead>
         <tr>
-          <th>Episode</th><th>Date</th><th>Status</th>
-          <th>Views</th><th>CTR</th><th>Retention</th><th>Platform ID</th>
+          <th>Episode</th><th>Published</th><th>Status</th>
+          <th style="text-align:right;">Views</th><th style="text-align:right;">Click rate</th>
+          <th style="text-align:right;">Watch-through</th><th></th>
         </tr>
       </thead>
       <tbody>
         {% for ep in recent %}
         <tr>
-          <td>
+          <td style="max-width:320px;">
             {% if ep.episode_id %}
-            <a href="/episode/{{ ep.episode_id }}" style="color:var(--text);">{{ ep.title }}</a>
+            <a href="/episode/{{ ep.episode_id }}" style="color:var(--text); font-weight:600;">
+              <span class="cell-title">{{ ep.episode_id | episode_name }}</span>
+            </a>
             {% else %}
-            {{ ep.title }}
+            <span class="cell-title">{{ ep.title }}</span>
             {% endif %}
           </td>
           <td style="color:var(--muted); white-space:nowrap">
-            {{ ep.published_at[:10] if ep.published_at else "—" }}
+            {{ ep.published_at | friendly_date if ep.published_at else "not yet" }}
           </td>
-          <td><span class="badge badge-{{ ep.status or 'unknown' }}">{{ ep.status or "—" }}</span></td>
-          <td>{% if ep.views %}{{ "{:,}".format(ep.views) }}{% else %}<span class="dash-val">—</span>{% endif %}</td>
-          <td>{% if ep.ctr %}{{ ep.ctr }}%{% else %}<span class="dash-val">—</span>{% endif %}</td>
-          <td>{% if ep.retention %}{{ ep.retention }}%{% else %}<span class="dash-val">—</span>{% endif %}</td>
-          <td>
-            {% if ep.url %}
-              <a href="{{ ep.url }}" target="_blank" rel="noopener" style="font-size:11px">
-                {{ ep.platform_video_id or "link" }}
-              </a>
-            {% elif ep.platform_video_id %}
-              <span style="font-size:11px; color:var(--muted)">{{ ep.platform_video_id }}</span>
-            {% else %}
-              <span class="dash-val">—</span>
-            {% endif %}
+          <td><span class="badge badge-{{ ep.status or 'unknown' }}">{{ ep.status | plain_status }}</span></td>
+          <td style="text-align:right; font-variant-numeric:tabular-nums;">{% if ep.views %}{{ "{:,}".format(ep.views) }}{% else %}<span class="dash-val">—</span>{% endif %}</td>
+          <td style="text-align:right; font-variant-numeric:tabular-nums;">{% if ep.ctr %}{{ ep.ctr }}%{% else %}<span class="dash-val">—</span>{% endif %}</td>
+          <td style="text-align:right; font-variant-numeric:tabular-nums;">{% if ep.retention %}{{ ep.retention }}%{% else %}<span class="dash-val">—</span>{% endif %}</td>
+          <td style="text-align:right;">
+            {% if ep.url %}<a href="{{ ep.url }}" target="_blank" rel="noopener" class="btn btn-sm">Watch</a>{% endif %}
           </td>
         </tr>
         {% endfor %}
@@ -839,15 +832,17 @@
          onerror="this.style.display='none'"
          loading="lazy">
     <div class="ep-row-title">
-      <a href="/episode/{{ ep.episode_id }}">{{ ep.title or ep.topic or ep.episode_id }}</a>
-      <div class="ep-row-meta">{{ ep.episode_id }}
-        {% if ep.created_at %} · {{ ep.created_at[:10] }}{% endif %}
-        {% if ep.total_cost_usd and ep.total_cost_usd > 0 %} · ${{ "%.2f"|format(ep.total_cost_usd) }}{% endif %}
-        {% if ep.qa_verdict %} · QA: <span class="{% if ep.qa_verdict == 'APPROVED' or ep.qa_verdict == 'WARNING' %}ok{% elif ep.qa_verdict == 'REJECTED' %}err{% else %}muted{% endif %}">{{ ep.qa_verdict }}</span>{% endif %}
+      <a href="/episode/{{ ep.episode_id }}">{{ ep.episode_id | episode_name }}</a>
+      <div class="ep-row-meta">
+        {% if ep.created_at %}{{ ep.created_at | rel_time }}{% endif %}
+        {% if ep.total_cost_usd and ep.total_cost_usd > 0 %} · {{ ep.total_cost_usd | friendly_money }} to make{% endif %}
+        {% if ep.qa_verdict %} · quality
+          <span class="{% if ep.qa_verdict in ('APPROVED','WARNING') %}ok{% elif ep.qa_verdict == 'REJECTED' %}err{% else %}muted{% endif %}">
+            {{ ep.qa_verdict | plain_status }}</span>{% endif %}
       </div>
     </div>
     {% set s = ep.run_status or ep.status or 'unknown' %}
-    <span class="badge badge-{{ s }}" style="font-size:10px; flex-shrink:0;">{{ s }}</span>
+    <span class="badge badge-{{ s }}" style="font-size:10px; flex-shrink:0;">{{ s | plain_status }}</span>
   </div>
   {% endfor %}
 </div>
@@ -865,12 +860,8 @@
 
 <footer style="margin-top:calc(var(--gap)*2); padding-top:var(--gap);
                border-top:1px solid var(--border); font-size:11px;
-               color:var(--muted); display:flex; gap:16px; flex-wrap:wrap;">
-  <a href="/api/state" style="color:var(--muted)">/api/state</a>
-  <a href="/api/platform-connections" style="color:var(--muted)">/api/platform-connections</a>
-  <a href="/channel-profile" style="color:var(--muted)">Profile</a>
-  {% if report %}<span>Readiness: {{ report.readiness_score }}%</span>{% endif %}
-  {% if state %}<span>Updated: {{ state.checked_at[:19].replace("T"," ") if state.checked_at else "—" }}</span>{% endif %}
+               color:var(--faint); display:flex; gap:16px; flex-wrap:wrap;">
+  {% if state and state.checked_at %}<span>Last checked {{ state.checked_at | rel_time }}</span>{% endif %}
 </footer>
 
 <script>

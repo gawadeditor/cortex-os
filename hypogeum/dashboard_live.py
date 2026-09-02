@@ -11,6 +11,7 @@ Public API:
     get_live_metrics(db_path)             -> dict
     get_recent_failures(db_path, limit)   -> dict  {runs, stages}
     tail_log(episode_id, n, log_path)     -> list[dict]
+    get_factory_pulse(db_path, log_path)  -> dict   what the factory is doing right now
 """
 
 from __future__ import annotations
@@ -366,3 +367,156 @@ def tail_log(
         return entries[-n:]
     except Exception:
         return []
+
+
+# ===========================================================================
+# Factory pulse — "what is the factory doing right now"
+# ===========================================================================
+
+_WORKER_ALIVE_SECONDS = 180   # a heartbeat older than this = worker not running
+
+# log agent/event -> short human phrase for the "current activity" line
+_ACTIVITY_PHRASES = {
+    "topic_ideator":     "discovering new topics",
+    "source_verifier":   "fact-checking topic candidates",
+    "discovery_director": "running a discovery cycle",
+    "executive_producer": "scoring a topic",
+    "research_director": "researching the episode",
+    "narrative_architect": "shaping the story",
+    "script_engine":     "writing the script",
+    "visual_package_director": "planning & generating video",
+    "scene_planner":     "planning scenes",
+    "source_enhancement": "upscaling clips",
+    "clip_repair_agent": "regenerating missing clips",
+    "audio_agent":       "recording narration & music",
+    "assembly_agent":    "assembling the final cut",
+    "thumbnail_director": "designing the thumbnail",
+    "publishing_agent":  "publishing",
+    "zernio_channel_release_trigger": "checking episodes for release",
+    "canonical_metadata_agent": "writing titles & descriptions",
+    "archive_agent":     "archiving a finished episode",
+}
+
+
+def get_factory_pulse(
+    db_path:  Optional[Path] = None,
+    log_path: Optional[Path] = None,
+) -> dict:
+    """One call the dashboard uses to show what's happening right now:
+    worker liveness, the current activity, in-flight production runs,
+    recent discovery cycles, and what's queued. Pure read, never raises."""
+    now = datetime.now(timezone.utc)
+    out: dict = {
+        "checked_at": now.isoformat(),
+        "worker": {"status": "unknown", "alive": False, "heartbeat_age_s": None, "paused": False},
+        "activity": None,          # {phrase, agent, event, channel_id, episode_id, at, age_s}
+        "active_runs": [],
+        "discovery": [],           # recent cycles
+        "queued": {"count": 0, "items": []},
+        "in_production": {"count": 0, "items": []},
+    }
+
+    # ── worker heartbeat / control ──────────────────────────────────────
+    try:
+        conn = get_connection(_db(db_path))
+        try:
+            wc = {r["key"]: r["value"] for r in conn.execute(
+                "SELECT key, value FROM worker_control"
+            ).fetchall()}
+            hb = wc.get("worker_heartbeat_at")
+            age = _elapsed_s(hb)
+            out["worker"] = {
+                "status": wc.get("worker_status") or "unknown",
+                "alive": bool(age is not None and age <= _WORKER_ALIVE_SECONDS),
+                "heartbeat_age_s": round(age) if age is not None else None,
+                "paused": str(wc.get("queue_paused", "0")) == "1",
+                "stop_requested": str(wc.get("stop_requested", "0")) == "1",
+            }
+
+            # ── recent discovery cycles (last 45 min) ───────────────────
+            try:
+                rows = conn.execute("""
+                    SELECT cycle_id, channel_id, status, selected_canonical_subject,
+                           created_at, completed_at
+                    FROM discovery_cycles
+                    ORDER BY created_at DESC LIMIT 6
+                """).fetchall()
+                for r in rows:
+                    started = _elapsed_s(r["created_at"])
+                    if started is not None and started > 2700:
+                        continue
+                    out["discovery"].append({
+                        "cycle_id": r["cycle_id"],
+                        "channel_id": r["channel_id"],
+                        "status": r["status"],
+                        "subject": (r["selected_canonical_subject"] or "").replace("_", " "),
+                        "age_s": round(started) if started is not None else None,
+                        "running": r["status"] not in ("complete", "failed", "error"),
+                    })
+            except Exception:
+                pass
+
+            # ── queued / in-production topics ───────────────────────────
+            try:
+                for state, key in (("queued", "queued"), ("claimed", "in_production")):
+                    rows = conn.execute("""
+                        SELECT topic_id, channel_id, topic_text, discovery_score
+                        FROM episode_topics WHERE status = ?
+                        ORDER BY priority ASC, created_at ASC LIMIT 20
+                    """, [state]).fetchall()
+                    out[key] = {
+                        "count": len(rows),
+                        "items": [{
+                            "channel_id": r["channel_id"],
+                            "topic": r["topic_text"],
+                            "score": r["discovery_score"],
+                        } for r in rows[:5]],
+                    }
+            except Exception:
+                pass
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+    # ── in-flight production runs (reuse the existing query) ────────────
+    try:
+        out["active_runs"] = get_active_runs(db_path)
+        if out["active_runs"] and not out["in_production"]["items"]:
+            out["in_production"] = {
+                "count": len(out["active_runs"]),
+                "items": [{
+                    "channel_id": None,
+                    "topic": r.get("episode_title") or r.get("episode_topic") or r.get("episode_id"),
+                    "score": None,
+                } for r in out["active_runs"][:5]],
+            }
+    except Exception:
+        pass
+
+    # ── current activity, inferred from the last meaningful log line ────
+    try:
+        recent = tail_log(n=60, log_path=log_path)
+        for entry in reversed(recent):
+            agent = entry.get("agent") or ""
+            phrase = _ACTIVITY_PHRASES.get(agent)
+            if not phrase:
+                continue
+            at = entry.get("timestamp")
+            age = _elapsed_s(at)
+            if age is not None and age > 600:   # nothing in 10 min = quiet
+                break
+            out["activity"] = {
+                "phrase": phrase,
+                "agent": agent,
+                "event": entry.get("event"),
+                "channel_id": entry.get("channel_id"),
+                "episode_id": entry.get("field_episode_id") or entry.get("episode_id"),
+                "at": at,
+                "age_s": round(age) if age is not None else None,
+            }
+            break
+    except Exception:
+        pass
+
+    return out

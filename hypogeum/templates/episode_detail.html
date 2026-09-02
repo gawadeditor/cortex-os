@@ -470,6 +470,43 @@
     }
     .brd-audit-row:last-of-type { border-bottom: none; }
     .brd-rec-list { display: flex; flex-direction: column; gap: 8px; }
+
+    /* ── In-dashboard episode player ─────────────────────────────────── */
+    .ep-player {
+      background: #000;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+      margin-bottom: var(--gap);
+      box-shadow: var(--shadow-lg);
+    }
+    .ep-player-stage {
+      display: flex; align-items: center; justify-content: center;
+      background:
+        radial-gradient(120% 90% at 50% 0%, rgba(240,168,56,.06), transparent 60%),
+        #000;
+    }
+    .ep-player-stage video {
+      display: block;
+      width: 100%;
+      max-height: 68vh;
+      background: #000;
+    }
+    .ep-player-bar {
+      display: flex; align-items: center; gap: var(--space-md);
+      padding: 10px var(--space-md);
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      font-size: 12px;
+    }
+    .ep-player-bar .epb-meta { color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; }
+    .ep-player-bar .epb-meta b { color: var(--text); font-weight: 600; }
+    .ep-player-bar .epb-actions { margin-left: auto; display: flex; gap: 8px; }
+    .ep-player-empty {
+      padding: 40px var(--space-lg); text-align: center; color: var(--muted);
+      background: var(--surface); border: 1px dashed var(--border-strong);
+      border-radius: var(--radius-lg); margin-bottom: var(--gap); font-size: 13px;
+    }
   </style>
 </head>
 <body>
@@ -641,6 +678,40 @@
   </div>
 
 </div>{# /ep-header #}
+
+{# ════════════════════════════════════════════════════════════════
+   EPISODE PLAYER — watch the finished cut without leaving the dashboard
+════════════════════════════════════════════════════════════════ #}
+{% set _da = d.disk_artifacts or {} %}
+{% if _da.get('has_render') %}
+<div class="ep-player">
+  <div class="ep-player-stage">
+    <video
+      controls
+      preload="metadata"
+      playsinline
+      {% if _da.get('has_thumbnail') %}poster="/episode/{{ d.episode_id }}/thumbnail"{% endif %}
+      src="/episode/{{ d.episode_id }}/render">
+      Your browser can't play this video.
+      <a href="/episode/{{ d.episode_id }}/render?download=1">Download the MP4</a> instead.
+    </video>
+  </div>
+  <div class="ep-player-bar">
+    <div class="epb-meta">
+      {% if d.run_duration_fmt %}<span>Runtime <b>{{ d.run_duration_fmt }}</b></span>{% endif %}
+      {% if _da.get('render_size_mb') %}<span><b>{{ _da.render_size_mb }} MB</b></span>{% endif %}
+      {% if d.channel_name %}<span>{{ d.channel_name }}</span>{% endif %}
+    </div>
+    <div class="epb-actions">
+      <a href="/episode/{{ d.episode_id }}/render?download=1" class="btn" style="font-size:11px; padding:3px 10px;">{{ icon("download") }} MP4</a>
+    </div>
+  </div>
+</div>
+{% elif d.run_id and d.run_status not in ('complete', 'completed') %}
+<div class="ep-player-empty">
+  This episode is still in production — the video appears here once assembly finishes.
+</div>
+{% endif %}
 
 {# ════════════════════════════════════════════════════════════════
    TAB BAR — server-rendered via ?tab= query param

@@ -153,6 +153,7 @@ from hypogeum.dashboard_live import (
     get_queue_snapshot,
     get_live_metrics,
     get_recent_failures,
+    get_factory_pulse,
     tail_log,
 )
 from hypogeum.dashboard_runs import (
@@ -6288,12 +6289,23 @@ _MIME = {
 }
 
 
-def _send_asset(path: Path | None, download_name: str | None = None):
-    """Send a file or 404."""
+def _send_asset(path: Path | None, download_name: str | None = None, *, inline: bool = False):
+    """Send a file or 404.
+
+    inline=True streams for in-browser playback: Range requests are honoured
+    (conditional=True) so a <video>/<audio> element can seek, and the file is
+    shown inline rather than offered as a download. download_name is still
+    used as the suggested filename if the viewer chooses to save.
+    """
     from flask import send_file
     if path is None:
         from flask import abort
         abort(404)
+    if inline:
+        kwargs = {"as_attachment": False, "conditional": True}
+        if download_name:
+            kwargs["download_name"] = download_name
+        return send_file(str(path), **kwargs)
     kwargs = {"as_attachment": bool(download_name)}
     if download_name:
         kwargs["download_name"] = download_name
@@ -6335,7 +6347,12 @@ def episode_thumbnail_candidate(episode_id: str, rank: int):
 
 @app.route("/episode/<episode_id>/render")
 def episode_render(episode_id: str):
-    """Serve the rendered main episode MP4."""
+    """Serve the rendered main episode MP4.
+
+    Streams inline for the in-dashboard <video> player by default (Range
+    requests honoured so the timeline can be scrubbed). Add ?download=1 to
+    get it as a file instead.
+    """
     path = safe_episode_asset_path(
         episode_id, "artifact", f"main_{episode_id}.mp4",
         assets_root=_ASSETS_ROOT_PATH,
@@ -6350,7 +6367,8 @@ def episode_render(episode_id: str):
             abort(404)
         if candidate.exists() and candidate.stat().st_size > 0:
             path = candidate
-    return _send_asset(path, download_name=f"{episode_id}_main.mp4")
+    _download = request.args.get("download", "0") == "1"
+    return _send_asset(path, download_name=f"{episode_id}_main.mp4", inline=not _download)
 
 
 @app.route("/episode/<episode_id>/narration")
@@ -6563,11 +6581,16 @@ def episodes_page():
     from hypogeum.dashboard_api import get_channel_summaries
     channels   = get_channel_summaries(db_path=_db_path())
     preflight  = get_preflight_status(db_path=_db_path())
+    try:
+        pulse = get_factory_pulse(db_path=_db_path())
+    except Exception:
+        pulse = None
     return render_template("episodes.html",
                            episodes=episodes,
                            queue_topics=queue_topics,
                            claimed_topics=claimed_topics,
                            channels=channels, preflight=preflight,
+                           pulse=pulse,
                            channel_filter=channel_id,
                            show_test=show_test,
                            test_count=test_count)
@@ -6622,6 +6645,14 @@ def api_live():
         "metrics":       get_live_metrics(db_path=_db_path()),
         "failures":      get_recent_failures(db_path=_db_path(), limit=5),
     })
+
+
+@app.route("/api/factory/pulse", methods=["GET"])
+def api_factory_pulse():
+    """What the factory is doing right now — worker liveness, current
+    activity, in-flight runs, recent discovery, queue. Polled by the
+    Factory Pulse strip. Read-only."""
+    return jsonify(get_factory_pulse(db_path=_db_path()))
 
 
 @app.route("/api/run/<run_id>/live", methods=["GET"])

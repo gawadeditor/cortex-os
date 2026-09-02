@@ -57,6 +57,44 @@
 
     details > summary { list-style:none; cursor:pointer; }
     details > summary::-webkit-details-marker { display:none; }
+
+    /* ── Factory Pulse strip ─────────────────────────────────────────── */
+    .pulse {
+      display:flex; align-items:center; gap:var(--space-md); flex-wrap:wrap;
+      padding:10px 16px; margin-bottom:var(--gap);
+      background:var(--surface); border:1px solid var(--border);
+      border-left:3px solid var(--border-strong);
+      border-radius:var(--radius); font-size:13px;
+    }
+    .pulse.is-live   { border-left-color:var(--good); }
+    .pulse.is-paused { border-left-color:var(--warn); }
+    .pulse.is-down   { border-left-color:var(--critical); }
+    .pulse-dot {
+      width:9px; height:9px; border-radius:50%; flex-shrink:0;
+      background:var(--faint);
+    }
+    .pulse.is-live .pulse-dot {
+      background:var(--good);
+      box-shadow:0 0 0 0 rgba(78,194,111,.5);
+      animation:pulse-ring 2.4s var(--ease) infinite;
+    }
+    .pulse.is-paused .pulse-dot { background:var(--warn); }
+    .pulse.is-down   .pulse-dot { background:var(--critical); }
+    @keyframes pulse-ring {
+      0%   { box-shadow:0 0 0 0 rgba(78,194,111,.45); }
+      70%  { box-shadow:0 0 0 7px rgba(78,194,111,0); }
+      100% { box-shadow:0 0 0 0 rgba(78,194,111,0); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .pulse .pulse-dot { animation:none; }
+    }
+    .pulse-status { font-weight:600; color:var(--text); }
+    .pulse-activity { color:var(--muted); }
+    .pulse-activity b { color:var(--text); font-weight:600; }
+    .pulse-counts { margin-left:auto; display:flex; gap:14px; color:var(--muted); font-size:12px; }
+    .pulse-counts b { color:var(--text); font-weight:700; font-family:var(--font-mono); }
+    .pulse-counts a { color:inherit; text-decoration:none; }
+    .pulse-counts a:hover b { color:var(--accent); }
   </style>
 </head>
 <body>
@@ -78,6 +116,67 @@
   </a>
 </div>
 
+{# ══════════════════════════════════════════════
+   FACTORY PULSE — what the factory is doing right now
+   Server-rendered from `pulse`, then refreshed by JS every 8s.
+   ══════════════════════════════════════════════ #}
+{% if pulse %}
+{% set _w = pulse.worker %}
+{% set _cls = 'is-live' if (_w.alive and not _w.paused) else ('is-paused' if _w.paused else 'is-down') %}
+<div id="pulse" class="pulse {{ _cls }}"
+     data-live-url="/api/factory/pulse"
+     role="status" aria-live="polite">
+  <span class="pulse-dot" aria-hidden="true"></span>
+  <span class="pulse-status" id="pulse-status">
+    {% if _w.paused %}Worker paused
+    {% elif _w.alive %}Worker running
+    {% else %}Worker not running{% endif %}
+  </span>
+  <span class="pulse-activity" id="pulse-activity">
+    {% if pulse.activity %}— <b>{{ pulse.activity.phrase }}</b>{% if pulse.activity.channel_id %} · {{ pulse.activity.channel_id }}{% endif %}
+    {% elif _w.alive %}— idle, waiting for the next scheduled slot{% endif %}
+  </span>
+  <span class="pulse-counts" id="pulse-counts">
+    <span title="discovery cycles in the last 45 min"><b>{{ pulse.discovery|length }}</b> discovering</span>
+    <a href="#queue" title="topics queued to produce"><b>{{ pulse.queued.count }}</b> queued</a>
+    <a href="/runs?status=running" title="episodes in production now"><b>{{ (pulse.in_production.count or pulse.active_runs|length) }}</b> in production</a>
+  </span>
+</div>
+<script>
+(function () {
+  var el = document.getElementById('pulse');
+  if (!el) return;
+  function fmt(a) {
+    if (!a || !a.phrase) return '';
+    return '— <b>' + a.phrase + '</b>' + (a.channel_id ? ' · ' + a.channel_id : '');
+  }
+  function apply(p) {
+    var w = p.worker || {};
+    el.classList.remove('is-live', 'is-paused', 'is-down');
+    el.classList.add(w.paused ? 'is-paused' : (w.alive ? 'is-live' : 'is-down'));
+    document.getElementById('pulse-status').textContent =
+      w.paused ? 'Worker paused' : (w.alive ? 'Worker running' : 'Worker not running');
+    var act = document.getElementById('pulse-activity');
+    if (p.activity && p.activity.phrase) act.innerHTML = fmt(p.activity);
+    else if (w.alive) act.textContent = '— idle, waiting for the next scheduled slot';
+    else act.textContent = '';
+    var inProd = (p.in_production && p.in_production.count) || (p.active_runs || []).length;
+    document.getElementById('pulse-counts').innerHTML =
+      '<span title="discovery cycles in the last 45 min"><b>' + (p.discovery || []).length + '</b> discovering</span>' +
+      '<a href="#queue" title="topics queued to produce"><b>' + ((p.queued && p.queued.count) || 0) + '</b> queued</a>' +
+      '<a href="/runs?status=running" title="episodes in production now"><b>' + inProd + '</b> in production</a>';
+  }
+  function tick() {
+    fetch(el.dataset.liveUrl, { headers: { 'Accept': 'application/json' } })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (p) { if (p) apply(p); })
+      .catch(function () {});
+  }
+  setInterval(tick, 8000);
+})();
+</script>
+{% endif %}
+
 {# ── Flash ── #}
 {% set eq = request.args.get('enqueue') %}
 {% if eq == 'ok' %}
@@ -91,7 +190,7 @@
 {# ══════════════════════════════════════════════
    1. PRODUCTION QUEUE — primary section
    ══════════════════════════════════════════════ #}
-<div class="card" style="padding:0; margin-bottom:var(--gap);">
+<div class="card" id="queue" style="padding:0; margin-bottom:var(--gap); scroll-margin-top:16px;">
 
   {# In-production (claimed) #}
   {% if claimed_topics %}

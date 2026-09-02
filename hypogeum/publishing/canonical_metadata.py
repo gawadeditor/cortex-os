@@ -215,8 +215,14 @@ def validate_canonical_platform_metadata(
     episode_dir: Path,
     episode_id: str,
     contract=None,  # hypogeum.publishing.zernio_platform_contracts.PlatformContract, optional
+    short_native: bool = False,
 ) -> List[str]:
     """
+    `short_native=True`: this channel's single deliverable IS a 9:16 Short,
+    even though it is classified `main_episode`. YouTube Shorts have no
+    custom-thumbnail slot and no chapter track, so the main-episode
+    thumbnail_ref / >=3-chapters requirements below are not applied to it.
+
     Full fail-closed validation. Every failure string is self-describing
     (used verbatim as the readiness reason). Never invents a value to
     make a check pass. `class_entry` is the channel's OWN
@@ -409,7 +415,7 @@ def validate_canonical_platform_metadata(
     # default"). hypogeum.publishing.readiness.check_publish_readiness()'s
     # own F_THUMBNAIL check is the actual, separate gate for whether a
     # main episode's thumbnail requirement is satisfied.
-    if deliverable_class == "main_episode" and not metadata.thumbnail_ref:
+    if deliverable_class == "main_episode" and not short_native and not metadata.thumbnail_ref:
         failures.append("thumbnail_ref is absent")
 
     # -- AI/synthetic-media disclosure: required for every YouTube
@@ -424,7 +430,7 @@ def validate_canonical_platform_metadata(
     # -- chapters: only required for a main_episode with a documented
     # title_field (i.e. YouTube today) -- "where applicable" per the
     # canonical contract's own field list.
-    if deliverable_class == "main_episode" and platform == "youtube":
+    if deliverable_class == "main_episode" and platform == "youtube" and not short_native:
         if len(metadata.chapters) < 3:
             failures.append(f"chapters has {len(metadata.chapters)} entries -- a main episode requires at least 3")
         else:

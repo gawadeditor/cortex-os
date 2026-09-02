@@ -160,7 +160,7 @@ def _existing_intent_status(db_path, channel_id: str, episode_id: str, deliverab
 def _check_canonical_platform_metadata(
     *, final_render_package: dict, deliverable_id: str, platform: str,
     deliverable_class: str, class_entry: dict, final_duration_seconds: Optional[float],
-    episode_dir: Path, episode_id: str, contract,
+    episode_dir: Path, episode_id: str, contract, short_native: bool = False,
 ) -> List[str]:
     """
     Thin wrapper delegating to hypogeum.publishing.canonical_metadata --
@@ -182,6 +182,7 @@ def _check_canonical_platform_metadata(
         metadata, deliverable_class=deliverable_class, platform=platform,
         class_entry=class_entry, final_duration_seconds=final_duration_seconds,
         episode_dir=episode_dir, episode_id=episode_id, contract=contract,
+        short_native=short_native,
     )
 
 
@@ -220,6 +221,16 @@ def check_cross_platform_readiness(
             reason=f"no channel_operations_profile configured for channel_id={channel_id!r}",
         ))
         return result
+
+    # Short-native channel: videos_per_week == 0, shorts_per_week >= 1 — the
+    # single `main_episode` deliverable IS a 9:16 vertical Short. Same
+    # derivation the rest of the factory uses (run_worker, scene_planner).
+    _cad = (getattr(profile, "production_cadence", None) or {})
+    _short_native = (
+        _cad.get("videos_per_week") == 0
+        and isinstance(_cad.get("shorts_per_week"), int)
+        and _cad.get("shorts_per_week") >= 1
+    )
 
     policy = profile.platform_deliverable_policy or {}
     if not policy:
@@ -335,8 +346,19 @@ def check_cross_platform_readiness(
                             )
 
                     try:
-                        captions = resolve_canonical_captions(final_render_package, [deliverable_id])
-                        caption = captions[deliverable_id]
+                        if _short_native and deliverable_class == "main_episode":
+                            # A short-native main_episode is a Short with no
+                            # separate caption asset — its visible text on
+                            # TikTok/IG/FB IS the resolved episode description
+                            # (already validated by A_METADATA). Don't demand
+                            # a shorts_captions entry that will never exist.
+                            caption = (
+                                resolved_metadata.description
+                                if resolved_metadata is not None else ""
+                            ) or ""
+                        else:
+                            captions = resolve_canonical_captions(final_render_package, [deliverable_id])
+                            caption = captions[deliverable_id]
                         evidence["caption_length"] = len(caption)
                         if contract.caption_max_chars is not None and len(caption) > contract.caption_max_chars:
                             failures.append(
@@ -389,6 +411,7 @@ def check_cross_platform_readiness(
                 platform=platform, deliverable_class=deliverable_class, class_entry=class_entry,
                 final_duration_seconds=final_duration if (final_duration or 0) > 0 else None,
                 episode_dir=episode_dir, episode_id=episode_id, contract=contract,
+                short_native=_short_native,
             ))
 
             existing_status = _existing_intent_status(db_path, channel_id, episode_id, deliverable_id, platform)

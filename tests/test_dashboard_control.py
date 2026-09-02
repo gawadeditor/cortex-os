@@ -837,7 +837,7 @@ class TestFlaskHtmlRoutes:
         client, ids = flask_client
         r = client.get(f"/channel/{ids['channel_id']}")
         text = r.get_data(as_text=True)
-        assert "Models" in text
+        assert "Creative tools" in text
 
     def test_channel_detail_shows_publishing(self, flask_client):
         client, ids = flask_client
@@ -849,9 +849,9 @@ class TestFlaskHtmlRoutes:
         client, ids = flask_client
         r = client.get(f"/channel/{ids['channel_id']}")
         text = r.get_data(as_text=True)
-        assert "Edit channel" in text
+        assert "/edit" in text          # edit channel
         assert "Edit brand" in text
-        assert "Edit models" in text
+        assert "Edit tools" in text
         assert "Edit publishing" in text
 
     def test_channel_detail_has_brand_edit_href(self, flask_client):

@@ -6,11 +6,7 @@
   <title>{{ channel.name }} — Channel</title>
   {% include '_base_style.html' %}
   <style>
-    .ch-head { display: flex; align-items: flex-start; gap: 14px; flex-wrap: wrap; margin-bottom: 22px; }
-    .ch-head h1 { font-size: 25px; font-weight: 700; letter-spacing: -.02em; }
-    .ch-head .lede { margin-top: 6px; }
-    .ch-head .btn-row { margin-left: auto; margin-top: 0; }
-    .fr { display: flex; justify-content: space-between; gap: 16px; padding: 7px 0;
+    .fr { display: flex; justify-content: space-between; gap: 16px; padding: 8px 0;
           border-bottom: 1px solid var(--hairline); font-size: 13px; }
     .fr:last-child { border-bottom: none; }
     .fr-k { color: var(--faint); flex-shrink: 0; }
@@ -18,150 +14,153 @@
     .fr-v.mono { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
     .fr-v.miss { color: var(--faint); font-style: italic; }
     .rd-fix { color: var(--accent); }
-    .rec { padding: 11px 0; border-bottom: 1px solid var(--hairline); }
-    .rec:last-child { border-bottom: none; }
   </style>
 </head>
 <body>
 {% include "_nav.html" %}
+{% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
 
 <div class="container">
   <div class="breadcrumb">
     <a href="/channels">Channels</a><span class="breadcrumb-sep">›</span><span>{{ channel.name }}</span>
   </div>
 
-  <div class="ch-head">
-    <div>
-      <span class="eyebrow">Channel</span>
-      <h1>{{ channel.name }}
-        <span class="badge badge-{{ 'active' if channel.status == 'active' else 'partial' }}"
-              style="vertical-align:3px; font-size:10px;">{{ channel.status }}</span>
-      </h1>
-      {% if channel.description %}<p class="lede">{{ channel.description }}</p>{% endif %}
-    </div>
-    <div class="btn-row">
-      <a href="/channel/{{ channel.channel_id|e }}/operations" class="btn btn-primary">Edit production plan</a>
-      <a href="/channel/{{ channel.channel_id|e }}/edit" class="btn">Edit channel</a>
-    </div>
-  </div>
+  {% set _rd = readiness.counts if readiness else none %}
+  {% call hero(
+       eyebrow='Channel',
+       title=channel.name,
+       lede=channel.description or 'This channel produces and publishes on its own daily schedule.',
+       pill=(channel.status | plain_status),
+       pill_class='is-good' if channel.status == 'active' else 'is-warn') %}
+    <a href="/channel/{{ channel.channel_id|e }}/operations" class="btn btn-primary">Production plan</a>
+    <a href="/channel/{{ channel.channel_id|e }}/publishing?scope={{ channel.channel_id|e }}" class="btn">Connections</a>
+    <a href="/channel/{{ channel.channel_id|e }}/edit" class="btn">Edit</a>
+  {% endcall %}
 
   {% if request.args.get('ops_saved') %}
-  <div class="flash flash-ok">✓ Production plan saved — {{ request.args.get('ops_saved') }}</div>
+  <div class="flash flash-ok">{{ icon('check') }} Production plan saved.</div>
   {% endif %}
 
-  {% macro big(n) -%}
-  {%- if n is none -%}—
-  {%- elif n >= 1000000 -%}{{ '%.1f'|format(n/1000000) }}M
-  {%- elif n >= 1000 -%}{{ '%.1f'|format(n/1000) }}K
-  {%- else -%}{{ n|int }}{%- endif -%}
-  {%- endmacro %}
   {% if rollup %}
-  <div class="kpi-strip" style="grid-template-columns:repeat(4,1fr);">
-    <div class="kpi-card">
-      <div class="kpi-val" {% if rollup.views is not none %}data-countup="{{ rollup.views }}"{% endif %}>{{ big(rollup.views) }}</div>
-      <div class="kpi-lbl" style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--faint);margin-top:6px;">Views</div>
+  <div class="stat-grid">
+    <div class="stat-card">
+      <div class="stat-lbl">{{ icon('live') }} Views</div>
+      <div class="stat-val {% if rollup.views is none %}is-muted{% endif %}">
+        {% if rollup.views is not none %}{{ "{:,}".format(rollup.views|int) }}{% else %}—{% endif %}
+      </div>
+      <div class="stat-note">all-time, across every platform</div>
     </div>
-    <div class="kpi-card">
-      <div class="kpi-val">{% if rollup.watch_time_s is not none %}{{ big((rollup.watch_time_s/3600)|round(1)) }}h{% else %}—{% endif %}</div>
-      <div class="kpi-lbl" style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--faint);margin-top:6px;">Watch time</div>
-    </div>
-    <div class="kpi-card">
-      <div class="kpi-val" data-countup="{{ rollup.episodes_published }}">{{ rollup.episodes_published }}</div>
-      <div class="kpi-lbl" style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--faint);margin-top:6px;">Published</div>
-    </div>
-    <div class="kpi-card">
-      <div class="kpi-val">{% if rollup.spend_all_usd is not none %}${{ big(rollup.spend_all_usd) }}{% else %}—{% endif %}</div>
-      <div class="kpi-lbl" style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--faint);margin-top:6px;">Spend (all-time)</div>
-    </div>
-  </div>
-  {% endif %}
-
-  {% if recent_runs %}
-  <div class="card">
-    <div class="card-title">Recent runs</div>
-    {% for r in recent_runs %}
-    <div style="display:flex; justify-content:space-between; gap:12px; font-size:12.5px; padding:5px 0; border-bottom:1px solid var(--hairline);">
-      <a href="/run/{{ r.run_id }}" class="mono">{{ r.episode_title or r.episode_id or r.run_id[:12] }}</a>
-      <span style="color:var(--muted)">{{ r.status }} · {{ (r.started_at or '')[:16] }}</span>
-    </div>
-    {% endfor %}
-  </div>
-  {% endif %}
-
-  {# ── Readiness: can this channel run autonomously, and what's blocking it ── #}
-  {% if readiness %}
-  {% set c = readiness.counts %}
-  <div class="card {{ 'is-critical' if c.blocker else ('is-warn' if c.warn else 'is-good') }}">
-    <div class="spread" style="margin-bottom:10px;">
-      <div class="card-title" style="margin:0;">Readiness</div>
-      <div class="row" style="gap:10px; font-size:11px; font-weight:700;">
-        {% if c.blocker %}<span class="err">{{ c.blocker }} blocker{{ '' if c.blocker == 1 else 's' }}</span>{% endif %}
-        {% if c.warn %}<span class="warn">{{ c.warn }} warning{{ '' if c.warn == 1 else 's' }}</span>{% endif %}
-        <span class="ok">{{ c.ok }} ok</span>
+    <div class="stat-card">
+      <div class="stat-lbl">{{ icon('play') }} Watch time</div>
+      <div class="stat-val {% if rollup.watch_time_s is none %}is-muted{% endif %}">
+        {% if rollup.watch_time_s is not none %}{{ (rollup.watch_time_s/3600)|round(1) }}h{% else %}—{% endif %}
       </div>
     </div>
+    <div class="stat-card">
+      <div class="stat-lbl">{{ icon('review') }} Published</div>
+      <div class="stat-val">{{ rollup.episodes_published }}</div>
+      <div class="stat-note">episodes live</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-lbl">{{ icon('dollar') }} Spent</div>
+      <div class="stat-val">{% if rollup.spend_all_usd is not none %}{{ rollup.spend_all_usd | friendly_money }}{% else %}—{% endif %}</div>
+      <div class="stat-note">all-time production cost</div>
+    </div>
+  </div>
+  {% endif %}
+
+  {# ── Readiness ── #}
+  {% if readiness %}
+  {% set c = readiness.counts %}
+  <div class="sec-head">
+    <h2>Can this channel run on its own?</h2>
+    <span class="sec-count">
+      {% if c.blocker %}{{ c.blocker }} blocking{% elif c.warn %}{{ c.warn }} to check{% else %}all good{% endif %}
+    </span>
+  </div>
+  <div class="card {{ 'is-critical' if c.blocker else ('is-warn' if c.warn else 'is-good') }}">
     {% set act = readiness['items'] | selectattr('id', 'equalto', 'channel.activated') | list | first %}
     {% if act and act.level != 'ok' and 'not activated' in act.title | lower and act.fix %}
     <div class="rd-item" style="align-items:center;">
-      <span class="rd-mark rd-blocker">✕</span>
+      <span class="rd-mark rd-blocker">{{ icon('x') }}</span>
       <div style="flex:1;">
         <div class="rd-title">This channel is switched off</div>
         <div class="rd-detail">{{ act.detail }}</div>
       </div>
       <button class="btn btn-primary" style="white-space:nowrap;"
-              onclick="this.disabled=true;this.textContent='Activating…';fetch('/api/channels/{{ channel.channel_id|e }}/activate',{method:'POST'}).then(r=>r.json()).then(d=>{if(d.ok){location.reload()}else{this.disabled=false;this.textContent='Activate channel';alert(d.failure_reason||d.error||'activation failed')}})">
-        Activate channel
+              onclick="this.disabled=true;this.textContent='Activating…';fetch('/api/channels/{{ channel.channel_id|e }}/activate',{method:'POST'}).then(r=>r.json()).then(d=>{if(d.ok){location.reload()}else{this.disabled=false;this.textContent='Turn this channel on';alert(d.failure_reason||d.error||'activation failed')}})">
+        Turn this channel on
       </button>
     </div>
     {% endif %}
     {% for i in readiness['items'] %}
     <div class="rd-item">
-      <span class="rd-mark rd-{{ i.level }}">{{ '✓' if i.level == 'ok' else ('!' if i.level == 'warn' else '✕') }}</span>
+      <span class="rd-mark rd-{{ i.level }}">
+        {% if i.level == 'ok' %}{{ icon('check') }}{% elif i.level == 'warn' %}{{ icon('warning') }}{% else %}{{ icon('x') }}{% endif %}
+      </span>
       <div>
         <div class="rd-title">{{ i.title }}</div>
-        <div class="rd-detail">{{ i.detail }}{% if i.fix %}<br><span class="rd-fix">Fix:</span> {{ i.fix }}{% endif %}</div>
+        <div class="rd-detail">{{ i.detail }}{% if i.fix %}<br><span class="rd-fix">To fix:</span> {{ i.fix }}{% endif %}</div>
       </div>
     </div>
     {% endfor %}
+  </div>
+  {% endif %}
+
+  {# ── Recent episodes ── #}
+  {% if recent_runs %}
+  <div class="sec-head"><h2>Latest episodes</h2></div>
+  <div class="card" style="padding:0;">
+    <div class="table-wrap" style="border:none;"><table>
+      <thead><tr><th>Episode</th><th>Status</th><th>When</th></tr></thead>
+      <tbody>
+      {% for r in recent_runs %}
+      <tr>
+        <td style="max-width:340px;">
+          <a href="/run/{{ r.run_id }}" style="color:var(--text); font-weight:600;">
+            <span class="cell-title">{{ (r.episode_id or r.run_id) | episode_name }}</span>
+          </a>
+        </td>
+        <td><span class="badge badge-{{ r.status }}">{{ r.status | plain_status }}</span></td>
+        <td class="muted" style="white-space:nowrap;">{{ r.started_at | rel_time if r.started_at else '—' }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
   </div>
   {% endif %}
 
   {# ── Learning recommendations ── #}
   {% if recommendations %}
-  <div class="card">
-    <div class="card-title">Learning recommendations</div>
+  <div class="sec-head"><h2>What Cortex suggests for this channel</h2></div>
+  <div class="insight-list">
     {% for dim, r in recommendations.items() %}
-    <div class="rec">
-      <div class="spread">
-        <div>
-          <span class="dim-badge dim-{{ dim if dim in ['thumbnail','title','hook','pacing','retention','cta','audio','topic'] else 'default' }}">{{ dim }}</span>
-          <strong style="margin-left:8px;">{{ r.action_type }}</strong>
-        </div>
-        <span class="muted" style="font-size:11px;">confidence {{ r.confidence }} · {{ r.status }}</span>
+    {% set _ra = r.action_type | plain_learning_action %}
+    {% set _dc = {'up':'dir-up','down':'dir-down','change':'dir-change'} %}
+    <article class="insight-card {{ _dc.get(_ra.direction, 'dir-change') }}">
+      <div class="insight-head">
+        <span class="insight-dir {{ _dc.get(_ra.direction, 'dir-change') }}">{{ _ra.label }}</span>
+        <span class="dim-badge dim-default">{{ dim | plain_dimension }}</span>
+        <span class="pill {{ 'is-good' if r.status == 'applied' else 'is-warn' }}" style="margin-left:auto;">{{ r.status | plain_status }}</span>
       </div>
-      <div class="rd-detail" style="margin-top:5px;">{{ r.rationale }}</div>
+      <p class="insight-body">{{ r.rationale | clean_rationale }}</p>
       {% if r.status == 'pending' %}
-      <button class="btn btn-sm btn-approve" style="margin-top:8px;"
-              onclick="fetch('/api/learning/action/{{ r.action_id }}/apply',{method:'POST'}).then(()=>location.reload())">
-        {% if dim == 'content_volume' %}Approve cadence change{% else %}Acknowledge{% endif %}
-      </button>
+      <div class="insight-foot">
+        <button class="btn btn-sm btn-approve"
+                onclick="fetch('/api/learning/action/{{ r.action_id }}/apply',{method:'POST'}).then(()=>location.reload())">
+          {{ icon('check') }} {% if dim == 'content_volume' %}Approve this change{% else %}Apply{% endif %}
+        </button>
+      </div>
       {% endif %}
-    </div>
+    </article>
     {% endfor %}
   </div>
   {% endif %}
 
+  {# ── Setup detail ── #}
+  <div class="sec-head"><h2>Setup</h2></div>
   <div class="grid grid-2">
-    {# ── Channel profile ── #}
-    <div class="card">
-      <div class="card-title">Channel profile</div>
-      <div class="fr"><span class="fr-k">ID</span><span class="fr-v mono">{{ channel.channel_id }}</span></div>
-      <div class="fr"><span class="fr-k">Name</span><span class="fr-v">{{ channel.name }}</span></div>
-      <div class="fr"><span class="fr-k">Status</span><span class="fr-v">{{ channel.status }}</span></div>
-      <div class="fr"><span class="fr-k">Created</span><span class="fr-v mono">{{ channel.created_at[:19] if channel.created_at else '—' }}</span></div>
-    </div>
-
-    {# ── Brand identity ── #}
     <div class="card">
       <div class="card-title">Brand identity</div>
       {% if brand %}
@@ -170,40 +169,44 @@
       <div class="fr"><span class="fr-k">Audience</span><span class="fr-v {{ 'miss' if not brand.target_audience }}">{{ brand.target_audience or '—' }}</span></div>
       <div class="fr"><span class="fr-k">Visual style</span><span class="fr-v {{ 'miss' if not brand.visual_style }}">{{ brand.visual_style or '—' }}</span></div>
       <div class="fr"><span class="fr-k">Language</span><span class="fr-v">{{ brand.language or '—' }}</span></div>
-      <div class="fr"><span class="fr-k">Voice</span><span class="fr-v {{ 'miss' if not brand.voice_guidelines }}">{{ (brand.voice_guidelines or '—')[:120] }}{{ '…' if brand.voice_guidelines and brand.voice_guidelines|length > 120 }}</span></div>
       <div class="btn-row"><a href="/brand/{{ brand.brand_profile_id|e }}/edit" class="btn btn-sm">Edit brand</a></div>
       {% else %}
-      <div class="empty" style="padding:22px;"><div class="empty-title">No brand profile</div>Run the Channel Builder to set an identity.</div>
+      <div class="dv-empty"><div class="dv-empty-title">No brand identity yet</div>
+        <div class="dv-empty-sub">Run the Channel Builder to set the persona, tone and look.</div></div>
       {% endif %}
     </div>
 
-    {# ── Models ── #}
-    <div class="card">
-      <div class="card-title">Models</div>
-      {% if model %}
-      <div class="fr"><span class="fr-k">Episode producer</span><span class="fr-v mono">{{ model.episode_producer }}</span></div>
-      <div class="fr"><span class="fr-k">Research director</span><span class="fr-v mono">{{ model.research_director }}</span></div>
-      <div class="fr"><span class="fr-k">Thumbnail planner</span><span class="fr-v mono">{{ model.thumbnail_planner }}</span></div>
-      <div class="fr"><span class="fr-k">Narration voice</span><span class="fr-v mono">{{ model.narration_voice_id or '—' }}</span></div>
-      <div class="fr"><span class="fr-k">Image / video</span><span class="fr-v mono">{{ model.image_provider }} / {{ model.video_provider }}</span></div>
-      <div class="btn-row"><a href="/model/{{ model.model_profile_id|e }}/edit" class="btn btn-sm">Edit models</a></div>
-      {% else %}
-      <div class="empty" style="padding:22px;"><div class="empty-title">No model profile</div></div>
-      {% endif %}
-    </div>
-
-    {# ── Publishing ── #}
     <div class="card">
       <div class="card-title">Publishing</div>
       {% if publishing %}
-      <div class="fr"><span class="fr-k">Platforms</span><span class="fr-v">{{ publishing.enabled_platforms | join(', ') or '—' }}</span></div>
-      <div class="fr"><span class="fr-k">AI disclosure</span><span class="fr-v {{ 'ok' if publishing.ai_disclosure_required }}">{{ 'Required' if publishing.ai_disclosure_required else 'Not required' }}</span></div>
+      <div class="fr"><span class="fr-k">Platforms</span><span class="fr-v">{{ publishing.enabled_platforms | map('friendly_platform') | join(', ') or '—' }}</span></div>
+      <div class="fr"><span class="fr-k">AI disclosure</span><span class="fr-v">{{ 'Added automatically' if publishing.ai_disclosure_required else 'Not required' }}</span></div>
       <div class="fr"><span class="fr-k">Auto thumbnail</span><span class="fr-v">{{ 'Yes' if publishing.auto_thumbnail else 'No' }}</span></div>
       <div class="fr"><span class="fr-k">Auto captions</span><span class="fr-v">{{ 'Yes' if publishing.auto_captions else 'No' }}</span></div>
       <div class="btn-row"><a href="/publishing/{{ publishing.publishing_profile_id|e }}/edit" class="btn btn-sm">Edit publishing</a></div>
       {% else %}
-      <div class="empty" style="padding:22px;"><div class="empty-title">No publishing profile</div></div>
+      <div class="dv-empty"><div class="dv-empty-title">No publishing settings yet</div></div>
       {% endif %}
+    </div>
+
+    <div class="card">
+      <div class="card-title">Creative tools</div>
+      {% if model %}
+      <div class="fr"><span class="fr-k">Narration voice</span><span class="fr-v mono">{{ model.narration_voice_id or '—' }}</span></div>
+      <div class="fr"><span class="fr-k">Images</span><span class="fr-v mono">{{ model.image_provider }}</span></div>
+      <div class="fr"><span class="fr-k">Video</span><span class="fr-v mono">{{ model.video_provider }}</span></div>
+      <div class="fr"><span class="fr-k">Writing</span><span class="fr-v mono">{{ model.episode_producer }}</span></div>
+      <div class="btn-row"><a href="/model/{{ model.model_profile_id|e }}/edit" class="btn btn-sm">Edit tools</a></div>
+      {% else %}
+      <div class="dv-empty"><div class="dv-empty-title">No creative tools set</div></div>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <div class="card-title">Details</div>
+      <div class="fr"><span class="fr-k">Name</span><span class="fr-v">{{ channel.name }}</span></div>
+      <div class="fr"><span class="fr-k">Status</span><span class="fr-v">{{ channel.status | plain_status }}</span></div>
+      <div class="fr"><span class="fr-k">Created</span><span class="fr-v">{{ channel.created_at | friendly_date if channel.created_at else '—' }}</span></div>
     </div>
   </div>
 </div>

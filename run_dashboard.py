@@ -317,6 +317,21 @@ def _f_signal_words(value):
     return _hz.signal_strength_words(value)
 
 
+@app.template_filter("plain_channel_blocker")
+def _f_plain_channel_blocker(value):
+    return _hz.plain_channel_blocker(value)
+
+
+@app.template_filter("friendly_week")
+def _f_friendly_week(value):
+    return _hz.friendly_week(value)
+
+
+@app.template_filter("friendly_count")
+def _f_friendly_count(value, singular, plural=None):
+    return _hz.friendly_count(value, singular, plural)
+
+
 # ---------------------------------------------------------------------------
 # Serialisation helpers
 # ---------------------------------------------------------------------------

@@ -443,6 +443,70 @@ def plain_dimension(value) -> str:
     return _DIMENSIONS.get(k, re.sub(r"[_\-]+", " ", k).strip().capitalize())
 
 
+# ── Channel runtime blockers (free-text sentences from channel_runtime_status)
+_CHANNEL_BLOCKER_PATTERNS = [
+    (r"consecutive failed runs",
+     "Several production runs failed in a row — this channel needs a look before it runs again."),
+    (r"last run failed",
+     "The most recent production run didn't finish."),
+    (r"operator[_ ]enabled is False",
+     "This channel hasn't been switched on for production yet."),
+    (r"unattended[_ ]operation[_ ]enabled is False",
+     "Automatic production is turned off for this channel."),
+    (r"production[_ ]enabled is False",
+     "Production is turned off for this channel."),
+    (r"publishing[_ ]schedule is empty",
+     "No release time is set for this channel."),
+    (r"weekly video budget.*exhaust",
+     "This channel has used its production budget for the week."),
+    (r"no active channel schedule",
+     "This channel has no daily schedule, so nothing triggers it automatically."),
+    (r"worker heartbeat is stale",
+     "The production worker isn't running right now."),
+    (r"factory clearance denied",
+     "The factory is paused, so this channel can't run."),
+    (r"calog channel state",
+     "This channel isn't marked active yet."),
+    (r"no channel[_ ]operations[_ ]profile|channel profile does not exist",
+     "This channel's setup isn't finished."),
+    (r"operating grant|\bgrant\b",
+     "This channel's production authorization needs to be signed or renewed."),
+]
+
+
+def plain_channel_blocker(text) -> str:
+    if not text:
+        return ""
+    s = str(text)
+    for pat, plain in _CHANNEL_BLOCKER_PATTERNS:
+        if re.search(pat, s, re.IGNORECASE):
+            return plain
+    # unknown: drop any "(parenthetical engineer note)" and tidy
+    s = re.sub(r"\s*\([^)]*\)", "", s).strip()
+    s = re.sub(r"\s*—\s*needs attention$", "", s).strip()
+    return s[0].upper() + s[1:] if s else s
+
+
+_WEEK_KEY_RE = re.compile(r"^(\d{4})-W(\d{1,2})$")
+
+
+def friendly_week(week_key) -> str:
+    """'2026-W36' → 'this week' when it is, else 'week of 1 Sep'."""
+    m = _WEEK_KEY_RE.match(str(week_key or "").strip())
+    if not m:
+        return str(week_key or "")
+    year, week = int(m.group(1)), int(m.group(2))
+    try:
+        monday = datetime.fromisocalendar(year, week, 1)
+    except ValueError:
+        return str(week_key)
+    now = datetime.now(timezone.utc)
+    this_week = now.isocalendar()
+    if (year, week) == (this_week[0], this_week[1]):
+        return "this week"
+    return f"week of {monday.day} {_MONTHS[monday.month - 1]}"
+
+
 def friendly_platform(value) -> str:
     return {
         "youtube": "YouTube", "tiktok": "TikTok",

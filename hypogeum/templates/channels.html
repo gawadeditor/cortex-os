@@ -5,20 +5,22 @@
   <title>Channels — Cortex</title>
   {% include '_base_style.html' %}
   {% from '_icons.html' import icon %}
+  {% from '_hero.html' import hero %}
   <style>
-    .ch-card { display: grid; grid-template-columns: 1fr auto; gap: 4px 16px; align-items: start; }
-    .ch-name { font-family: var(--font-display); font-size: 16px; font-weight: 700; letter-spacing: -.01em; }
+    .ch-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+    .ch-name { font-family: var(--font-display); font-size: 17px; font-weight: 700; letter-spacing: -.01em; }
     .ch-name a { color: var(--text); }
-    .ch-meta { font-size: 12px; color: var(--muted); margin-top: 3px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-    .ch-completeness { text-align: right; font-size: 12.5px; }
-    .ch-checks { font-size: 11px; color: var(--faint); margin-top: 2px; display: flex; gap: 8px; justify-content: flex-end; }
-    .ch-checks .ok { color: var(--good); } .ch-checks .no { color: var(--faint); }
-    .ch-rt { grid-column: 1 / -1; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--hairline);
-             display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px 18px; }
+    .ch-setup { text-align: right; font-size: 12.5px; }
+    .ch-setup-checks { font-size: 11px; color: var(--faint); margin-top: 3px; display: flex; gap: 10px; justify-content: flex-end; }
+    .ch-setup-checks .ok { color: var(--good); } .ch-setup-checks .no { color: var(--faint); }
+    .ch-rt { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--hairline);
+             display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 14px 20px; }
     .ch-rt-k { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--faint); }
-    .ch-rt-v { font-size: 13px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
-    .ch-blockers { grid-column: 1 / -1; margin-top: 8px; font-size: 11.5px; color: var(--muted); }
-    .ch-actions { grid-column: 1 / -1; margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+    .ch-rt-v { font-size: 13.5px; font-weight: 600; margin-top: 3px; font-variant-numeric: tabular-nums; }
+    .ch-blockers { margin-top: 12px; display: grid; gap: 6px; }
+    .ch-blocker { font-size: 12.5px; color: var(--muted); display: flex; gap: 8px; align-items: flex-start; }
+    .ch-blocker .i { color: var(--warn); margin-top: 2px; flex-shrink: 0; }
+    .ch-actions { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
   </style>
 </head>
 <body>
@@ -28,92 +30,101 @@
 
 <div class="container">
 
-<div class="page-header spread">
-  <div>
-    <span class="eyebrow">Factory</span>
-    <h1>Channels</h1>
-    <span class="page-meta">{{ channels | length }} channel{% if channels | length != 1 %}s{% endif %} configured</span>
-  </div>
+{% set ns = namespace(ready=0) %}
+{% for ch in channels %}{% set rt = runtime_by_channel.get(ch.channel_id) %}{% if rt and rt.autonomous_ready %}{% set ns.ready = ns.ready + 1 %}{% endif %}{% endfor %}
+
+{% call hero(
+     eyebrow='Factory',
+     title='Your channels',
+     lede='Each channel runs on its own schedule and budget. Cortex produces, publishes and learns for every one of them without you in the loop.',
+     figure=channels|length,
+     figure_label='channel' ~ ('' if channels|length == 1 else 's'),
+     pill=(ns.ready ~ ' running on their own') if ns.ready else 'none fully autonomous yet',
+     pill_class='is-good' if (ns.ready == channels|length and channels) else 'is-warn') %}
   <a href="/channels/new" class="btn btn-primary">{{ icon('plus') }} Build a channel</a>
-</div>
+{% endcall %}
 
 {% if channels %}
 <div class="stack">
 {% for ch in channels %}
 {% set rt = runtime_by_channel.get(ch.channel_id) %}
 <div class="card {{ 'is-good' if rt and rt.autonomous_ready else ('is-warn' if rt else '') }}">
-  <div class="ch-card">
+  <div class="ch-head">
     <div>
       <div class="ch-name"><a href="/channel/{{ ch.channel_id }}">{{ ch.name or ch.channel_id }}</a></div>
-      <div class="ch-meta">
-        <span class="mono">{{ ch.channel_id }}</span>
-        <span class="badge badge-{{ ch.status }}">{{ ch.status }}</span>
+      <div style="margin-top:4px;">
+        <span class="badge badge-{{ ch.status }}">{{ ch.status | plain_status }}</span>
       </div>
     </div>
-    <div class="ch-completeness">
+    <div class="ch-setup">
       <div style="font-weight:700;">{{ (ch.profile_completeness * 100) | round | int }}%<span class="muted" style="font-weight:400;font-size:11px;"> set up</span></div>
-      <div class="ch-checks">
+      <div class="ch-setup-checks">
         <span class="{{ 'ok' if ch.brand_complete else 'no' }}">brand</span>
         <span class="{{ 'ok' if ch.publishing_complete else 'no' }}">publishing</span>
         <span class="{{ 'ok' if ch.models_complete else 'no' }}">models</span>
       </div>
     </div>
+  </div>
 
-    {% if rt %}
-    <div class="ch-rt">
-      <div>
-        <div class="ch-rt-k">Autonomous</div>
-        <div class="ch-rt-v {{ 'ok' if rt.autonomous_ready else 'warn' }}">
-          {{ 'Ready' if rt.autonomous_ready else (rt.blockers | length ~ ' blocker' ~ ('' if rt.blockers | length == 1 else 's')) }}
-        </div>
-      </div>
-      <div>
-        <div class="ch-rt-k">Weekly budget{% if rt.weekly_budget.week_key %} · {{ rt.weekly_budget.week_key }}{% endif %}</div>
-        <div class="ch-rt-v">
-          {% if rt.weekly_budget.configured %}${{ '%.0f' | format(rt.weekly_budget.reserved_committed_usd or 0) }} / ${{ '%.0f' | format(rt.weekly_budget.ceiling_usd or 0) }}{% if rt.weekly_budget.pct_used is not none %} <span class="muted">({{ rt.weekly_budget.pct_used | round | int }}%)</span>{% endif %}
-          {% else %}<span class="muted">not configured</span>{% endif %}
-        </div>
-      </div>
-      <div>
-        <div class="ch-rt-k">Worker</div>
-        <div class="ch-rt-v">{{ rt.worker.status or 'never started' }}{% if rt.worker.stale %} <span class="warn">stale</span>{% endif %}</div>
-      </div>
-      <div>
-        <div class="ch-rt-k">Queue</div>
-        <div class="ch-rt-v">{{ rt.queue.queued_topics }} / {{ rt.queue.claimed_topics }}</div>
-      </div>
-      <div>
-        <div class="ch-rt-k">Next slot</div>
-        <div class="ch-rt-v">{{ rt.schedule.next_run_at or '—' }}</div>
-      </div>
-      <div>
-        <div class="ch-rt-k">Operating grant</div>
-        <div class="ch-rt-v {{ 'ok' if (rt.operating_grant or {}).get('active') else 'warn' }}">
-          {% if (rt.operating_grant or {}).get('active') %}active · {{ rt.operating_grant.days_left }}d{% else %}none{% endif %}
-        </div>
+  {% if rt %}
+  <div class="ch-rt">
+    <div>
+      <div class="ch-rt-k">Runs on its own</div>
+      <div class="ch-rt-v {{ 'ok' if rt.autonomous_ready else 'warn' }}">
+        {{ 'Yes' if rt.autonomous_ready else 'Not yet' }}
       </div>
     </div>
-    {% if rt.blockers %}
-    <div class="ch-blockers"><span class="warn">Blockers:</span> {{ rt.blockers | join('; ') }}</div>
-    {% endif %}
-    {% endif %}
-
-    <div class="ch-actions">
-      <a href="/channel/{{ ch.channel_id }}" class="btn btn-sm">Open</a>
-      <a href="/channel/{{ ch.channel_id }}/operations" class="btn btn-sm">Production plan</a>
+    <div>
+      <div class="ch-rt-k">Budget {{ rt.weekly_budget.week_key | friendly_week if rt.weekly_budget.week_key }}</div>
+      <div class="ch-rt-v">
+        {% if rt.weekly_budget.configured %}
+          {{ (rt.weekly_budget.reserved_committed_usd or 0) | friendly_money }} of {{ (rt.weekly_budget.ceiling_usd or 0) | friendly_money }}
+          {% if rt.weekly_budget.pct_used is not none %}<span class="muted">· {{ rt.weekly_budget.pct_used | round | int }}%</span>{% endif %}
+        {% else %}<span class="muted">not set</span>{% endif %}
+      </div>
     </div>
+    <div>
+      <div class="ch-rt-k">Waiting to make</div>
+      <div class="ch-rt-v">{{ rt.queue.queued_topics }} {{ 'topic' if rt.queue.queued_topics == 1 else 'topics' }}</div>
+    </div>
+    <div>
+      <div class="ch-rt-k">Next episode</div>
+      <div class="ch-rt-v">{{ rt.schedule.next_run_at | rel_time if rt.schedule.next_run_at else 'not scheduled' }}</div>
+    </div>
+    <div>
+      <div class="ch-rt-k">Authorization</div>
+      <div class="ch-rt-v {{ 'ok' if (rt.operating_grant or {}).get('active') else 'warn' }}">
+        {% if (rt.operating_grant or {}).get('active') %}
+          signed · {{ rt.operating_grant.days_left | round | int }} days left
+        {% else %}needs signing{% endif %}
+      </div>
+    </div>
+  </div>
+  {% if rt.blockers %}
+  <div class="ch-blockers">
+    {% for b in rt.blockers %}
+    <div class="ch-blocker">{{ icon('warning') }}<span>{{ b | plain_channel_blocker }}</span></div>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% endif %}
+
+  <div class="ch-actions">
+    <a href="/channel/{{ ch.channel_id }}" class="btn btn-sm">Open</a>
+    <a href="/channel/{{ ch.channel_id }}/operations" class="btn btn-sm">Production plan</a>
   </div>
 </div>
 {% endfor %}
 </div>
 {% else %}
-<div class="empty">
-  <div class="empty-title">No channels yet</div>
-  Build your first channel — the wizard takes you from a rough idea to a monetisable niche,
-  a name with checked handles, and a full brand identity.
-  <div class="btn-row" style="justify-content:center; margin-top:12px;">
-    <a href="/channels/new" class="btn btn-primary">{{ icon('plus') }} Build a channel</a>
+<div class="dv-empty">
+  {{ icon('channels') }}
+  <div class="dv-empty-title">No channels yet</div>
+  <div class="dv-empty-sub">
+    Build your first channel — the wizard takes you from a rough idea to a
+    monetisable niche, a name with checked handles, and a full brand identity.
   </div>
+  <a href="/channels/new" class="btn btn-primary" style="margin-top:6px;">{{ icon('plus') }} Build a channel</a>
 </div>
 {% endif %}
 </div><!-- /.container -->

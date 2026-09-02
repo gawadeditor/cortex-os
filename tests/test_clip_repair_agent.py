@@ -142,6 +142,22 @@ def _write_clip(assets_root: Path, asset_id: str) -> Path:
     return p
 
 
+def _write_generated_clip(output_dir: Path, scene_spec: dict) -> Path:
+    """Mirror what the real muapi.submit_scene() does with output_dir: write to
+    <output_dir>/video/[sh_<short_id>/]sc_<scene_id>.mp4. Strategy B passes the
+    EPISODE dir as output_dir, so this is where _expected_clip_path looks for
+    an asset-id-less scene."""
+    sid = scene_spec["scene_id"]
+    sh = scene_spec.get("short_id")
+    target = output_dir / "video"
+    if sh:
+        target = target / f"sh_{sh}"
+    target = target / f"sc_{sid}.mp4"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"GENERATED")
+    return target
+
+
 # ---------------------------------------------------------------------------
 # TestJaccard — internal helper
 # ---------------------------------------------------------------------------
@@ -301,11 +317,12 @@ class TestStrategyB:
         assets_root = tmp_path / "assets"
         assets_root.mkdir()
 
-        # 5 missing scenes, cap = 2
-        scenes = [
-            _make_scene(f"sc_{i:03d}", asset_id=f"asset_{i:03d}", scene_index=i,
-                        description="unique scene")
-            for i in range(6)
+        # 5 missing scenes (no asset_id — never generated a clip), cap = 2
+        scenes = [_make_scene("sc_000", asset_id="asset_000", scene_index=0,
+                              description="unique scene")]
+        scenes += [
+            _make_scene(f"sc_{i:03d}", scene_index=i, description="unique scene")
+            for i in range(1, 6)
         ]
         _write_clip(assets_root, "asset_000")  # only one present
 
@@ -314,12 +331,10 @@ class TestStrategyB:
         log = MagicMock()
 
         generate_calls = []
-        _aid_by_sid = {s["scene_id"]: s["asset_id"] for s in scenes}
 
         def _mock_submit(scene_spec, config, episode_id, output_dir, agent):
-            sid = scene_spec.get("scene_id", "")
-            (output_dir / f"{_aid_by_sid[sid]}.mp4").write_bytes(b"GENERATED")
-            generate_calls.append(sid)
+            generate_calls.append(scene_spec.get("scene_id", ""))
+            _write_generated_clip(output_dir, scene_spec)
             return {"generation_status": "generated"}
 
         with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit):
@@ -346,10 +361,10 @@ class TestStrategyB:
         assets_root.mkdir()
 
         scenes = []
-        for i in range(4):  # 4 story scenes
-            scenes.append(_make_scene(f"sc_{i:03d}", asset_id=f"asset_{i:03d}",
-                                      scene_index=i, description="story scene"))
-        outro = _make_scene("sc_outro", asset_id="asset_outro", scene_index=99,
+        for i in range(4):  # 4 story scenes (no asset_id — never generated)
+            scenes.append(_make_scene(f"sc_{i:03d}", scene_index=i,
+                                      description="story scene"))
+        outro = _make_scene("sc_outro", scene_index=99,
                             description="the hero now asleep")
         outro["narration_reference"] = "b_outro_1"
         scenes.append(outro)
@@ -359,12 +374,10 @@ class TestStrategyB:
         log = MagicMock()
 
         generated = []
-        _aid_by_sid = {s["scene_id"]: s["asset_id"] for s in scenes}
 
         def _mock_submit(scene_spec, config, episode_id, output_dir, agent):
-            sid = scene_spec.get("scene_id", "")
-            (output_dir / f"{_aid_by_sid[sid]}.mp4").write_bytes(b"GENERATED")
-            generated.append(sid)
+            generated.append(scene_spec.get("scene_id", ""))
+            _write_generated_clip(output_dir, scene_spec)
             return {"generation_status": "generated"}
 
         with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit):
@@ -450,7 +463,7 @@ class TestSceneSpecTranslation:
                 fallback_prompt="FALLBACK_A", primary_tier=1, fallback_tier=2,
             ),
             _make_canonical_scene(
-                "sc_002", asset_id="asset_002", scene_index=1,
+                "sc_002", scene_index=1,
                 description="topic B unique", primary_prompt="PROMPT_B",
                 fallback_prompt="FALLBACK_B",
             ),
@@ -466,8 +479,7 @@ class TestSceneSpecTranslation:
         def _mock_submit(scene_spec, config, episode_id, output_dir, agent):
             _assert_real_submit_scene_contract(scene_spec)  # raises if wrong
             captured["scene_spec"] = scene_spec
-            target = output_dir / "asset_002.mp4"
-            target.write_bytes(b"GENERATED")
+            _write_generated_clip(output_dir, scene_spec)
             return {"generation_status": "generated"}
 
         with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit):

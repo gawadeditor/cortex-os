@@ -193,8 +193,14 @@ def run_clip_repair(
                 from hypogeum.muapi import submit_scene  # noqa: PLC0415
                 from hypogeum.agents.provider_router import build_scene_spec  # noqa: PLC0415
 
-                output_dir = target_path.parent
-                output_dir.mkdir(parents=True, exist_ok=True)
+                # submit_scene() expects output_dir to be the EPISODE dir and
+                # writes to <output_dir>/video/sc_<scene_id>.mp4 itself (via
+                # muapi.scene_file_path). Passing target_path.parent (already
+                # .../video/) made it write .../video/video/sc_X.mp4 and the
+                # clip was then reported missing — the reason this path never
+                # actually produced a clip before.
+                output_dir = assets_root / "episodes" / episode_id
+                target_path.parent.mkdir(parents=True, exist_ok=True)
 
                 # missing_scene is a raw VPD scene dict: production_spec.
                 # provider_routing.primary_prompt (nested), not the flat

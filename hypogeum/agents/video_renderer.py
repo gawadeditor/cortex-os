@@ -359,6 +359,7 @@ def render_episode(
             body_duration=body_duration,
             music_segment_start_seconds=end_page_music_segment_start,
             ffmpeg_binary=ffmpeg_binary,
+            resolution=main_resolution,
         )
         if not end_page_ok:
             # Non-fatal: log the failure but keep the body render as-is.
@@ -1653,6 +1654,7 @@ def _append_end_page(
     body_duration: float = 0.0,
     music_segment_start_seconds: float = 0.0,
     ffmpeg_binary: str = "ffmpeg",
+    resolution: str = MAIN_RESOLUTION,
 ) -> bool:
     """
     Append a static end-page PNG card to the main episode video.
@@ -1669,15 +1671,18 @@ def _append_end_page(
       1. Generate a short video clip from the PNG (same codec/resolution as main).
       2. Concat the body + end-page clip via filter_complex re-encode.
 
-    Both clips are encoded at MAIN_RESOLUTION with yuv420p / libx264 / aac so
-    the concat demuxer can stream-copy without re-encoding.
+    Both clips are encoded at `resolution` (default MAIN_RESOLUTION 1920x1080;
+    the caller passes SHORT_RESOLUTION 1080x1920 for a SHORT_NATIVE vertical
+    main deliverable) with yuv420p / libx264 / aac — the end-page clip MUST
+    match the body's dimensions or the filter_complex concat fails with
+    "Input link parameters ... do not match".
 
     Returns True on success, False on any failure. Non-fatal — caller logs a warn.
     """
     body_path  = main_output_path.with_suffix(".body.mp4")
     clip_path  = main_output_path.with_suffix(".endpage.mp4")
     list_path  = main_output_path.with_suffix(".concat.txt")
-    width, height = MAIN_RESOLUTION.split("x")
+    width, height = resolution.split("x")
 
     try:
         # --- 1. Rename body to temp ---

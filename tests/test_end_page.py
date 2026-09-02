@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from hypogeum.agents.video_renderer import (
     FRAME_RATE,
     MAIN_RESOLUTION,
+    SHORT_RESOLUTION,
     _MUSIC_TAIL_SECONDS,
     _append_end_page,
     _build_ffmpeg_concat_command,
@@ -306,6 +307,52 @@ class TestEndPageAppend:
         assert result is False
         assert main_mp4.exists(), "Body must be restored when concat fails"
         assert main_mp4.read_bytes() == b"ORIGINAL_BODY"
+
+    def _spy_run(self, calls_recorded):
+        def spy_ffmpeg(cmd, capture_output, text, timeout):
+            calls_recorded.append(list(cmd))
+            out = Path(cmd[-1])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"FAKEMP4" * 500)
+            r = MagicMock()
+            r.returncode = 0
+            r.stderr = ""
+            r.stdout = ""
+            return r
+        return spy_ffmpeg
+
+    def test_end_page_clip_defaults_to_landscape_resolution(self, tmp_path):
+        ep = tmp_path / "ep_land"; ep.mkdir()
+        (ep / "main_ep_land.mp4").write_bytes(b"FAKEMP4" * 500)
+        png = tmp_path / "end-page.png"; png.write_bytes(b"FAKEPNG")
+        calls: list = []
+        with patch("subprocess.run", side_effect=self._spy_run(calls)):
+            assert _append_end_page(
+                main_output_path=ep / "main_ep_land.mp4", end_page_path=png,
+                duration=20.0, episode_id="ep_land", timeout=60, log=_mock_log(),
+            ) is True
+        joined = " ".join(" ".join(c) for c in calls)
+        assert f"scale={MAIN_RESOLUTION.replace('x', ':')}" in joined
+
+    def test_end_page_clip_uses_portrait_resolution_for_short_native(self, tmp_path):
+        """The end-page clip must be built at the body's resolution — a
+        SHORT_NATIVE vertical main deliverable is 1080x1920, and a landscape
+        end-page clip fails the filter_complex concat ('Input link parameters
+        ... do not match')."""
+        ep = tmp_path / "ep_vert"; ep.mkdir()
+        (ep / "main_ep_vert.mp4").write_bytes(b"FAKEMP4" * 500)
+        png = tmp_path / "end-page.png"; png.write_bytes(b"FAKEPNG")
+        calls: list = []
+        with patch("subprocess.run", side_effect=self._spy_run(calls)):
+            assert _append_end_page(
+                main_output_path=ep / "main_ep_vert.mp4", end_page_path=png,
+                duration=20.0, episode_id="ep_vert", timeout=60, log=_mock_log(),
+                resolution=SHORT_RESOLUTION,
+            ) is True
+        joined = " ".join(" ".join(c) for c in calls)
+        assert f"scale={SHORT_RESOLUTION.replace('x', ':')}" in joined
+        assert f"pad={SHORT_RESOLUTION.replace('x', ':')}" in joined
+        assert "scale=1920:1080" not in joined
 
 
 # ---------------------------------------------------------------------------

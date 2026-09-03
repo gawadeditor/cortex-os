@@ -60,7 +60,7 @@
     .scene-table tr:last-child td { border-bottom: none; }
     .scene-table tr.missing td    { opacity: .55; }
     .scene-table tr.not-in-video  { opacity: .35; }
-    .loop-bar         { display: inline-block; height: 6px; background: var(--blue);
+    .loop-bar         { display: inline-block; height: 6px; background: var(--info);
                         border-radius: 2px; vertical-align: middle; }
     .loop-bar.high    { background: var(--red); }
     .loop-bar.med     { background: var(--yellow); }
@@ -83,30 +83,27 @@
 <div class="breadcrumb">
   <a href="/dashboard">Dashboard</a>
   <span class="breadcrumb-sep">›</span>
-  <a href="/episode/{{ episode_id }}">{{ episode_id }}</a>
+  <a href="/episode/{{ episode_id }}">{{ episode_id | episode_name }}</a>
   <span class="breadcrumb-sep">›</span>
   <span>QA</span>
 </div>
 
 <div class="page-header">
-  <h1>{{ episode_id }} — QA Inspection</h1>
-  <span class="page-meta">Read-only. No changes, no upload, no generation.</span>
+  <span class="eyebrow">Quality review</span>
+  <h1>{{ episode_id | episode_name }}</h1>
 </div>
 
 {# ── Verdict banner ─────────────────────────────────────────────────────── #}
 <div class="verdict-banner verdict-{{ qa.verdict | lower }}">
-  <span class="verdict-label">{{ qa.verdict }}</span>
+  <span class="verdict-label">{{ qa.verdict | plain_status }}</span>
   <div>
     <div class="verdict-sub">
-      {% if qa.fail_count > 0 %}{{ qa.fail_count }} check(s) failing{% endif %}
-      {% if qa.warn_count > 0 %}{% if qa.fail_count > 0 %}, {% endif %}{{ qa.warn_count }} warning(s){% endif %}
+      {% if qa.fail_count > 0 %}{{ qa.fail_count }} check{{ "s" if qa.fail_count != 1 }} failing{% endif %}
+      {% if qa.warn_count > 0 %}{% if qa.fail_count > 0 %}, {% endif %}{{ qa.warn_count }} warning{{ "s" if qa.warn_count != 1 }}{% endif %}
       {% if qa.fail_count == 0 and qa.warn_count == 0 %}All checks passed{% endif %}
     </div>
     <div class="verdict-sub" style="margin-top:3px;">
-      Source: {{ qa.video_file or "no video" }}{% if qa.video_size_mb %} ({{ qa.video_size_mb }}MB){% endif %}
-      &ensp;|&ensp;
-      {{ qa.total_duration_min }}min &ensp;|&ensp;
-      {{ qa.clip_count_present }}/{{ qa.scene_count_expected }} scene clips{% if qa.extra_clip_count %} (+{{ qa.extra_clip_count }} extra){% endif %}
+      {{ qa.total_duration_min }} min video{% if qa.video_size_mb %} · {{ qa.video_size_mb }} MB{% endif %} · {{ qa.clip_count_present }} of {{ qa.scene_count_expected }} clips ready
     </div>
   </div>
 </div>
@@ -117,16 +114,16 @@
   <ul class="check-list">
     <li class="check-item">
       <span class="check-icon {% if qa.qa_verdict and qa.qa_verdict|upper in ['APPROVED','PASS'] %}check-pass{% elif qa.qa_verdict|upper == 'REJECTED' %}check-fail{% else %}check-warn{% endif %}">•</span>
-      <div><strong>QA Agent verdict:</strong> {{ qa.qa_verdict or "not run" }}</div>
+      <div><strong>Automated review:</strong> {{ qa.qa_verdict | plain_status if qa.qa_verdict else "not run" }}</div>
     </li>
     <li class="check-item">
       <span class="check-icon {% if qa.render_ready %}check-pass{% else %}check-fail{% endif %}">•</span>
-      <div><strong>Render viable:</strong> {{ "yes" if qa.render_ready else "no — assembly did not produce a viable package" }}</div>
+      <div><strong>Video assembled:</strong> {{ "yes" if qa.render_ready else "no — the final video wasn't produced" }}</div>
     </li>
     <li class="check-item">
       <span class="check-icon {% if qa.coverage.insufficient_beats == 0 %}check-pass{% elif qa.coverage.insufficient_beats <= 2 %}check-warn{% else %}check-fail{% endif %}">•</span>
-      <div><strong>Visual coverage:</strong>
-        {% if qa.coverage.insufficient_beats %}{{ qa.coverage.insufficient_beats }} beat(s) short{% else %}sufficient{% endif %}
+      <div><strong>Enough footage:</strong>
+        {% if qa.coverage.insufficient_beats %}{{ qa.coverage.insufficient_beats }} part{{ "s" if qa.coverage.insufficient_beats != 1 }} short of footage{% else %}yes{% endif %}
         &ensp;({{ qa.coverage.video_s }}s video vs {{ qa.coverage.narration_s }}s narration{% if qa.coverage.ratio_pct %}, {{ qa.coverage.ratio_pct }}%{% endif %})
       </div>
     </li>

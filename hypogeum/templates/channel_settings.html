@@ -86,6 +86,37 @@
       {% endif %}
     </div>
 
+    <div class="card {{ 'is-warn' if keyword_research_stale else 'is-good' }}">
+      <div class="card-title">Search &amp; hashtag research</div>
+      <p class="page-meta" style="margin:0 0 8px;">
+        The words and hashtags real viewers use to find this kind of video — competitor
+        tags, high-traffic search terms and trending queries. Titles and captions lean
+        on this so a brand-new channel still gets found.
+      </p>
+      {% if keyword_research_status.state == 'running' %}
+      <div class="cs-fr"><span class="k">Status</span><span class="v" style="color:var(--warn);">Researching now… (about a minute)</span></div>
+      {% elif keyword_research %}
+      <div class="cs-fr"><span class="k">Last updated</span><span class="v">{{ keyword_research.researched_at | friendly_date }}</span></div>
+      <div class="cs-fr"><span class="k">Search terms found</span><span class="v">{{ keyword_research.high_volume_search_terms | length }}</span></div>
+      <div class="cs-fr"><span class="k">Competitor hashtags</span><span class="v">{{ keyword_research.competitor_hashtags | length }}</span></div>
+      <div class="cs-fr"><span class="k">Trending queries</span><span class="v">{{ keyword_research.trending_terms | length }}</span></div>
+      {% if keyword_research.high_volume_search_terms %}
+      <div style="margin-top:8px; font-size:11px; color:var(--faint); line-height:1.7;">
+        {% for t in keyword_research.high_volume_search_terms[:8] %}<span class="pill" style="margin:2px 4px 2px 0;">{{ t }}</span>{% endfor %}
+      </div>
+      {% endif %}
+      {% else %}
+      <div class="cs-fr"><span class="k">Status</span><span class="v miss">Not researched yet</span></div>
+      {% endif %}
+      {% if keyword_research_status.state != 'running' %}
+      <form method="post" action="/channel/{{ channel.channel_id }}/keyword-research/refresh" style="margin-top:10px;">
+        <button type="submit" class="btn {{ 'btn-primary' if keyword_research_stale }}">
+          {{ icon('refresh') }} {{ 'Research now' if not keyword_research else 'Refresh research' }}
+        </button>
+      </form>
+      {% endif %}
+    </div>
+
     <div class="card">
       <div class="card-title">Production plan</div>
       {% if ops %}

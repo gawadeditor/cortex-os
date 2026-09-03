@@ -2235,3 +2235,21 @@ CREATE INDEX IF NOT EXISTS idx_media_staging_attempts_scope
     ON media_staging_attempts(provider_id, channel_id, episode_id, deliverable_id, source_sha256);
 CREATE INDEX IF NOT EXISTS idx_media_staging_attempts_state
     ON media_staging_attempts(state);
+
+
+-- ---------------------------------------------------------------------------
+-- channel_keyword_research (2026-09-03)
+-- Per-channel discovery/SEO intelligence: competitor hashtags, high-volume
+-- category search terms, trending queries. Researched via Perplexity (see
+-- hypogeum/channel_keyword_research.py), cached here, refreshed periodically
+-- or on demand. Consumed by the metadata agents so a channel with no name
+-- recognition is found through the terms people actually search.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS channel_keyword_research (
+    channel_id       TEXT PRIMARY KEY,
+    research_json    TEXT NOT NULL,
+    researched_at    TEXT NOT NULL,
+    source_query_count INTEGER NOT NULL DEFAULT 0,
+    total_cost_usd   REAL NOT NULL DEFAULT 0.0,
+    metadata_version TEXT NOT NULL DEFAULT 'v1'
+);

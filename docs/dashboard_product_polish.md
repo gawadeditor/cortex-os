@@ -117,6 +117,25 @@ per-page `<style>` unless truly page-local.
   ("bedtime story", "kids bedtime cartoon", …) instead of only
   episode-specific proper nouns — a new channel with no name recognition
   is found through generic search. Applies from the next episode.
+- **Competitor + trend keyword research** (`hypogeum/channel_keyword_research.py`,
+  new): 3 Perplexity queries (competitor channels + the hashtags/keywords
+  they actually use · highest-volume + Google-Trends-style rising terms ·
+  long-tail audience search questions) → 1 Claude structuring call → cached
+  in the new `channel_keyword_research` table (~$0.03/channel, ~14-day TTL,
+  zero per-episode cost). `metadata_channel_context()` merges it into the
+  `channel_context` both metadata agents already send; prompts now say
+  "when competitor_hashtags / high_volume_search_terms / trending_terms are
+  present, build the tags and hashtags directly from them". Dashboard:
+  **Search & hashtag research** card on `/channel/<id>/settings` with a
+  "Research now / Refresh" button (`POST …/keyword-research/refresh`, runs
+  in a background thread). First run done for twinkle_mini_tales
+  2026-09-03 — 18 search terms, 20 competitor hashtags, 10 trending queries.
+- **Titles tab** (`episode_detail`): short-native episodes never run
+  `script_engine → title_candidates`, so the tab always showed "No title
+  candidates found" + a "re-run from the Script stage" instruction. Now
+  `_build_titles_data(short_native=…)` returns `not_applicable` with a calm
+  "one optimised title per platform" panel + the published title — same
+  treatment as the Branding and Thumbnails tabs.
 
 ## Log
 

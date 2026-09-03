@@ -7255,10 +7255,72 @@ def channel_settings_page(channel_id):
         grant_dashboard_signing = can_sign_from_dashboard()
     except Exception:  # noqa: BLE001
         grant_dashboard_signing = False
+
+    # Keyword / competitor research (SEO discovery intelligence)
+    keyword_research = None
+    keyword_research_stale = True
+    try:
+        from hypogeum import channel_keyword_research as _ckr
+        keyword_research = _ckr.get_keyword_research(channel_id, db_path=db)
+        keyword_research_stale = _ckr.is_stale(keyword_research)
+    except Exception:  # noqa: BLE001
+        pass
+    keyword_research_status = _KEYWORD_RESEARCH_STATUS.get(channel_id, {})
+
     return render_template("channel_settings.html",
                            channel=channel, brand=brand, model=model,
                            publishing=publishing, ops=ops, grant=grant,
-                           grant_dashboard_signing=grant_dashboard_signing)
+                           grant_dashboard_signing=grant_dashboard_signing,
+                           keyword_research=keyword_research,
+                           keyword_research_stale=keyword_research_stale,
+                           keyword_research_status=keyword_research_status)
+
+
+# In-memory status for the per-channel keyword-research refresh (best-effort;
+# the authoritative record is the channel_keyword_research table).
+_KEYWORD_RESEARCH_STATUS: dict = {}
+
+
+@app.route("/channel/<channel_id>/keyword-research/refresh", methods=["POST"])
+def channel_keyword_research_refresh(channel_id):
+    """Kick off a background competitor + trending keyword research run for
+    this channel. ~3 Perplexity queries + 1 structuring call, ~$0.03, cached
+    ~14 days — consumed by the metadata agents on the next episode."""
+    import threading
+    from datetime import datetime, timezone
+    db = _db_path()
+    channel = get_channel_detail(channel_id, db_path=db)
+    if channel is None:
+        return render_template("not_found.html", kind="Channel", id=channel_id), 404
+
+    if _KEYWORD_RESEARCH_STATUS.get(channel_id, {}).get("state") == "running":
+        return redirect(url_for("channel_settings_page", channel_id=channel_id,
+                                scope=channel_id, kw="running"))
+
+    _KEYWORD_RESEARCH_STATUS[channel_id] = {
+        "state": "running",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    def _run():
+        from hypogeum import channel_keyword_research as _ckr
+        try:
+            out = _ckr.refresh_keyword_research(channel_id, db_path=db, force=True)
+            ok = bool(out) and not out.get("error")
+            _KEYWORD_RESEARCH_STATUS[channel_id] = {
+                "state": "done" if ok else "error",
+                "error": out.get("error") if isinstance(out, dict) else None,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            }
+        except Exception as exc:  # noqa: BLE001
+            _KEYWORD_RESEARCH_STATUS[channel_id] = {
+                "state": "error", "error": str(exc),
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+    threading.Thread(target=_run, daemon=True).start()
+    return redirect(url_for("channel_settings_page", channel_id=channel_id,
+                            scope=channel_id, kw="started"))
 
 
 @app.route("/channel/<channel_id>/operating-grant", methods=["GET", "POST"])

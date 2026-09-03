@@ -100,6 +100,15 @@ For EACH Short, write exactly ONE title following these rules:
 Titles must be distinct from each other and from any other Short's title.
 Never output a title equal to its own short_id.
 
+If "channel_context" is present, this channel is brand-new with no name
+recognition -- viewers find it by searching the generic category, not the
+brand. When it fits this Short's actual content, phrase the title using the
+natural search language people actually type: prefer the wording in
+channel_context.high_volume_search_terms and channel_context.trending_terms
+(e.g. lead with "Bedtime Story:" for a bedtime-story channel). Never add a
+term that misrepresents what the Short is about, and never put a hashtag in
+a title.
+
 Return ONLY a JSON object of this exact shape, one entry per input Short, using
 each Short's own short_id unchanged:
 {{"titles": [{{"short_id": "...", "title": "..."}}, ...]}}"""
@@ -127,11 +136,15 @@ caption equal to its own short_id, and never output an empty caption.
 
 If "channel_context" is present, the channel is brand-new with no name
 recognition. End every caption with 3-6 broad, high-search-volume hashtags
-for the channel's GENERIC CATEGORY / FORMAT / AUDIENCE (from channel_context
-genre/format/audience) -- the tags a stranger would search, e.g.
+for the channel's GENERIC CATEGORY / FORMAT / AUDIENCE -- the tags a stranger
+would search, NOT episode-specific tokens. When
+channel_context.competitor_hashtags is present, draw the hashtags from that
+list (these are the tags successful competitors in this exact niche actually
+use); otherwise derive them from channel_context genre/format/audience, e.g.
 #bedtimestories #kidsvideo #sleepstory #bedtimestory for a bedtime-cartoon
-channel -- NOT episode-specific tokens. Keep the rest of the caption grounded
-only in this Short's own content.
+channel. If channel_context.high_volume_search_terms or .trending_terms are
+present, work one or two of those phrases naturally into the caption sentence
+itself. Keep the rest of the caption grounded only in this Short's own content.
 
 Return ONLY a JSON object of this exact shape, one entry per input Short, using
 each Short's own short_id unchanged:
@@ -216,11 +229,20 @@ def generate_shorts_titles(
     if len(set(requested_ids)) != len(requested_ids):
         raise ShortsMetadataError(f"shorts_scripts contains duplicate short_id(s): {requested_ids}")
 
+    _title_payload = {"shorts": input_shorts}
+    try:
+        from hypogeum.channel_keyword_research import metadata_channel_context  # noqa: PLC0415
+        _ctx = metadata_channel_context(channel_id) if channel_id else None
+        if _ctx:
+            _title_payload["channel_context"] = _ctx
+    except Exception:  # noqa: BLE001
+        pass
+
     call = llm_call or _default_llm_call
     try:
         response = call(
             _SYSTEM_PROMPT.format(rules=json.dumps(rules)),
-            {"shorts": input_shorts},
+            _title_payload,
             config=config, episode_id=episode_id, channel_id=channel_id,
         )
     except Exception as exc:
@@ -347,15 +369,10 @@ def generate_shorts_captions(
 
     _payload = {"shorts": input_shorts}
     try:
-        from hypogeum.channel_creative_brief import channel_brief_for  # noqa: PLC0415
-        _brief = channel_brief_for(channel_id) if channel_id else {}
-        if _brief:
-            _payload["channel_context"] = {
-                "genre": _brief.get("genre") or "",
-                "format": _brief.get("format") or "",
-                "audience": _brief.get("audience") or "",
-                "brand_is_unknown": True,
-            }
+        from hypogeum.channel_keyword_research import metadata_channel_context  # noqa: PLC0415
+        _ctx = metadata_channel_context(channel_id) if channel_id else None
+        if _ctx:
+            _payload["channel_context"] = _ctx
     except Exception:  # noqa: BLE001
         pass
 

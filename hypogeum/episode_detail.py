@@ -381,8 +381,13 @@ def _build_detail(conn, episode_id: str) -> Optional[dict]:
     # ── Thumbnails tab data ──────────────────────────────────────────────
     thumbnails = _build_thumbnails_data(conn, episode_id, run_id)
 
+    # ── Branding / short-native flag (needed by Titles + Branding tabs) ──
+    _short_native = _is_short_native_episode(conn, run.get("channel_id"))
+
     # ── Titles tab data ──────────────────────────────────────────────────
-    titles_data = _build_titles_data(conn, episode_id)
+    titles_data = _build_titles_data(
+        conn, episode_id, short_native=_short_native, display_title=display_title,
+    )
 
     # ── Analytics tab data ───────────────────────────────────────────────
     analytics_data = _build_analytics_data(conn, episode_id)
@@ -394,7 +399,6 @@ def _build_detail(conn, episode_id: str) -> Optional[dict]:
     learning_data = _build_learning_data(conn, episode_id, run_id)
 
     # ── Branding tab data ─────────────────────────────────────────────────
-    _short_native = _is_short_native_episode(conn, run.get("channel_id"))
     branding_data = _build_branding_data(
         conn, episode_id, run_id, short_native=_short_native,
     )
@@ -904,7 +908,8 @@ _FORMAT_LABELS: dict[str, str] = {
 }
 
 
-def _build_titles_data(conn, episode_id: str) -> dict:
+def _build_titles_data(conn, episode_id: str, *, short_native: bool = False,
+                       display_title: Optional[str] = None) -> dict:
     """
     Build Titles tab data from titles + platform_analytics.
 
@@ -917,6 +922,11 @@ def _build_titles_data(conn, episode_id: str) -> dict:
           "candidates": [...],
           "summary": {"count": N, "has_selected": bool, "has_real_data": bool},
         }
+
+    Short-native episodes never run the long-form ``script_engine →
+    title_candidates`` stage — each platform gets one optimised title
+    generated at publish time, so there is no candidate set to compare.
+    For those we return ``not_applicable`` with the published title.
     """
     # ── Title candidates ─────────────────────────────────────────────────
     title_rows = conn.execute(
@@ -928,6 +938,20 @@ def _build_titles_data(conn, episode_id: str) -> dict:
         """,
         [episode_id],
     ).fetchall()
+
+    if not title_rows and short_native:
+        _pub_title = (display_title or "").strip()
+        return {
+            "not_applicable": True,
+            "na_reason": (
+                "This is a short vertical video. Short-form videos get a single "
+                "optimised title per platform, written when the video is published — "
+                "there's no set of alternative titles to compare here."
+            ),
+            "published_title": _pub_title or None,
+            "candidates": [],
+            "summary": {"count": 0, "has_selected": False, "has_real_data": False},
+        }
 
     if not title_rows:
         return {

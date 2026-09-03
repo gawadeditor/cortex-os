@@ -1702,7 +1702,21 @@ function resumeEpisode(episodeId, kind) {
 {% if active_tab == 'titles' %}
 {% set tl = d.titles %}
 
-{% if tl.candidates %}
+{% if tl.not_applicable %}
+<div class="dv-empty">
+  {{ icon('pencil') }}
+  <div class="dv-empty-title">One title per platform</div>
+  <div class="dv-empty-sub">{{ tl.na_reason }}</div>
+  {% if tl.published_title %}
+  <div class="card" style="margin-top:16px; padding:14px 16px; text-align:left;">
+    <div style="font-size:11px; text-transform:uppercase; letter-spacing:.04em;
+                color:var(--muted); margin-bottom:4px;">Published title</div>
+    <div style="font-size:15px; font-weight:600;">{{ tl.published_title }}</div>
+  </div>
+  {% endif %}
+</div>
+
+{% elif tl.candidates %}
 <div class="title-list">
   {% for c in tl.candidates %}
   {% set is_sel = c.selected %}

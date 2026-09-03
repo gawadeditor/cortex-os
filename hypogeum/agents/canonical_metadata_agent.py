@@ -84,6 +84,15 @@ You will receive a JSON object with:
       bedtime-cartoon channel; "true crime documentary", "unsolved mystery"
       for a mystery channel. These broad, high-search-volume phrases are how
       a new channel gets found -- NOT the episode's specific proper nouns.
+      channel_context may ALSO carry researched discovery data for this exact
+      niche: "competitor_hashtags" (the hashtags successful competitors
+      actually use), "high_volume_search_terms" (the highest-search-volume
+      phrases people type, broadest first), "trending_terms" (currently
+      rising queries) and "audience_questions" (long-tail questions the
+      audience searches). When these are present they OVERRIDE your own
+      guesses -- build visible_hashtags and backend_tags directly from
+      competitor_hashtags + high_volume_search_terms + trending_terms, and
+      weave an audience_question phrasing into the description where natural.
   "sources": a list of {{"title", "url"}} objects -- real, verified sources for
       this episode. You may reference these in a CTA or description, but you
       must NEVER invent a different source or URL.
@@ -106,17 +115,20 @@ For EACH requested platform, produce:
       itself. 3 to 8 hashtags. When channel_context is present, AT LEAST HALF
       of them must be broad category/format/audience hashtags a stranger
       would search (e.g. #bedtimestories #kidsvideo #sleepstory), not
-      episode-specific tokens.
+      episode-specific tokens. When channel_context.competitor_hashtags is
+      present, take those broad hashtags from that list verbatim.
   "backend_tags": ONLY for platforms where backend_tags_supported is true
       below -- a list of 8 to 17 lowercase search-intent phrases (never
       hashtags, never overlapping with visible_hashtags), each under 100
       characters, combined length under 500 characters. Omit entirely for
       a platform where backend_tags_supported is false.
       When channel_context is present, AT LEAST 6 of these tags MUST be
-      broad, high-search-volume category / format / audience phrases derived
-      from channel_context (genre, format, audience) -- the terms a viewer
-      who has never heard of this channel would actually type. Order them
-      broadest-first. The remaining tags may be episode-specific. Include
+      broad, high-search-volume category / format / audience phrases -- the
+      terms a viewer who has never heard of this channel would actually
+      type. If channel_context.high_volume_search_terms / .trending_terms /
+      .audience_questions are present, draw those 6+ tags from them directly
+      (broadest first). Otherwise derive them from channel_context genre /
+      format / audience. The remaining tags may be episode-specific. Include
       natural variants and plurals of the core category phrase (e.g.
       "bedtime story", "bedtime stories", "bedtime stories for kids",
       "kids bedtime story", "sleep story for kids"). NEVER fill the list
@@ -634,6 +646,24 @@ def generate_canonical_platform_metadata_for_deliverable(
             }
     except Exception as exc:  # noqa: BLE001
         log.warn("canonical_metadata_channel_context_unavailable",
+                 deliverable_id=deliverable_id, error=str(exc))
+
+    # Researched discovery intelligence (competitor hashtags, high-volume
+    # search terms, trending queries) — cached per channel, refreshed off the
+    # episode path. Absent until the first research run; strengthens the
+    # generic-search strategy above when present.
+    try:
+        from hypogeum.channel_keyword_research import keyword_context_for_metadata  # noqa: PLC0415
+        _research = keyword_context_for_metadata(channel_id) if channel_id else None
+        if _research:
+            if channel_context is None:
+                channel_context = {"brand_is_unknown": True}
+            channel_context["competitor_hashtags"] = _research["competitor_hashtags"]
+            channel_context["high_volume_search_terms"] = _research["high_volume_search_terms"]
+            channel_context["trending_terms"] = _research["trending_terms"]
+            channel_context["audience_questions"] = _research["audience_questions"]
+    except Exception as exc:  # noqa: BLE001
+        log.warn("canonical_metadata_keyword_research_unavailable",
                  deliverable_id=deliverable_id, error=str(exc))
 
     input_package = {

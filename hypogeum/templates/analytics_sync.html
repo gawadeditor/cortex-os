@@ -199,14 +199,19 @@
       Cortex refreshes analytics on its own. Use this only if you want the latest numbers right now.
     </div>
     <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-      <button id="btn-sync-quick" class="btn btn-save" onclick="runSync(event, 28)">
-        Sync YouTube (28d)
+      <button id="btn-sync-quick" class="btn btn-save" onclick="runSync(event, 7)">
+        Refresh now
       </button>
-      <button id="btn-sync-full" class="btn" onclick="runSync(event, 900)"
+      <button id="btn-sync-full" class="btn" onclick="runSync(event, 90)"
               style="border-color:var(--good); color:var(--good);">
-        Sync YouTube (900d)
+        Deep refresh (90d)
       </button>
       <span id="sync-status" style="font-size:12px; color:var(--muted);"></span>
+    </div>
+    <div style="font-size:11px; color:var(--faint); margin-top:8px;">
+      Pulls views, reach, likes and watch-time for every published post from
+      Zernio (all four platforms) and attaches them to the episode that made
+      them. YouTube's own API adds deeper retention data when connected.
     </div>
   </div>
 </details>

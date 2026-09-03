@@ -701,6 +701,42 @@ class ZernioProvider:
             return {"status_code": response.status_code, "post": None, "error": response.json_body}
         return {"status_code": response.status_code, "post": response.json_body.get("post", response.json_body), "error": None}
 
+    def get_analytics(self, *, page: int = 1, limit: int = 100,
+                      db_path: Optional[Path] = None) -> dict:
+        """
+        Read-only GET /v1/analytics (operationId `getAnalytics`) -- one
+        page of the account's published-post performance, exactly as
+        Zernio returns it. Never mutates, never credential-logs.
+
+        Response shape (verified live 2026-08-21, see
+        docs/operations/audits/ZERNIO_CONTRACT_AUDIT_2026-08-21.md):
+            {overview, posts[], pagination{page,limit,total,pages},
+             accounts, hasAnalyticsAccess}
+        Each `posts[]` item carries `_id`, `latePostId` (== the post id
+        Cortex recorded at publish time, i.e.
+        publishing_receipts.provider_publication_id), `platform`,
+        `platforms[]` (per-destination, each with `platformPostId` +
+        nested `analytics{}`), and a post-level `analytics{}` with keys
+        views / impressions / reach / likes / comments / shares / saves /
+        clicks / follows / engagementRate / igReelsAvgWatchTime (ms) /
+        igReelsVideoViewTotalTime (ms) / videoDurationSeconds / lastUpdated.
+
+        Returns {status_code, data, error}. Never raises on a provider-side
+        error response, only on a transport failure (ZernioTransportError).
+        """
+        credential = _resolve_zernio_credential(db_path)
+        if credential is None:
+            raise ZernioCredentialNotFoundError(
+                "no active provider='zernio' secret profile found in Credential Manager"
+            )
+        headers = {"Authorization": f"Bearer {credential}"}
+        del credential
+        url = f"{_ZERNIO_BASE_URL}/analytics?page={int(page)}&limit={int(limit)}"
+        response = self._transport.get(url=url, headers=headers, timeout=_DEFAULT_TIMEOUT_SECONDS)
+        if response.status_code != 200 or not isinstance(response.json_body, dict):
+            return {"status_code": response.status_code, "data": None, "error": response.json_body}
+        return {"status_code": response.status_code, "data": response.json_body, "error": None}
+
     def publish(
         self,
         *,

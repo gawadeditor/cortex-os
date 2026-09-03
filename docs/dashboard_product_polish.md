@@ -136,6 +136,21 @@ per-page `<style>` unless truly page-local.
   `_build_titles_data(short_native=…)` returns `not_applicable` with a calm
   "one optimised title per platform" panel + the published title — same
   treatment as the Branding and Thumbnails tabs.
+- **Real analytics from Zernio** (`hypogeum/publishing/zernio_analytics_sync.py`,
+  new): `GET /v1/analytics` returns per-post, per-platform metrics (views,
+  reach, impressions, likes, comments, shares, IG-Reels watch-time) for
+  every published post across YouTube / TikTok / Instagram / Facebook.
+  Each Zernio post maps back to its Cortex episode via the publishing
+  ledger (`post.latePostId == publishing_receipts.provider_publication_id`)
+  and is written to `platform_analytics` with `source='api'` keyed by the
+  real `episode_id` — which is what `learning_engine` reads. Wired into
+  `platform_sync.run_platform_sync` (the primary pass, all 4 platforms in
+  one call) and `run_worker._sync_analytics_background` (hourly, regardless
+  of YouTube OAuth state). CLI: `tools/sync_zernio_analytics.py [--learn]`.
+  `ZernioProvider.get_analytics()` added. First live sync 2026-09-03:
+  12 rows across both channels; `ep_f38dc597` → 6 learning insights.
+  This closes the "learning needs real analytics" gap — the worker no
+  longer depends on YouTube OAuth for the learning loop.
 
 ## Log
 

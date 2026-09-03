@@ -205,6 +205,43 @@ def _sync_tiktok(
         return {"platform": "tiktok", "status": "error", "records_imported": 0, "error": str(exc)}
 
 
+def _sync_zernio(
+    channel_id: Optional[str],
+    db_path: Optional[Path],
+    window_days: int,
+    triggered_by: str,
+    conn,
+) -> list[dict]:
+    """One GET /v1/analytics pass covering every published post on all four
+    platforms, mapped back to the Cortex episode via the publishing ledger.
+    Logs one platform_sync_log row per platform and returns them."""
+    import json as _json
+    try:
+        from hypogeum.publishing.zernio_analytics_sync import sync_zernio_analytics
+        out = sync_zernio_analytics(db_path=db_path, window_days=min(window_days, 30))
+    except Exception as exc:  # noqa: BLE001
+        for p in ("youtube", "tiktok", "instagram", "facebook"):
+            _log_sync(conn, platform=p, channel_id=channel_id, status="error",
+                      records_imported=0, errors_json=_json.dumps([str(exc)]),
+                      window_days=window_days, triggered_by=triggered_by)
+        return [{"platform": p, "status": "error", "records_imported": 0,
+                 "error": str(exc), "provider": "zernio"} for p in
+                ("youtube", "tiktok", "instagram", "facebook")]
+
+    per_platform = out.get("platforms") or {}
+    rows = []
+    for p in ("youtube", "tiktok", "instagram", "facebook"):
+        n = int(per_platform.get(p, 0))
+        status = "ok" if out.get("ok") else "error"
+        errs = None if out.get("ok") else _json.dumps([out.get("error") or "no data"])
+        _log_sync(conn, platform=p, channel_id=channel_id, status=status,
+                  records_imported=n, errors_json=errs,
+                  window_days=window_days, triggered_by=triggered_by)
+        rows.append({"platform": p, "status": status, "records_imported": n,
+                     "provider": "zernio"})
+    return rows
+
+
 def run_platform_sync(
     channel_id: Optional[str] = None,
     db_path: Optional[Path] = None,
@@ -215,8 +252,12 @@ def run_platform_sync(
     """
     Run analytics sync across all supported platforms (or a subset).
 
-    Writes one platform_sync_log row per platform. YouTube, Meta
-    (Facebook/Instagram), and TikTok all sync via API.
+    Zernio (GET /v1/analytics) is the primary pass — it covers all four
+    platforms in one call, keyed to the episode via the publishing ledger.
+    YouTube, Meta (Facebook/Instagram) and TikTok then layer richer
+    retention data on top wherever their own API credentials are connected.
+
+    Writes platform_sync_log rows per platform per provider.
 
     Returns:
         {ok, results: [{platform, status, records_imported, error?}], total_records}
@@ -227,6 +268,13 @@ def run_platform_sync(
 
     results = []
     try:
+        # Primary: one Zernio pass for every platform.
+        if not platforms or set(platforms) & set(_SUPPORTED_PLATFORMS):
+            try:
+                results.extend(_sync_zernio(channel_id, db_path, window_days, triggered_by, conn))
+            except Exception:  # noqa: BLE001
+                pass
+
         for platform in target:
             if platform == "youtube":
                 r = _sync_youtube(channel_id, db_path, window_days, triggered_by, conn)
@@ -245,7 +293,13 @@ def run_platform_sync(
     finally:
         conn.close()
 
-    total = sum(r.get("records_imported", 0) for r in results)
+    # Per platform, count the best single provider rather than summing
+    # Zernio + native-API rows for the same platform.
+    _best: dict = {}
+    for r in results:
+        p = r.get("platform")
+        _best[p] = max(_best.get(p, 0), r.get("records_imported", 0))
+    total = sum(_best.values())
     has_error = any(r["status"] == "error" for r in results)
     return {
         "ok":            not has_error,

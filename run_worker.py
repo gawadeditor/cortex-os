@@ -291,9 +291,28 @@ def _sync_analytics_background(db_path: Path, config) -> None:
     """
     Background analytics sync — runs automatically, non-blocking, best-effort.
 
-    YouTube: syncs if OAuth credentials are configured (source='api').
-    TikTok / Instagram / Facebook: logged as skipped (connectors not implemented).
+    Zernio: the primary path — GET /v1/analytics covers every published
+    post across YouTube / TikTok / Instagram / Facebook, mapped back to the
+    Cortex episode via the publishing ledger (source='api').
+    YouTube Analytics API: an extra pass for richer retention data, only
+    when OAuth credentials are configured.
     """
+    # Zernio — real per-episode numbers for all four platforms.
+    try:
+        from hypogeum.publishing.zernio_analytics_sync import sync_zernio_analytics
+        z = sync_zernio_analytics(db_path=db_path, window_days=7)
+        if z.get("ok"):
+            log.info(
+                "analytics_sync_complete provider=zernio rows=%d matched=%d unmatched=%d by_channel=%s",
+                z.get("rows_written", 0), z.get("matched", 0),
+                z.get("unmatched", 0), z.get("by_channel", {}),
+            )
+        else:
+            log.warning("analytics_sync_zernio_no_data error=%s", z.get("error"))
+    except Exception as exc:
+        log.error("analytics_sync_error provider=zernio error=%s", exc)
+
+    # YouTube Analytics API — optional richer retention pass.
     try:
         yt_ok = bool(
             getattr(config, "YOUTUBE_REFRESH_TOKEN", None)
@@ -301,17 +320,17 @@ def _sync_analytics_background(db_path: Path, config) -> None:
             and getattr(config, "YOUTUBE_CLIENT_SECRET", None)
         )
         if not yt_ok:
-            log.debug("analytics_sync_skip reason=youtube_not_connected")
+            log.debug("analytics_sync_skip reason=youtube_oauth_not_connected")
             return
         from hypogeum.youtube_analytics import sync_youtube_analytics
         result = sync_youtube_analytics(config, db_path=db_path, window_days=90)
         log.info(
-            "analytics_sync_complete platform=youtube synced=%d skipped=%d",
+            "analytics_sync_complete provider=youtube_api synced=%d skipped=%d",
             result.get("synced_count", 0),
             result.get("skipped_count", 0),
         )
     except Exception as exc:
-        log.error("analytics_sync_error error=%s", exc)
+        log.error("analytics_sync_error provider=youtube_api error=%s", exc)
 
 
 def _run_learning_cycle(db_path: Path) -> dict:

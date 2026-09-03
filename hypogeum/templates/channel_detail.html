@@ -118,7 +118,7 @@
       {% for r in recent_runs %}
       <tr>
         <td style="max-width:340px;">
-          <a href="/run/{{ r.run_id }}" style="color:var(--text); font-weight:600;">
+          <a href="/episode/{{ r.episode_id }}" style="color:var(--text); font-weight:600;">
             <span class="cell-title">{{ (r.episode_id or r.run_id) | episode_name }}</span>
           </a>
         </td>

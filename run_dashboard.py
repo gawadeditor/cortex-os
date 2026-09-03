@@ -7142,7 +7142,19 @@ def channel_detail(channel_id):
     except Exception:  # noqa: BLE001
         rollup = None
     try:
-        recent_runs = list_runs(db_path=db, channel_id=channel_id, limit=6)
+        _all = list_runs(db_path=db, channel_id=channel_id, limit=30)
+        # One row per episode (its most recent run), and never show a
+        # superseded episode — a client shouldn't see the retry archaeology.
+        recent_runs, _seen = [], set()
+        for r in _all:
+            ep = r.get("episode_id")
+            if (r.get("superseded") or r.get("episode_status") == "superseded"
+                    or not ep or ep in _seen):
+                continue
+            _seen.add(ep)
+            recent_runs.append(r)
+            if len(recent_runs) >= 6:
+                break
     except Exception:  # noqa: BLE001
         recent_runs = []
     caption_on = False

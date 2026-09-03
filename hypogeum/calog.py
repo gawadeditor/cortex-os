@@ -225,10 +225,10 @@ def _gate_budget(config) -> GateResult:
 
     ceiling = getattr(config, "FINANCE_BUDGET_CEILING_USD", 0.0) or 0.0
     if ceiling > 0:
-        return GateResult("budget", True, f"Budget ceiling defined: ${ceiling:.2f}.")
+        return GateResult("budget", True, f"Per-episode spend limit set: ${ceiling:.2f}.")
     return GateResult(
         "budget", False,
-        "FINANCE_BUDGET_CEILING_USD is 0 or unset. Define a budget ceiling before activating.",
+        "No per-episode spend limit set. Define one before activating this channel.",
     )
 
 

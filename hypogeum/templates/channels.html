@@ -6,6 +6,7 @@
   {% include '_base_style.html' %}
   {% from '_icons.html' import icon %}
   {% from '_hero.html' import hero %}
+  {% from '_charts.html' import hbar %}
   <style>
     .ch-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
     .ch-name { font-family: var(--font-display); font-size: 17px; font-weight: 700; letter-spacing: -.01em; }
@@ -78,8 +79,11 @@
       <div class="ch-rt-k">Budget {{ rt.weekly_budget.week_key | friendly_week if rt.weekly_budget.week_key }}</div>
       <div class="ch-rt-v">
         {% if rt.weekly_budget.configured %}
+          {% set _pct = rt.weekly_budget.pct_used or 0 %}
           {{ (rt.weekly_budget.reserved_committed_usd or 0) | friendly_money }} of {{ (rt.weekly_budget.ceiling_usd or 0) | friendly_money }}
-          {% if rt.weekly_budget.pct_used is not none %}<span class="muted">· {{ rt.weekly_budget.pct_used | round | int }}%</span>{% endif %}
+          <span class="{{ 'err' if _pct >= 90 else ('warn' if _pct >= 70 else 'muted') }}">· {{ _pct | round | int }}%</span>
+          {{ hbar(rt.weekly_budget.reserved_committed_usd or 0, rt.weekly_budget.ceiling_usd or 1,
+                  tone=('critical' if _pct >= 90 else ('warn' if _pct >= 70 else 'accent'))) }}
         {% else %}<span class="muted">not set</span>{% endif %}
       </div>
     </div>

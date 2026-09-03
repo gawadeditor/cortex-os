@@ -438,14 +438,14 @@ class TestFlaskLiveRoutes:
         r = client.get("/queue")
         assert r.status_code == 200
         text = r.get_data(as_text=True)
-        assert "Queue Monitor" in text
+        assert "Production queue" in text
 
     def test_queue_page_shows_counts(self, flask_client):
         client, _ = flask_client
         r = client.get("/queue")
         text = r.get_data(as_text=True)
-        assert "Queued" in text
-        assert "Claimed" in text
+        assert "Waiting" in text
+        assert "In progress" in text
 
     def test_failures_page_200(self, flask_client):
         client, _ = flask_client

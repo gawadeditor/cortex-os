@@ -92,15 +92,13 @@
 </div>
 
 <div>
-  <div class="sec-head"><h2>Queue</h2></div>
+  <div class="sec-head"><h2>Up next</h2></div>
   <div class="card" id="queue-card">
     <div class="row" style="gap:24px;">
-      <div><span class="stat-val" style="font-size:20px;" id="q-queued">{{ queue.queued }}</span><div class="stat-note">waiting</div></div>
-      <div><span class="stat-val" style="font-size:20px;" id="q-claimed">{{ queue.claimed }}</span><div class="stat-note">starting</div></div>
-      <div><span class="stat-val" style="font-size:20px;" id="q-completed">{{ queue.completed }}</span><div class="stat-note">done</div></div>
-      <div><span class="stat-val err" style="font-size:20px;" id="q-failed">{{ queue.failed }}</span><div class="stat-note">stopped</div></div>
+      <div><span class="stat-val" style="font-size:20px;" id="q-queued">{{ queue.queued }}</span><div class="stat-note">topics waiting</div></div>
+      <div><span class="stat-val" style="font-size:20px;" id="q-claimed">{{ queue.claimed }}</span><div class="stat-note">about to start</div></div>
     </div>
-    <div style="margin-top:12px;"><a href="/episodes#queue" class="btn btn-sm">See the queue</a></div>
+    <div style="margin-top:12px;"><a href="/create" class="btn btn-sm">Open the queue</a></div>
   </div>
 
   <div class="sec-head"><h2>Stopped in the last day</h2></div>
@@ -149,8 +147,6 @@ function pollLive() {
     var q = data.queue;
     document.getElementById('q-queued').textContent    = q.queued;
     document.getElementById('q-claimed').textContent   = q.claimed;
-    document.getElementById('q-completed').textContent = q.completed;
-    document.getElementById('q-failed').textContent    = q.failed;
     var ar = document.getElementById('active-runs');
     document.getElementById('active-count').textContent = data.active_runs.length;
     if (data.active_runs.length === 0) {

@@ -21,27 +21,31 @@
 
 
 <div class="page-header">
-  <h1>Queue Monitor</h1>
-  <span class="page-meta" id="last-updated">Auto-refreshes every 5 s</span>
+  <h1>Production queue</h1>
+  <span class="page-meta" id="last-updated">Updates on its own every few seconds</span>
 </div>
+<p class="muted" style="font-size:12.5px; margin:-6px 0 16px; max-width:620px;">
+  The low-level work queue the production worker pulls from. For the
+  everyday view of what's being made, use <a href="/live">What's happening now</a>.
+</p>
 
 {# ── Counts ── #}
 <div class="metric-strip">
   <div class="metric-tile">
     <div class="metric-val warn" id="q-queued">{{ queue.queued }}</div>
-    <div class="metric-label">Queued</div>
+    <div class="metric-label">Waiting</div>
   </div>
   <div class="metric-tile">
     <div class="metric-val ok" id="q-claimed">{{ queue.claimed }}</div>
-    <div class="metric-label">Claimed</div>
+    <div class="metric-label">In progress</div>
   </div>
   <div class="metric-tile">
     <div class="metric-val muted" id="q-completed">{{ queue.completed }}</div>
-    <div class="metric-label">Completed</div>
+    <div class="metric-label">Finished</div>
   </div>
   <div class="metric-tile">
     <div class="metric-val err" id="q-failed">{{ queue.failed }}</div>
-    <div class="metric-label">Failed</div>
+    <div class="metric-label">Stopped</div>
   </div>
   <div class="metric-tile">
     <div class="metric-val muted" id="q-cancelled">{{ queue.cancelled }}</div>
@@ -49,7 +53,7 @@
   </div>
   <div class="metric-tile">
     <div class="metric-val" id="q-total">{{ queue.total }}</div>
-    <div class="metric-label">Total</div>
+    <div class="metric-label">All time</div>
   </div>
 </div>
 
@@ -59,27 +63,21 @@
   <table>
     <thead>
       <tr>
-        <th>Queue ID</th>
         <th>Channel</th>
         <th>Episode</th>
         <th>Status</th>
-        <th>Priority</th>
-        <th>Worker</th>
-        <th>Queued at</th>
-        <th>Claimed at</th>
+        <th>Waiting since</th>
+        <th>Picked up</th>
       </tr>
     </thead>
     <tbody id="queue-tbody">
       {% for item in queue.pending %}
       <tr>
-        <td class="muted" style="font-size:12px;">{{ item.queue_id[:12] }}…</td>
-        <td>{{ item.channel_id or '—' }}</td>
-        <td>{{ item.episode_id or '—' }}</td>
-        <td><span class="badge badge-{{ item.status }}">{{ item.status }}</span></td>
-        <td class="muted" style="text-align:right;">{{ item.priority }}</td>
-        <td class="muted" style="font-size:12px;">{{ item.worker_id or '—' }}</td>
-        <td class="muted" style="font-size:12px; white-space:nowrap;">{{ item.queued_at[:16] if item.queued_at else '—' }}</td>
-        <td class="muted" style="font-size:12px; white-space:nowrap;">{{ item.claimed_at[:16] if item.claimed_at else '—' }}</td>
+        <td>{{ item.channel_id | channel_name }}</td>
+        <td>{{ item.episode_id | episode_name }}</td>
+        <td><span class="badge badge-{{ item.status }}">{{ item.status | plain_status }}</span></td>
+        <td class="muted" style="font-size:12px; white-space:nowrap;">{{ item.queued_at | rel_time if item.queued_at else '—' }}</td>
+        <td class="muted" style="font-size:12px; white-space:nowrap;">{{ item.claimed_at | rel_time if item.claimed_at else '—' }}</td>
       </tr>
       {% endfor %}
     </tbody>

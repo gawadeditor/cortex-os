@@ -10,10 +10,10 @@
   ('Overview',       '/dashboard',            ['/dashboard', '/']),
   ('Channels',       '/channels',             ['/channels']),
   ('Production',     '/runs',                 ['/runs', '/run/', '/create', '/live', '/failures', '/queue']),
-  ('Episodes',       '/episodes',             ['/episodes', '/episode/', '/attention', '/approvals']),
+  ('Episodes',       '/episodes',             ['/episodes', '/episode/', '/attention', '/approvals', '/preflight', '/signals']),
   ('Learning',       '/intelligence/learning',['/intelligence', '/compare', '/learning', '/analytics']),
   ('Providers',      '/providers',            ['/providers', '/providers/models']),
-  ('Infrastructure', '/infrastructure',       ['/infrastructure', '/preflight', '/setup', '/signals']),
+  ('Infrastructure', '/infrastructure',       ['/infrastructure', '/setup']),
   ('Governance',     '/decisions',            ['/decisions', '/decision-reviews', '/decision-inputs', '/execution-plans']),
   ('Storage',        '/settings/storage',     ['/settings/storage', '/archive']),
   ('Advanced',       '/advanced',             ['/advanced', '/prompts', '/command', '/published/import']),
@@ -95,7 +95,7 @@
 {#- Contextual sub-tabs for factory sections that have several pages. -#}
 {%- set subgroups = {
   '/runs':            [('Queue','/create'), ('Live','/live'), ('Run history','/runs'), ('Failures','/failures'), ('Discovery','/discover')],
-  '/episodes':        [('Episodes','/episodes'), ('Attention','/attention'), ('Approvals','/approvals'), ('Preflight','/preflight')],
+  '/episodes':        [('Episodes','/episodes'), ('Needs attention','/attention'), ('Alert history','/signals'), ('Approvals','/approvals'), ('Readiness check','/preflight')],
   '/intelligence/learning': [('Learning','/intelligence/learning'), ('Performance','/intelligence/performance'), ('Sync health','/intelligence/sync'), ('Model comparison','/compare')],
   '/infrastructure':  [('Overview','/infrastructure'), ('Workers','/infrastructure/workers'), ('Providers','/infrastructure/providers'), ('Connections','/infrastructure/connections'), ('Config','/infrastructure/config'), ('Debug','/infrastructure/debug')],
   '/decisions':       [('Decisions','/decisions'), ('Reviews','/decision-reviews'), ('Inputs','/decision-inputs'), ('Plans','/execution-plans')],

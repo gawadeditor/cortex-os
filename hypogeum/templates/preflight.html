@@ -49,22 +49,55 @@
 {% endif %}
 
 {% if preflight.checks %}
-<div class="sec-head"><h2>Every check</h2><span class="sec-count">{{ preflight.checks | length }}</span></div>
+{# Friendly names for the checks an operator actually set up themselves.
+   Everything else is Cortex checking its own internals — rolled up below. #}
+{% set _labels = {
+     'platform_connectors': 'Publishing platforms available',
+     'platform_credentials': 'Platform accounts connected',
+     'identity_governance_docs': 'Brand & governance documents',
+   } %}
+{% set _owned = preflight.checks | selectattr('name', 'in', _labels) | list %}
+{% set _internal = preflight.checks | rejectattr('name', 'in', _labels) | list %}
+{% set _internal_ok = _internal | selectattr('passed') | list | length %}
+
+<div class="sec-head"><h2>Your setup</h2></div>
 <div class="card">
-  {% for c in preflight.checks %}
+  {% for c in _owned %}
   <div class="check-row">
     <div class="check-icon {% if c.passed %}ok{% elif c.tier == 'blocker' %}err{% else %}warn{% endif %}">
       {% if c.passed %}{{ icon('check') }}{% elif c.tier == 'blocker' %}{{ icon('x') }}{% else %}{{ icon('warning') }}{% endif %}
     </div>
     <div style="flex:1; min-width:0;">
-      <div class="check-name">{{ c.name }}</div>
-      {% if not c.passed or c.message %}
-      <div class="check-msg">{{ c.message }}</div>
-      {% endif %}
-      {% for d in c.details %}<div class="check-detail">{{ d }}</div>{% endfor %}
+      <div class="check-name">{{ _labels[c.name] }}</div>
+      {% if not c.passed %}<div class="check-msg">{{ c.message | plain_tech }}</div>{% endif %}
     </div>
   </div>
   {% endfor %}
+</div>
+
+<div class="sec-head"><h2>Cortex self-check</h2></div>
+<div class="card">
+  {% if _internal_ok == _internal | length %}
+  <div class="check-row">
+    <div class="check-icon ok">{{ icon('check') }}</div>
+    <div style="flex:1;">
+      <div class="check-name">All {{ _internal | length }} internal checks passed</div>
+      <div class="check-msg">Cortex's own systems — database, asset store, learning engine, publishing connectors — are all healthy.</div>
+    </div>
+  </div>
+  {% else %}
+  {% for c in _internal %}
+  <div class="check-row">
+    <div class="check-icon {% if c.passed %}ok{% elif c.tier == 'blocker' %}err{% else %}warn{% endif %}">
+      {% if c.passed %}{{ icon('check') }}{% elif c.tier == 'blocker' %}{{ icon('x') }}{% else %}{{ icon('warning') }}{% endif %}
+    </div>
+    <div style="flex:1; min-width:0;">
+      <div class="check-name">{{ c.name | replace('_', ' ') | capitalize }}</div>
+      {% if not c.passed %}<div class="check-msg">{{ c.message }}</div>{% endif %}
+    </div>
+  </div>
+  {% endfor %}
+  {% endif %}
 </div>
 {% endif %}
 

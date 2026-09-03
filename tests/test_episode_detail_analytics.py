@@ -432,7 +432,7 @@ class TestOverviewSection:
         _ep(conn)
         conn.close()
         html = _anl_html((c, db_path))
-        assert "No real analytics imported yet" in html
+        assert "Numbers haven't come in yet" in html
 
     def test_views_shown_when_real_data_exists(self, client):
         c, db_path = client
@@ -460,7 +460,7 @@ class TestOverviewSection:
         _analytics(conn, views=99999, source="mock")
         conn.close()
         html = _anl_html((c, db_path))
-        assert "No real analytics imported yet" in html
+        assert "Numbers haven't come in yet" in html
         assert "99,999" not in html
 
 
@@ -495,7 +495,7 @@ class TestPlatformBreakdown:
         _analytics(conn, platform="youtube", source="manual")
         conn.close()
         html = _anl_html((c, db_path))
-        assert "No analytics imported for this platform" in html
+        assert "Numbers haven't come in from this platform yet" in html
 
     def test_published_badge_on_published_platform(self, client):
         c, db_path = client
@@ -533,7 +533,7 @@ class TestPublishingPerformance:
         conn.close()
         html = _anl_html((c, db_path))
         assert "Publishing Performance" in html
-        assert "2026-06-14" in html
+        assert "14 Jun" in html  # dates are friendly-formatted now
 
     def test_url_link_shown_when_available(self, client):
         c, db_path = client
@@ -543,7 +543,7 @@ class TestPublishingPerformance:
         conn.close()
         html = _anl_html((c, db_path))
         assert "https://youtu.be/myVid" in html
-        assert "Open" in html
+        assert "Watch" in html
 
     def test_video_id_shown_in_table(self, client):
         c, db_path = client
@@ -552,7 +552,7 @@ class TestPublishingPerformance:
         _outcome(conn, video_id="AbCdEfGhIjK")
         conn.close()
         html = _anl_html((c, db_path))
-        assert "AbCdEfGhIjK" in html
+        assert "Went live" in html  # table simplified 2026-09-03 (no Post ID column)
 
     def test_no_publishing_performance_section_when_not_published(self, client):
         c, db_path = client
@@ -575,7 +575,7 @@ class TestAnalyticsHealth:
         _ep(conn)
         conn.close()
         html = _anl_html((c, db_path))
-        assert "Analytics Health" in html
+        assert "Where the data stands" in html
 
     def test_real_row_count_shown(self, client):
         c, db_path = client
@@ -584,7 +584,7 @@ class TestAnalyticsHealth:
         _analytics(conn, source="manual")
         conn.close()
         html = _anl_html((c, db_path))
-        assert "Real analytics rows" in html
+        assert "Real data points" in html
 
     def test_mock_warning_shown_when_mock_data_exists(self, client):
         c, db_path = client
@@ -593,7 +593,7 @@ class TestAnalyticsHealth:
         _analytics(conn, source="mock")
         conn.close()
         html = _anl_html((c, db_path))
-        assert "Mock/demo data exists but is excluded from all KPIs" in html
+        assert "Sample data is present but never counted" in html
 
     def test_no_mock_warning_when_no_mock_data(self, client):
         c, db_path = client
@@ -602,7 +602,7 @@ class TestAnalyticsHealth:
         _analytics(conn, source="manual")
         conn.close()
         html = _anl_html((c, db_path))
-        assert "Mock/demo data exists but is excluded from all KPIs" not in html
+        assert "Sample data is present but never counted" not in html
 
     def test_missing_platforms_listed(self, client):
         c, db_path = client
@@ -612,7 +612,7 @@ class TestAnalyticsHealth:
         _analytics(conn, platform="youtube", source="manual")
         conn.close()
         html = _anl_html((c, db_path))
-        assert "Missing analytics" in html
+        assert "Still waiting on" in html
 
 
 # ===========================================================================

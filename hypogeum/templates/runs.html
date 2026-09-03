@@ -56,7 +56,7 @@
       {% for r in runs %}
       <tr class="{{ 'run-superseded' if r.superseded }}"{% if r.superseded %} style="opacity:.45;"{% endif %}>
         <td style="max-width:360px;">
-          <a href="/run/{{ r.run_id }}" style="color:var(--text); font-weight:600;">
+          <a href="{{ ('/episode/' ~ r.episode_id) if r.episode_id else ('/run/' ~ r.run_id) }}" style="color:var(--text); font-weight:600;">
             <span class="cell-title">{{ (r.episode_id or r.run_id) | episode_name }}</span>
           </a>
           {% if r.superseded %}<span class="badge" style="background:var(--raised);color:var(--faint);font-size:9px;">replaced</span>{% endif %}

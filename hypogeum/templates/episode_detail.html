@@ -1816,25 +1816,21 @@ function resumeEpisode(episodeId, kind) {
 
 {# ── 1. Analytics Overview ──────────────────────────────────── #}
 <div class="anl-section">
-  <div class="card-title" style="margin-bottom:10px;">Analytics Overview
-    <span class="muted" style="font-size:11px; font-weight:400; text-transform:none; letter-spacing:0;">
-      &mdash; real data only
-    </span>
-  </div>
+  <div class="card-title" style="margin-bottom:10px;">Performance</div>
 
   {% if ov.has_real_data %}
   <div class="anl-kpi-grid">
     <div class="anl-kpi-card">
       <div class="anl-kpi-val">{{ "{:,}".format(ov.total_views) if ov.total_views is not none else '—' }}</div>
-      <div class="anl-kpi-lbl">Total Views</div>
+      <div class="anl-kpi-lbl">Views</div>
     </div>
     <div class="anl-kpi-card">
       <div class="anl-kpi-val">{{ "{:,}".format(ov.total_impressions) if ov.total_impressions is not none else '—' }}</div>
-      <div class="anl-kpi-lbl">Impressions</div>
+      <div class="anl-kpi-lbl">Times shown</div>
     </div>
     <div class="anl-kpi-card">
       <div class="anl-kpi-val">{{ ov.avg_ctr ~ '%' if ov.avg_ctr is not none else '—' }}</div>
-      <div class="anl-kpi-lbl">Avg CTR</div>
+      <div class="anl-kpi-lbl">Click rate</div>
     </div>
     <div class="anl-kpi-card">
       <div class="anl-kpi-val">{{ ov.total_watch_time_h ~ 'h' if ov.total_watch_time_h is not none else '—' }}</div>
@@ -1842,11 +1838,11 @@ function resumeEpisode(episodeId, kind) {
     </div>
     <div class="anl-kpi-card">
       <div class="anl-kpi-val">{{ ov.avg_view_duration_s|round|int ~ 's' if ov.avg_view_duration_s is not none else '—' }}</div>
-      <div class="anl-kpi-lbl">Avg Duration</div>
+      <div class="anl-kpi-lbl">Avg watch time</div>
     </div>
     <div class="anl-kpi-card">
       <div class="anl-kpi-val">{{ ov.avg_retention_pct ~ '%' if ov.avg_retention_pct is not none else '—' }}</div>
-      <div class="anl-kpi-lbl">Avg Retention</div>
+      <div class="anl-kpi-lbl">Watch-through</div>
     </div>
     <div class="anl-kpi-card">
       <div class="anl-kpi-val">{{ "{:,}".format(ov.total_likes) if ov.total_likes is not none else '—' }}</div>
@@ -1862,10 +1858,14 @@ function resumeEpisode(episodeId, kind) {
     </div>
   </div>
   {% else %}
-  <div class="card" style="text-align:center; padding:30px 20px; color:var(--muted);">
-    No real analytics imported yet.
-    <div style="margin-top:10px;">
-      <a href="/analytics/import?episode_id={{ d.episode_id }}" class="btn">Import analytics →</a>
+  <div class="dv-empty">
+    {{ icon('analytics') }}
+    <div class="dv-empty-title">Numbers haven't come in yet</div>
+    <div class="dv-empty-sub">
+      Cortex pulls views, watch-time and click rate from each platform automatically
+      via Zernio — it can take a day or two after publishing for the first numbers
+      to land. You can also
+      <a href="/analytics/import?episode_id={{ d.episode_id }}">import them by hand</a>.
     </div>
   </div>
   {% endif %}
@@ -1942,7 +1942,7 @@ function resumeEpisode(episodeId, kind) {
         </div>
         {% endif %}
       {% else %}
-        <div class="anl-no-data">No analytics imported for this platform.</div>
+        <div class="anl-no-data">Numbers haven't come in from this platform yet.</div>
       {% endif %}
 
     </div>
@@ -1960,33 +1960,23 @@ function resumeEpisode(episodeId, kind) {
       <thead>
         <tr>
           <th>Platform</th>
-          <th>Published</th>
-          <th>Days since publish</th>
-          <th>Post ID</th>
-          <th>First analytics</th>
-          <th>Latest analytics</th>
-          <th>Link</th>
+          <th>Went live</th>
+          <th>First numbers</th>
+          <th>Latest numbers</th>
+          <th></th>
         </tr>
       </thead>
       <tbody>
         {% for p in published_platforms %}
         <tr>
           <td style="font-weight:600;">{{ p.display_name }}</td>
-          <td class="muted">{{ p.published_at[:10] if p.published_at else '—' }}</td>
-          <td class="muted">{{ p.days_since_publish ~ ' days' if p.days_since_publish is not none else '—' }}</td>
-          <td>
-            {% if p.platform_video_id %}
-              <span style="font-family:monospace; font-size:11px; color:var(--muted);">
-                {{ p.platform_video_id }}
-              </span>
-            {% else %}—{% endif %}
-          </td>
-          <td class="muted">{{ p.first_snapshot or '—' }}</td>
-          <td class="muted">{{ p.latest_snapshot or '—' }}</td>
+          <td class="muted">{{ p.published_at | friendly_date if p.published_at else '—' }}</td>
+          <td class="muted">{{ p.first_snapshot | friendly_date if p.first_snapshot else 'waiting' }}</td>
+          <td class="muted">{{ p.latest_snapshot | friendly_date if p.latest_snapshot else 'waiting' }}</td>
           <td>
             {% if p.url %}
               <a href="{{ p.url }}" target="_blank" rel="noopener"
-                 style="font-size:12px;">Open ↗</a>
+                 style="font-size:12px;">Watch</a>
             {% else %}—{% endif %}
           </td>
         </tr>
@@ -1999,39 +1989,33 @@ function resumeEpisode(episodeId, kind) {
 
 {# ── 4. Analytics Health ─────────────────────────────────────── #}
 <div class="anl-section">
-  <div class="card-title" style="margin-bottom:10px;">Analytics Health</div>
+  <div class="card-title" style="margin-bottom:10px;">Where the data stands</div>
   <div class="anl-health-card">
     <div class="anl-health-row">
-      <span class="anl-metric-label">Real analytics rows</span>
+      <span class="anl-metric-label">Real data points</span>
       <span class="anl-metric-value {% if anl.health.real_row_count > 0 %}ok{% else %}muted{% endif %}">
         {{ anl.health.real_row_count }}
       </span>
     </div>
-    <div class="anl-health-row">
-      <span class="anl-metric-label">Mock/demo rows</span>
-      <span class="anl-metric-value {% if anl.health.mock_row_count > 0 %}warn{% else %}muted{% endif %}">
-        {{ anl.health.mock_row_count }}
-      </span>
-    </div>
     {% if anl.health.missing_platforms %}
     <div class="anl-health-row">
-      <span class="anl-metric-label">Missing analytics</span>
+      <span class="anl-metric-label">Still waiting on</span>
       <span class="anl-metric-value muted">
-        {{ anl.health.missing_platforms | map('upper') | join(', ') }}
+        {{ anl.health.missing_platforms | map('friendly_platform') | join(', ') }}
       </span>
     </div>
     {% endif %}
     {% if anl.health.stale_platforms %}
     <div class="anl-health-row">
-      <span class="anl-metric-label">Stale (>7 days)</span>
+      <span class="anl-metric-label">Not updated in a week</span>
       <span class="anl-metric-value warn">
-        {{ anl.health.stale_platforms | map('upper') | join(', ') }}
+        {{ anl.health.stale_platforms | map('friendly_platform') | join(', ') }}
       </span>
     </div>
     {% endif %}
     {% if anl.health.has_mock %}
     <div class="anl-mock-warning">
-      ⚠ Mock/demo data exists but is excluded from all KPIs.
+      Sample data is present but never counted in the numbers above.
     </div>
     {% endif %}
   </div>

@@ -2045,6 +2045,11 @@ def _build_analytics_data(conn, episode_id: str) -> dict:
         [episode_id],
     ).fetchall()
     pub_by_platform: dict[str, dict] = {_row(r)["platform"]: _row(r) for r in pub_rows}
+    # Episodes published through Zernio have no publishing_outcomes row —
+    # rebuild the publish state from the submission ledger (see
+    # _zernio_publish_outcomes / the Publishing tab).
+    for _plat, _syn in _zernio_publish_outcomes(conn, episode_id).items():
+        pub_by_platform.setdefault(_plat, _syn)
 
     # ── Latest real snapshot per platform ───────────────────────────────
     latest_rows = conn.execute(

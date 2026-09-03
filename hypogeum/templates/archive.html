@@ -57,7 +57,7 @@
       <select id="asset_type" name="asset_type">
         <option value="">all</option>
         {% for f in data.facets.get('asset_type', []) %}
-        <option value="{{ f.value }}" {{ 'selected' if f.value == filters.asset_type }}>{{ f.value }} ({{ f.count }})</option>
+        <option value="{{ f.value }}" {{ 'selected' if f.value == filters.asset_type }}>{{ f.value | replace('_',' ') | title }} ({{ f.count }})</option>
         {% endfor %}
       </select>
     </div>
@@ -66,7 +66,7 @@
       <select id="provider" name="provider">
         <option value="">all</option>
         {% for f in data.facets.get('provider', []) %}
-        <option value="{{ f.value }}" {{ 'selected' if f.value == filters.provider }}>{{ f.value }} ({{ f.count }})</option>
+        <option value="{{ f.value }}" {{ 'selected' if f.value == filters.provider }}>{{ f.value | friendly_provider }} ({{ f.count }})</option>
         {% endfor %}
       </select>
     </div>
@@ -106,8 +106,8 @@
             <a href="/archive/{{ r.asset_id }}">{{ r.asset_type }}</a>
             {% if r.scene_id %}<div class="ar-mono">{{ r.scene_id }}</div>{% endif %}
           </td>
-          <td><div class="ar-prompt">{{ r.generation_prompt or '—' }}</div></td>
-          <td>{{ r.provider }}{% if r.model %}<div class="ar-mono">{{ r.model }}</div>{% endif %}</td>
+          <td><div class="ar-prompt">{{ (r.generation_prompt or '—')[:180] }}{{ '…' if r.generation_prompt and r.generation_prompt|length > 180 else '' }}</div></td>
+          <td>{{ r.provider | friendly_provider }}{% if r.model %}<div class="ar-mono">{{ r.model | friendly_model }}</div>{% endif %}</td>
           <td style="font-size:12px;">{{ r.episode_id | episode_name }}</td>
           <td class="ar-num">{{ r.used_in_episodes | length }}</td>
           <td class="muted" style="white-space:nowrap;">{{ r.published_at | friendly_date if r.published_at else '—' }}</td>

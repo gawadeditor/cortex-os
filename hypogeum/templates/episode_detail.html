@@ -1166,11 +1166,21 @@ function resumeEpisode(episodeId, kind) {
   {% endif %}
   {% if da.get('has_captions') %}
   <div class="stat-row">
-    <span class="stat-label">Captions (SRT)</span>
+    <span class="stat-label">Caption file (SRT)</span>
     <a href="/episode/{{ d.episode_id }}/captions" class="btn" download>{{ icon("download") }} Download SRT</a>
   </div>
   {% else %}
   <div class="stat-row"><span class="stat-label muted">No captions found</span></div>
+  {% endif %}
+  {% if d.caption_burn_on is defined %}
+  <div class="stat-row">
+    <span class="stat-label">On-screen captions</span>
+    <span>{% if d.caption_burn_on %}<span class="pill is-good" style="font-size:10px;">On</span>
+      <span class="muted" style="font-size:11px;">· {{ d.caption_burn_summary }}</span>
+      {% else %}<span class="muted">Off — this channel ships video with no burned-in text</span>{% endif %}
+      <a href="/channel/{{ d.caption_burn_channel }}/captions?scope={{ d.caption_burn_channel }}" style="font-size:11px; margin-left:6px;">change</a>
+    </span>
+  </div>
   {% endif %}
 </div>
 

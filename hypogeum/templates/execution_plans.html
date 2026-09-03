@@ -110,24 +110,19 @@
 
 
 <div class="page-header">
-  <h1>Action Plans</h1>
+  <h1>Action plans</h1>
   <span class="page-meta">
-    {{ draft | length }} draft &nbsp;·&nbsp;
-    {{ approved | length }} approved &nbsp;·&nbsp;
+    {{ draft | length }} to decide &nbsp;·&nbsp;
+    {{ approved | length }} agreed &nbsp;·&nbsp;
     {{ rejected | length + cancelled | length }} closed
   </span>
 </div>
 
-<!-- ── Safety notice — impossible to miss ── -->
-<div style="background:var(--warn-bg); border:2px solid var(--warn); border-radius:var(--radius);
-            padding:14px 18px; margin-bottom:var(--gap); font-size:13px;">
-  <strong style="color:var(--yellow);">DRY-RUN ONLY</strong>
-  <span style="color:var(--muted); margin-left:8px;">
-    No live execution is available. Approving a plan does NOT launch an episode,
-    publish content, or call any external service.
-    The "executed" status is unreachable in this release.
-    There is no Execute button.
-  </span>
+<div style="background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+            padding:13px 18px; margin-bottom:var(--gap); font-size:13px; color:var(--muted);">
+  These are <strong style="color:var(--text);">plans, not actions</strong>. Agreeing to one records
+  that you've decided to do it — Cortex never carries it out for you. Work through the steps
+  yourself, or hand them to whoever does.
 </div>
 
 <!-- ── Quick links ── -->
@@ -141,10 +136,9 @@
 <div class="plan-card plan-{{ p.plan_status }}" id="plan-{{ p.plan_id }}">
   <div class="plan-header">
     <div class="plan-title">{{ p.action_summary }}</div>
-    <span class="plan-type">{{ p.decision_type | replace("_"," ") }}</span>
-    <span class="risk-badge risk-{{ p.risk_level }}">{{ p.risk_level }}</span>
-    <span class="mode-badge">{{ p.execution_mode }}</span>
-    <span class="badge badge-{{ 'pending' if p.plan_status == 'draft' else ('complete' if p.plan_status == 'approved' else 'failed') }}">{{ p.plan_status }}</span>
+    <span class="plan-type">{{ p.decision_type | replace("_"," ") | title }}</span>
+    <span class="risk-badge risk-{{ p.risk_level }}">{{ p.risk_level | title }} risk</span>
+    <span class="badge badge-{{ 'pending' if p.plan_status == 'draft' else ('complete' if p.plan_status == 'approved' else 'failed') }}">{{ 'To decide' if p.plan_status == 'draft' else ('Agreed' if p.plan_status == 'approved' else p.plan_status | title) }}</span>
   </div>
 
   {%- if p.planned_steps %}

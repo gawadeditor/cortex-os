@@ -335,7 +335,7 @@
   <div style="border-top:1px solid var(--border); margin-top:12px; padding-top:10px; font-size:12px;">
     <strong style="color:var(--text);">Last worker attempt</strong>
     <span style="color:var(--muted);">
-      — episode {{ latest_worker_attempt.episode_id }} ({{ latest_worker_attempt.channel_id or "—" }},
+      — {{ latest_worker_attempt.episode_id | episode_name }} ({{ latest_worker_attempt.channel_id or "—" }},
       {{ latest_worker_attempt.invocation_mode }}) —
       {% if latest_worker_attempt.blocked_reason %}
         <span style="color:var(--red);">blocked: {{ latest_worker_attempt.blocked_reason }}</span>
@@ -619,7 +619,7 @@
         </td>
         <td style="padding:4px 8px;">{{ item.channel_id or '—' }}</td>
         <td style="padding:4px 8px; color:{% if item.episode_id %}var(--text){% else %}var(--muted){% endif %};">
-          {{ item.episode_id or '—' }}
+          {{ (item.episode_id | episode_name) if item.episode_id else '—' }}
         </td>
         <td style="padding:4px 8px; color:var(--muted);">
           {{ (item.recovery_from_run_id or '—')[:8] }}{% if item.recovery_from_run_id %}…{% endif %}

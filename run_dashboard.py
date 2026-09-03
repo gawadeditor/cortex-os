@@ -5748,6 +5748,17 @@ def episode_detail_page(episode_id):
     except Exception:  # noqa: BLE001
         d["archive"] = {"total": 0, "archived": 0, "local": 0, "state": "none", "location": None}
 
+    # On-screen (burned-in) caption state for this episode's channel.
+    try:
+        from hypogeum.caption_style import burn_enabled, resolve_caption_style
+        _cid = d.get("channel_id") or (d.get("run") or {}).get("channel_id")
+        if _cid:
+            d["caption_burn_on"] = burn_enabled(_cid, db_path=_db_path())
+            d["caption_burn_summary"] = resolve_caption_style(_cid, db_path=_db_path()).summary()
+            d["caption_burn_channel"] = _cid
+    except Exception:  # noqa: BLE001
+        pass
+
     valid_tabs = {"production", "publishing", "thumbnails", "titles",
                   "analytics", "revenue", "learning", "branding", "artifacts"}
     active_tab = request.args.get("tab", "production")

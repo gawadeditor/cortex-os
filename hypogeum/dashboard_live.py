@@ -297,21 +297,55 @@ def get_recent_failures(
     try:
         conn = get_connection(_db(db_path))
         try:
+            # Only ACTIONABLE failures: skip a failed run when the episode was
+            # later produced successfully (recovered), when the episode is
+            # superseded, or when its topic was abandoned (cancelled/skipped).
+            # Archaeology belongs in the run history, not on "what went wrong".
             failed_runs = conn.execute("""
                 SELECT r.run_id, r.episode_id, r.started_at,
                        r.error_message, e.title, e.topic
                 FROM runs r
                 LEFT JOIN episodes e ON e.episode_id = r.episode_id
                 WHERE r.status = 'failed'
+                  AND e.episode_id IS NOT NULL           -- has a real episode row, not a pure orphan
+                  AND COALESCE(e.status, '') != 'superseded'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM runs r2
+                      WHERE r2.episode_id = r.episode_id
+                        AND r2.status IN ('complete', 'completed')
+                        AND r2.started_at >= r.started_at
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM episode_topics t
+                      WHERE t.episode_id = r.episode_id
+                        AND t.status IN ('cancelled', 'skipped')
+                  )
                 ORDER BY r.started_at DESC
                 LIMIT ?
             """, [limit]).fetchall()
 
+            # Same actionable-only gate as failed_runs: a failed stage is
+            # only worth showing if its episode still exists, isn't
+            # superseded, was never recovered by a later successful run, and
+            # its topic wasn't abandoned.
             failed_stages = conn.execute("""
                 SELECT se.stage_name, se.run_id, se.episode_id,
                        se.started_at, se.error_message, se.duration_ms
                 FROM stage_executions se
+                JOIN episodes e ON e.episode_id = se.episode_id
                 WHERE se.status = 'failed'
+                  AND COALESCE(e.status, '') != 'superseded'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM runs r2
+                      WHERE r2.episode_id = se.episode_id
+                        AND r2.status IN ('complete', 'completed')
+                        AND r2.started_at >= se.started_at
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM episode_topics t
+                      WHERE t.episode_id = se.episode_id
+                        AND t.status IN ('cancelled', 'skipped')
+                  )
                 ORDER BY se.started_at DESC
                 LIMIT ?
             """, [limit]).fetchall()

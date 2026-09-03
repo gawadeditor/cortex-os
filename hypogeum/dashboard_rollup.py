@@ -17,7 +17,7 @@ Public API:
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -110,29 +110,33 @@ def _analytics_slice(conn, episode_ids: Optional[set]) -> dict:
     }
 
 
-def _spend(conn, episode_ids: Optional[set]) -> tuple[Optional[float], Optional[float]]:
-    now = datetime.now(timezone.utc)
+def _billed_maps(db_path) -> tuple[dict, dict]:
+    """(all-time, last-30-days) {episode_id: usd} from the complete
+    grant-consumption ledger — costs.cost_usd alone omits every MUAPI charge
+    (~70% of the bill). Never raises."""
+    try:
+        from hypogeum.model_effective_pricing import spend_breakdown
+        since = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        return (spend_breakdown(db_path=db_path)["by_episode"],
+                spend_breakdown(db_path=db_path, since=since)["by_episode"])
+    except Exception:  # noqa: BLE001
+        return {}, {}
+
+
+def _spend(episode_ids: Optional[set], all_map: dict, d30_map: dict
+           ) -> tuple[Optional[float], Optional[float]]:
     try:
         if episode_ids is None:
-            allt = conn.execute("SELECT SUM(cost_usd) FROM costs").fetchone()[0]
-            d30 = conn.execute(
-                "SELECT SUM(cost_usd) FROM costs "
-                "WHERE called_at > datetime('now','-30 days')").fetchone()[0]
+            allt = sum(all_map.values())
+            d30 = sum(d30_map.values())
         else:
             if not episode_ids:
                 return 0.0, 0.0
-            ph = ",".join("?" * len(episode_ids))
-            ids = list(episode_ids)
-            allt = conn.execute(
-                f"SELECT SUM(cost_usd) FROM costs WHERE episode_id IN ({ph})", ids).fetchone()[0]
-            d30 = conn.execute(
-                f"SELECT SUM(cost_usd) FROM costs WHERE episode_id IN ({ph}) "
-                f"AND called_at > datetime('now','-30 days')", ids).fetchone()[0]
-        return (round(allt, 2) if allt else 0.0), (round(d30, 2) if d30 else 0.0)
+            allt = sum(v for k, v in all_map.items() if k in episode_ids)
+            d30 = sum(v for k, v in d30_map.items() if k in episode_ids)
+        return round(allt, 2), round(d30, 2)
     except Exception:  # noqa: BLE001
         return None, None
-    finally:
-        _ = now
 
 
 def _published_count(conn, channel_id: Optional[str], ep_chan: dict) -> int:
@@ -183,7 +187,8 @@ def get_channel_rollup(channel_id: str, db_path: Optional[Path] = None) -> dict:
         my_eps = {e for e, c in ep_chan.items() if c == channel_id}
         a = _analytics_slice(conn, my_eps)
         out.update({k: a[k] for k in ("views", "watch_time_s", "engagements", "platforms")})
-        out["spend_all_usd"], out["spend_30d_usd"] = _spend(conn, my_eps)
+        all_map, d30_map = _billed_maps(_db(db_path))
+        out["spend_all_usd"], out["spend_30d_usd"] = _spend(my_eps, all_map, d30_map)
         out["episodes_published"] = _published_count(conn, channel_id, ep_chan)
         out["active_runs"] = _active_runs(conn, channel_id)
     finally:
@@ -199,7 +204,8 @@ def get_factory_rollup(db_path: Optional[Path] = None) -> dict:
         ep_chan = _episode_channel_map(conn)
         a = _analytics_slice(conn, None)
         out.update({k: a[k] for k in ("views", "watch_time_s", "engagements", "platforms")})
-        out["spend_all_usd"], out["spend_30d_usd"] = _spend(conn, None)
+        all_map, d30_map = _billed_maps(_db(db_path))
+        out["spend_all_usd"], out["spend_30d_usd"] = _spend(None, all_map, d30_map)
         out["episodes_published"] = _published_count(conn, None, ep_chan)
         out["active_runs"] = _active_runs(conn, None)
         out["pending_approvals"] = _pending_approvals(conn)
@@ -214,7 +220,7 @@ def get_factory_rollup(db_path: Optional[Path] = None) -> dict:
             cid = cp.channel_id
             my_eps = {e for e, c in ep_chan.items() if c == cid}
             ca = _analytics_slice(conn, my_eps)
-            csp_all, csp_30 = _spend(conn, my_eps)
+            csp_all, csp_30 = _spend(my_eps, all_map, d30_map)
             out["by_channel"].append({
                 "channel_id": cid, "name": getattr(cp, "name", cid) or cid,
                 "views": ca["views"], "watch_time_s": ca["watch_time_s"],

@@ -212,6 +212,16 @@ def get_run_detail(
             s["duration_fmt"] = fmt_duration(s.get("duration_ms"))
 
         total_cost = sum(c["cost_usd"] or 0.0 for c in costs)
+        # `costs` (and the per-call breakdown built from it) is LLM+audio
+        # only. episode_billed_usd is the complete bill incl. MUAPI video.
+        episode_billed_usd = None
+        if episode_id:
+            try:
+                from hypogeum.model_effective_pricing import episode_billed_spend
+                _b = episode_billed_spend(db_path=_db(db_path), episode_ids=[episode_id])
+                episode_billed_usd = _b.get(episode_id)
+            except Exception:
+                pass
         failed_stages = [s["stage_name"] for s in stages_list
                          if s.get("status") == "failed"]
 
@@ -237,6 +247,7 @@ def get_run_detail(
             "assets":           [_row_to_dict(a) for a in assets],
             "publish_calendar": [_row_to_dict(c) for c in pub_cal_rows],
             "total_cost_usd":   round(total_cost, 6),
+            "episode_billed_usd": episode_billed_usd,
             "stage_count":      len(stages_list),
             "failed_stages":    failed_stages,
             "worker_attempt":   worker_attempt,

@@ -71,7 +71,8 @@
         <td class="muted" style="white-space:nowrap;">{{ r.started_at | rel_time if r.started_at else '—' }}</td>
         <td class="muted" style="text-align:right;">{{ r.stage_count or 0 }}</td>
         <td style="text-align:right; font-variant-numeric:tabular-nums;">
-          {% if r.total_cost_usd and r.total_cost_usd > 0 %}{{ r.total_cost_usd | friendly_money }}{% else %}<span class="muted">—</span>{% endif %}
+          {% set _c = r.episode_billed_usd if r.episode_billed_usd is not none else r.total_cost_usd %}
+          {% if _c and _c > 0 %}{{ _c | friendly_money }}{% else %}<span class="muted">—</span>{% endif %}
         </td>
       </tr>
       {% endfor %}

@@ -52,7 +52,10 @@
     <div>
       <div class="stat-row"><span class="stat-l">Status</span><span class="badge badge-{{ d.run.status }}">{{ d.run.status | plain_status }}</span></div>
       <div class="stat-row"><span class="stat-l">Steps</span><span>{{ d.stage_count }}</span></div>
-      <div class="stat-row"><span class="stat-l">Cost so far</span><span>{{ d.total_cost_usd | friendly_money }}</span></div>
+      <div class="stat-row"><span class="stat-l">Total cost</span><span>{{ (d.episode_billed_usd if d.episode_billed_usd is not none else d.total_cost_usd) | friendly_money }}</span></div>
+      {% if d.episode_billed_usd is not none and d.total_cost_usd and d.episode_billed_usd > d.total_cost_usd %}
+      <div class="stat-row"><span class="stat-l muted">of which video/audio</span><span class="muted">{{ (d.episode_billed_usd - d.total_cost_usd) | friendly_money }}</span></div>
+      {% endif %}
       <div class="stat-row"><span class="stat-l">Files produced</span><span>{{ d.assets | length }}</span></div>
     </div>
   </div>

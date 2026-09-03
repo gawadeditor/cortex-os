@@ -1737,6 +1737,43 @@ def providers_models_page():
     substrate) — lifecycle status + recent price changes."""
     from hypogeum import model_registry as _mr
     models = _mr.list_models(db_path=_db_path())
+
+    # Effective (actually-billed) price per model, from real charge history —
+    # the listed catalogue price is only what Cortex books, and a model with
+    # dynamic pricing lists a floor, not what we pay (e.g. wan2.7 lists $0.10,
+    # bills $0.65). See hypogeum.model_effective_pricing.
+    try:
+        from hypogeum.model_effective_pricing import effective_prices, price_view
+        _spend = effective_prices(db_path=_db_path())
+    except Exception:  # noqa: BLE001
+        _spend, price_view = {}, None
+    price_drift = []
+    for m in models:
+        if price_view is not None:
+            pv = price_view(m["model_id"], m.get("price_usd"),
+                            spend=_spend.get(m["model_id"]))
+            m["price"] = pv
+            if pv["flag"]:
+                price_drift.append({"model_id": m["model_id"], **pv})
+        else:
+            m["price"] = {"label": (f"${m['price_usd']:.2f}" if m.get("price_usd") is not None else "—"),
+                          "basis": "listed", "flag": False, "n_calls": 0,
+                          "listed": m.get("price_usd"), "effective": None}
+    price_drift.sort(key=lambda x: (x.get("drift_pct") or 0), reverse=True)
+
+    # Models we've actually paid for that aren't in the MUAPI catalogue —
+    # OpenRouter (scripts/planning), ElevenLabs (voice/music), Perplexity
+    # (research). So the price view covers every tool, not just video/images.
+    _registry_ids = {m["model_id"] for m in models}
+    other_spend = []
+    for mid, s in sorted(_spend.items(), key=lambda x: -x[1].total_charged):
+        if mid in _registry_ids:
+            continue
+        d = s.as_dict()
+        d["label"] = (f"from ${s.min_charge:.3f}" if s.min_charge != s.max_charge
+                      else f"${s.effective_price:.3f}") if s.effective_price is not None else "—"
+        other_spend.append(d)
+
     by_life: dict = {}
     for m in models:
         by_life.setdefault(m["lifecycle_status"], []).append(m)
@@ -1754,6 +1791,7 @@ def providers_models_page():
     return render_template(
         "providers_models.html",
         models=models, by_life=by_life, changed=changed, evidence=evidence,
+        price_drift=price_drift, other_spend=other_spend,
         total=len(models),
         last_synced=(max((m["last_synced_at"] for m in models), default=None)),
     )

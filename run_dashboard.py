@@ -747,9 +747,11 @@ def create_page():
     flash = request.args.get("flash")
     ch    = _scope_channel()
     try:
-        queued_topics = list_episode_topics(status="queued", channel_id=ch or None, db_path=db)[:15]
+        _all_queued = list_episode_topics(status="queued", channel_id=ch or None, db_path=db)
+        queued_total = len(_all_queued)
+        queued_topics = _all_queued[:15]
     except Exception:
-        queued_topics = []
+        queued_topics, queued_total = [], 0
     try:
         from hypogeum.db import get_worker_control
         worker_running = get_worker_control("worker_status", "stopped", db_path=db) in ("running", "claiming", "idle")
@@ -764,6 +766,7 @@ def create_page():
         error=error,
         flash=flash,
         queued_topics=queued_topics,
+        queued_total=queued_total,
         worker_running=worker_running,
         queue_paused=queue_paused,
     )

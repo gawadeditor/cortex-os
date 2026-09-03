@@ -91,10 +91,14 @@ class TestDashboardHome:
         db = tmp_path / "test.db"
         initialize_schema(db)
         conn = get_connection(db)
-        # Insert a failed run
+        # Insert a failed run for a real, un-superseded episode (an actionable failure)
         conn.execute(
             "INSERT INTO runs (run_id, episode_id, status, started_at) VALUES (?,?,?,datetime('now', '-1 hours'))",
             ["run_fail_001", "ep_x", "failed"],
+        )
+        conn.execute(
+            "INSERT INTO episodes (episode_id, status, created_at) VALUES (?,?,datetime('now'))",
+            ["ep_x", "failed"],
         )
         conn.commit()
         conn.close()
@@ -112,6 +116,10 @@ class TestDashboardHome:
         conn.execute(
             "INSERT INTO runs (run_id, episode_id, status, started_at) VALUES (?,?,?,datetime('now', '-1 hours'))",
             ["run_fail_002", "ep_y", "failed"],
+        )
+        conn.execute(
+            "INSERT INTO episodes (episode_id, status, created_at) VALUES (?,?,datetime('now'))",
+            ["ep_y", "failed"],
         )
         conn.commit()
         conn.close()
@@ -457,7 +465,7 @@ class TestQueueFirstCreate:
         assert resp.status_code == 200
         body = resp.data.decode()
         assert "How Rome fell" in body
-        assert "Queued Topics" in body
+        assert "Queued topics" in body
 
     def test_create_page_manual_form_present(self, client):
         resp = self._mock_create(client)
@@ -949,8 +957,8 @@ class TestRunDetailGateAttempt:
             resp = client.get("/run/run_1")
 
         html = resp.data.decode()
-        assert "Latest Gate Attempt" in html
-        assert "production_enabled is False" in html
+        assert "Why the next attempt didn't start" in html
+        assert "Production is turned off for this channel" in html
 
     def test_successful_attempt_shows_passed_not_blocked(self, client, tmp_path):
         from datetime import datetime, timezone
@@ -973,7 +981,9 @@ class TestRunDetailGateAttempt:
             resp = client.get("/run/run_1")
 
         html = resp.data.decode()
-        assert "Passed all gates" in html
+        # A successful gate attempt is not worth a callout — the red
+        # "why the next attempt didn't start" box must not appear.
+        assert "Why the next attempt didn't start" not in html
 
 
 class TestSmokeTestControl:

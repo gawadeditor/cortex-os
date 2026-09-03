@@ -94,7 +94,7 @@
       and d.run.status not in ('complete','completed','published') %}
 <div class="card" style="margin-bottom:var(--gap); border-color:var(--red);">
   <div class="card-title">Why the next attempt didn't start</div>
-  <div style="font-size:13px;">{{ d.worker_attempt.blocked_reason | plain_tech }}</div>
+  <div style="font-size:13px;">{{ d.worker_attempt.blocked_reason | plain_channel_blocker }}</div>
   {% if d.worker_attempt.finished_at %}
   <div style="font-size:11px; color:var(--muted); margin-top:4px;">
     {{ d.worker_attempt.finished_at | rel_time }}

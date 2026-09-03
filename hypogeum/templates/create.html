@@ -73,7 +73,7 @@
 {{ subnav('production') }}
 <div class="container">
 
-{% set _qn = queued_topics|length %}
+{% set _qn = queued_total if queued_total is defined else queued_topics|length %}
 {{ hero(
    eyebrow='Production',
    title='The production queue',
@@ -147,9 +147,9 @@ document.getElementById('start-worker-btn').addEventListener('click', function()
 <div class="card" style="padding:0; margin-bottom:var(--gap);">
   <div style="display:flex; align-items:center; padding:10px 16px;
               border-bottom:1px solid var(--border);">
-    <span style="font-size:13px; font-weight:600;">Queued Topics</span>
+    <span style="font-size:13px; font-weight:600;">Queued topics</span>
     <span style="font-size:12px; color:var(--muted); margin-left:8px;">
-      {{ queued_topics|length }} topic{% if queued_topics|length != 1 %}s{% endif %} waiting
+      {{ _qn }} topic{% if _qn != 1 %}s{% endif %} waiting{% if _qn > queued_topics|length %} · showing the next {{ queued_topics|length }}{% endif %}
     </span>
     <a href="/discover" style="margin-left:auto; font-size:12px; color:var(--blue);">
       Run discovery &#8594;

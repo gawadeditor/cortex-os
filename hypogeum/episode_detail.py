@@ -621,6 +621,17 @@ def _zernio_publish_outcomes(conn, episode_id: str) -> dict[str, dict]:
         ).fetchall()
     except Exception:
         return out
+    # The receipt's provider_status isn't updated when a scheduled post
+    # actually goes live, so a real "it's live" signal is: the platform
+    # reported analytics for this episode. No analytics + a succeeded
+    # submission = still Scheduled.
+    try:
+        _has_live = conn.execute(
+            "SELECT 1 FROM platform_analytics WHERE episode_id = ? AND source = 'api' LIMIT 1",
+            [episode_id],
+        ).fetchone() is not None
+    except Exception:  # noqa: BLE001
+        _has_live = True  # fail toward the historical label
     _STATE_MAP = {
         "succeeded": "success", "acknowledged": "success",
         "failed_definitive": "failed", "cancelled": None,
@@ -633,14 +644,20 @@ def _zernio_publish_outcomes(conn, episode_id: str) -> dict[str, dict]:
         mapped = _STATE_MAP.get((r["state"] or "").lower(), "pending")
         if mapped is None:
             continue
+        # A succeeded submission with no analytics yet is Scheduled, not live.
+        _prov = (r["provider_status"] or "").lower()
+        label = _PUBLISH_STATUS_LABELS.get(mapped, "Unknown")
+        if mapped == "success" and not _has_live and _prov != "published":
+            label = "Scheduled"
         out[plat] = {
             "platform": plat,
             "publishing_status": mapped,
+            "provider_status": _prov or None,
             "platform_video_id": r["native_platform_content_id"] or r["provider_publication_id"],
             "published_at": r["acknowledged_at"],
             "url": None,
             "failure_reason": None,
-            "status_label": _PUBLISH_STATUS_LABELS.get(mapped, "Unknown"),
+            "status_label": label,
         }
     return out
 

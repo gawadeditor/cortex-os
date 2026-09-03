@@ -507,6 +507,25 @@
       background: var(--surface); border: 1px dashed var(--border-strong);
       border-radius: var(--radius-lg); margin-bottom: var(--gap); font-size: 13px;
     }
+
+    /* ── journey strip: made → cleared → published → analytics ── */
+    .ep-journey { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+    .ep-journey-step { display: inline-flex; align-items: center; gap: 6px;
+                       font-size: 11px; color: var(--muted); white-space: nowrap; }
+    .ep-journey-dot { width: 8px; height: 8px; border-radius: 50%;
+                      background: var(--overlay); border: 1px solid var(--border); }
+    .ep-journey-step.is-done { color: var(--good); }
+    .ep-journey-step.is-done .ep-journey-dot { background: var(--good); border-color: var(--good); }
+    .ep-journey-step.is-now { color: var(--accent); font-weight: 600; }
+    .ep-journey-step.is-now .ep-journey-dot { background: var(--accent); border-color: var(--accent);
+                      box-shadow: 0 0 7px var(--accent-line);
+                      animation: epjpulse 2s ease-in-out infinite; }
+    .ep-journey-step.is-bad { color: var(--critical); }
+    .ep-journey-step.is-bad .ep-journey-dot { background: var(--critical); border-color: var(--critical); }
+    .ep-journey-bar { width: 22px; height: 1px; background: var(--border); }
+    .ep-journey-bar.is-done { background: var(--good); }
+    @keyframes epjpulse { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
+    @media (prefers-reduced-motion: reduce) { .ep-journey-step.is-now .ep-journey-dot { animation: none; } }
   </style>
 </head>
 <body>
@@ -545,35 +564,46 @@
     {% if d.current_stage %}<span style="color: var(--blue);">Now: {{ d.current_stage | plain_status }}</span>{% endif %}
   </div>
 
-  {# Journey status — production → release → publish → analytics #}
+  {# Journey — one line, current step lit, earlier steps done, later dimmed.
+     Once published, "ready to publish" is behind us regardless of its raw value. #}
   {% if d.production_status %}
+  {% set ps = d.production_status %}
   {% set rs = d.release_status %}
-  <div class="ep-meta-row" style="margin-top:8px; gap:8px; flex-wrap:wrap;">
-    {% set ps = d.production_status %}
-    <span class="pill {{ 'is-good' if ps == 'COMPLETE' else ('is-critical' if ps == 'FAILED' else 'is-warn') }}"
-          style="padding:3px 10px; font-size:11px;">Made · {{ ps | plain_status }}</span>
-    <span class="pill {{ 'is-good' if rs == 'READY' else ('is-critical' if rs == 'BLOCKED' else 'is-warn') }}"
-          style="padding:3px 10px; font-size:11px;">Ready to publish · {{ rs | plain_status }}</span>
-    {% set pub = d.publish_status %}
-    <span class="pill {{ 'is-good' if pub == 'PUBLISHED' else ('is-warn' if pub in ('PARTIAL','READY') else '') }}"
-          style="padding:3px 10px; font-size:11px;">Published · {{ pub | plain_status }}</span>
-    {% set anl = d.analytics_status %}
-    <span class="pill {{ 'is-good' if anl == 'API_CONNECTED' else '' }}"
-          style="padding:3px 10px; font-size:11px;">Analytics · {{ anl | plain_status }}</span>
+  {% set pub = d.publish_status %}
+  {% set anl = d.analytics_status %}
+  {% set _scheduled = d.platforms and (d.platforms | selectattr('status_label', 'equalto', 'Scheduled') | list | length) > 0
+                      and not (d.platforms | selectattr('status_label', 'equalto', 'Published') | list | length) %}
+  {% set _made   = ps == 'COMPLETE' %}
+  {% set _live   = pub in ('PUBLISHED','PARTIAL') and not _scheduled %}
+  {% set _ready  = _live or _scheduled or rs == 'READY' %}
+  {% set _steps = [
+       {'label': 'Made',        'done': _made,  'now': not _made,
+        'bad': ps == 'FAILED'},
+       {'label': 'Cleared',     'done': _ready, 'now': _made and not _ready,
+        'bad': rs == 'BLOCKED'},
+       {'label': 'Scheduled' if _scheduled else 'Published',
+        'done': _live, 'now': (_ready and not _live) or _scheduled,
+        'bad': False},
+       {'label': 'Analytics in','done': anl == 'API_CONNECTED', 'now': _live and anl != 'API_CONNECTED',
+        'bad': False},
+     ] %}
+  <div class="ep-journey" style="margin-top:10px;">
+    {% for s in _steps %}
+    <span class="ep-journey-step {{ 'is-done' if s.done else ('is-now' if s.now else '') }} {{ 'is-bad' if s.bad }}">
+      <span class="ep-journey-dot"></span>{{ s.label }}
+    </span>
+    {% if not loop.last %}<span class="ep-journey-bar {{ 'is-done' if s.done }}"></span>{% endif %}
+    {% endfor %}
   </div>
-  {# Release blocker banner #}
-  {% if d.release_blocker_label and rs == 'BLOCKED' %}
-  <div style="margin-top:8px; padding:8px 12px; background:var(--critical-bg); border:1px solid var(--critical);
-              border-radius:var(--radius); font-size:12px; color:var(--critical);">
-    <strong>Release blocked:</strong> {{ d.release_blocker_label }}
+  {# Blocker banner — only while it still matters (not yet published) #}
+  {% if d.release_blocker_label and not _live %}
+  <div style="margin-top:8px; padding:8px 12px; border-radius:var(--radius); font-size:12px;
+              {% if rs == 'BLOCKED' %}background:var(--critical-bg); border:1px solid var(--critical); color:var(--critical);
+              {% else %}background:var(--warn-bg); border:1px solid var(--warn); color:var(--warn);{% endif %}">
+    <strong>{{ 'Release blocked:' if rs == 'BLOCKED' else 'Before publishing:' }}</strong> {{ d.release_blocker_label }}
     {% if d.release_blocker == 'THUMBNAIL_TIG_BLOCKED' %}
-    — <a href="?tab=thumbnails" style="color:var(--critical); text-decoration:underline;">View thumbnail →</a>
+    — <a href="?tab=thumbnails" style="text-decoration:underline;">View thumbnail →</a>
     {% endif %}
-  </div>
-  {% elif d.release_blocker_label and rs == 'PENDING' %}
-  <div style="margin-top:8px; padding:8px 12px; background:var(--warn-bg); border:1px solid var(--warn);
-              border-radius:var(--radius); font-size:12px; color:var(--warn);">
-    <strong>Pending review:</strong> {{ d.release_blocker_label }}
   </div>
   {% endif %}
   {% else %}

@@ -34,6 +34,32 @@
   when it differs. Factory Learning — shared across every channel.
 </p>
 
+{% if video_comparisons %}
+<div class="card" style="margin-bottom:var(--gap); padding:0;">
+  <div class="card-title" style="padding:12px 14px 0;">Video model — per channel, head to head</div>
+  <p class="muted" style="font-size:11px; margin:2px 14px 8px;">
+    Same real prompt from one of the channel's own episodes, current model vs one alternative.
+  </p>
+  <div class="table-wrap" style="border:none;"><table>
+    <thead><tr><th>Channel</th><th>In use now</th><th>$/episode</th><th>Alternative</th><th>$/episode</th><th>Switch</th><th></th></tr></thead>
+    <tbody>
+    {% for v in video_comparisons %}
+    <tr>
+      <td style="font-size:12px;">{{ v.channel_name }}</td>
+      <td class="mono" style="font-size:11px;">{{ v.current_model }}</td>
+      <td class="mono" style="font-size:11px;">${{ '%.2f' % v.current_cost_ep }}</td>
+      <td class="mono" style="font-size:11px;">{{ v.alt_model }}</td>
+      <td class="mono" style="font-size:11px;">${{ '%.2f' % v.alt_cost_ep }}</td>
+      <td class="mono" style="font-size:11px; color:{{ 'var(--good)' if v.delta_week < 0 else 'var(--critical)' }};">
+        {{ '−' if v.delta_week < 0 else '+' }}${{ '%.0f' % (v.delta_week | abs) }}/wk</td>
+      <td><a href="/channel/{{ v.channel_id }}/video-compare?scope={{ v.channel_id }}" class="btn" style="font-size:11px;">Watch →</a></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</div>
+{% endif %}
+
 {% if price_drift %}
 <div class="card" style="border-color:var(--critical); margin-bottom:var(--gap);">
   <div class="card-title" style="color:var(--critical);">

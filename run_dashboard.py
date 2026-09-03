@@ -1800,10 +1800,33 @@ def providers_models_page():
         evidence = _lb(source="bakeoff", min_n=1, db_path=_db_path())
     except Exception:  # noqa: BLE001
         evidence = []
+
+    # Per-channel saved video-model head-to-heads
+    try:
+        from hypogeum.channel_video_comparison import get_comparison as _gc
+        from hypogeum.channel_config import list_channel_profiles as _lcp
+        video_comparisons = []
+        for _cp in _lcp(status="active", db_path=_db_path()):
+            _cid = getattr(_cp, "channel_id", None)
+            _cmp = _gc(_cid, db_path=_db_path()) if _cid else None
+            if _cmp:
+                video_comparisons.append({
+                    "channel_id": _cid,
+                    "channel_name": getattr(_cp, "name", None) or _cid,
+                    "current_model": _cmp["current"]["model"],
+                    "current_cost_ep": _cmp["current"]["cost_per_episode"],
+                    "alt_model": _cmp["alternative"]["model"],
+                    "alt_cost_ep": _cmp["alternative"]["cost_per_episode"],
+                    "delta_week": _cmp["delta"]["per_week"],
+                })
+    except Exception:  # noqa: BLE001
+        video_comparisons = []
+
     return render_template(
         "providers_models.html",
         models=models, by_life=by_life, changed=changed, evidence=evidence,
         price_drift=price_drift, other_spend=other_spend,
+        video_comparisons=video_comparisons,
         total=len(models),
         last_synced=(max((m["last_synced_at"] for m in models), default=None)),
     )

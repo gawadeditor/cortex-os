@@ -536,7 +536,8 @@ class TestFlaskRunRoutes:
     def test_runs_page_lists_runs(self, flask_client):
         client, ids = flask_client
         r = client.get("/runs")
-        assert ids["run_ok"][:8].encode() in r.data
+        # the row shows the episode (title, linking to /episode/<id>), not the run_id
+        assert b"/episode/ep_ok" in r.data or b"Episode One" in r.data
 
     def test_runs_page_filter_failed(self, flask_client):
         client, _ = flask_client

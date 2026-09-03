@@ -2507,6 +2507,14 @@ function resumeEpisode(episodeId, kind) {
 {% set brd  = d.branding %}
 {% set bsum = brd.summary %}
 
+{% if brd.not_applicable %}
+<div class="dv-empty">
+  {{ icon('palette') }}
+  <div class="dv-empty-title">Nothing to check here</div>
+  <div class="dv-empty-sub">{{ brd.na_reason }}</div>
+</div>
+{% else %}
+
 {# ── 1. Branding Overview ────────────────────────────────────────── #}
 <div style="margin-bottom:var(--gap);">
   <div class="card-title" style="margin-bottom:10px;">Branding Overview</div>
@@ -2724,6 +2732,7 @@ function resumeEpisode(episodeId, kind) {
   </div>
 </div>
 
+{% endif %}{# end not_applicable #}
 {% endif %}{# end active_tab == 'branding' #}
 
 </div><!-- /.container -->

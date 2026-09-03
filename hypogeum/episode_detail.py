@@ -394,7 +394,10 @@ def _build_detail(conn, episode_id: str) -> Optional[dict]:
     learning_data = _build_learning_data(conn, episode_id, run_id)
 
     # ── Branding tab data ─────────────────────────────────────────────────
-    branding_data = _build_branding_data(conn, episode_id, run_id)
+    _short_native = _is_short_native_episode(conn, run.get("channel_id"))
+    branding_data = _build_branding_data(
+        conn, episode_id, run_id, short_native=_short_native,
+    )
 
     # ── Build stage groups for the Production tab ────────────────────────
     stage_groups = _build_stage_groups(stages, assets)
@@ -1729,9 +1732,36 @@ _BRANDING_MOSTLY_COMPLETE_THRESHOLD = 60  # >= 60% → Mostly Complete
 _BRANDING_PARTIAL_THRESHOLD        = 30   # >= 30% → Partial
 
 
-def _build_branding_data(conn, episode_id: str, run_id: Optional[str]) -> dict:
+def _is_short_native_episode(conn, channel_id) -> bool:
+    """True when the channel produces only short vertical videos
+    (production_cadence.videos_per_week == 0 && shorts_per_week >= 1).
+    Never raises."""
+    if not channel_id:
+        return False
+    try:
+        row = conn.execute(
+            "SELECT production_cadence_json FROM channel_operations_profiles "
+            "WHERE channel_id = ?", (channel_id,),
+        ).fetchone()
+        if not row or not row["production_cadence_json"]:
+            return False
+        import json as _json  # noqa: PLC0415
+        cad = _json.loads(row["production_cadence_json"])
+        return (int(cad.get("videos_per_week") or 0) == 0
+                and int(cad.get("shorts_per_week") or 0) >= 1)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _build_branding_data(conn, episode_id: str, run_id: Optional[str],
+                         *, short_native: bool = False) -> dict:
     """
     Build Branding tab data for one episode.
+
+    Short vertical videos use each platform's own auto-generated cover and
+    carry no logo bug / intro / outro / lower-third, so the full-length
+    branding audit does not apply — return a clean "not applicable" state
+    instead of flagging every asset as missing.
 
     Sources: assets, thumbnail_candidates, titles, publishing_outcomes.
     No mock analytics, no hallucinated judgments. Missing evidence stated explicitly.
@@ -1748,6 +1778,26 @@ def _build_branding_data(conn, episode_id: str, run_id: Optional[str]) -> dict:
           "recommendations": [{domain, recommendation, confidence, reason}],
         }
     """
+    if short_native:
+        return {
+            "not_applicable": True,
+            "na_reason": (
+                "This is a short vertical video. Short-form videos use each "
+                "platform's own auto-generated cover and don't carry a logo "
+                "bug, intro, outro or lower-third — there's nothing to check "
+                "here."
+            ),
+            "summary": {
+                "assets_found": 0, "assets_missing": 0,
+                "completeness_pct": 100, "overall_verdict": "Not applicable",
+            },
+            "thumbnail_audit": None,
+            "title_audit": None,
+            "platform_audit": [],
+            "asset_inventory": [],
+            "recommendations": [],
+        }
+
     # ── Asset Inventory ───────────────────────────────────────────────
     asset_inventory: list[dict] = []
     found_types: set = set()

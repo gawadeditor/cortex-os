@@ -166,19 +166,19 @@
   <div class="factory-banner-icon">{{ lvl_icon }}</div>
   <div class="factory-banner-body">
     <div class="factory-banner-level factory-banner-level-{{ level }}">
-      {{ cmd.factory_status.level }}
+      {{ {'healthy': 'All healthy', 'degraded': 'Needs a look', 'blocked': 'Blocked'}.get(level, cmd.factory_status.level | title) }}
     </div>
     {%- if cmd.factory_status.reason %}
-    <div class="factory-banner-reason">{{ cmd.factory_status.reason }}</div>
+    <div class="factory-banner-reason">{{ cmd.factory_status.reason | plain_channel_blocker }}</div>
     {%- endif %}
     <div class="factory-banner-score">
-      Director score: {{ cmd.factory_status.director_score }}/100
-      &nbsp;·&nbsp; {{ cmd.checked_at[:19] | replace("T"," ") }}Z
+      Health score {{ cmd.factory_status.director_score }}/100
+      &nbsp;·&nbsp; checked {{ cmd.checked_at | rel_time }}
     </div>
     <div class="factory-banner-actions">
-      <a href="/preflight" class="btn">Preflight</a>
-      <a href="/signals"   class="btn">OIS signals</a>
-      <a href="/live"      class="btn">Live</a>
+      <a href="/preflight" class="btn">Readiness check</a>
+      <a href="/signals"   class="btn">Alert history</a>
+      <a href="/live"      class="btn">What's happening now</a>
     </div>
   </div>
 </div>

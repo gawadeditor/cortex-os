@@ -254,9 +254,17 @@ def check_stuck_runs(
                 f"({_qmarks(_NON_TERMINAL_RUN_STATUSES)}) AND started_at < ?",
                 (*_NON_TERMINAL_RUN_STATUSES, cutoff_iso),
             ).fetchall()
+            # A stage is only "stuck" if its run is still live. A stage row
+            # left 'running' because its run failed/was abandoned hours ago
+            # is stale bookkeeping, not a stuck stage — otherwise the health
+            # sweep re-flags it every cycle forever.
             stuck_stages = conn.execute(
-                "SELECT stage_exec_id FROM stage_executions WHERE status IN "
-                f"({_qmarks(_NON_TERMINAL_STAGE_STATUSES)}) AND started_at < ?",
+                "SELECT se.stage_exec_id FROM stage_executions se "
+                f"WHERE se.status IN ({_qmarks(_NON_TERMINAL_STAGE_STATUSES)}) "
+                "AND se.started_at < ? "
+                "AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.run_id = se.run_id "
+                "  AND LOWER(r.status) IN ('failed','error','cancelled','complete',"
+                "  'completed','published','superseded'))",
                 (*_NON_TERMINAL_STAGE_STATUSES, cutoff_iso),
             ).fetchall()
             stuck_queue = conn.execute(

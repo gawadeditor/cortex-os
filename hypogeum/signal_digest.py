@@ -290,6 +290,17 @@ def auto_resolve_stale_signals(db_path: Optional[Path] = None) -> int:
     except Exception:  # noqa: BLE001
         return 0
 
+    # A stuck_run signal is stale the moment the stuck-run check goes
+    # healthy again — otherwise every 15-minute health sweep piles a fresh
+    # identical one on top of the last.
+    _stuck_cleared = False
+    if any((dict(r).get("signal_type") or "") == "stuck_run" for r in rows):
+        try:
+            from hypogeum.observability import check_stuck_runs
+            _stuck_cleared = bool(getattr(check_stuck_runs(db_path=db_path), "healthy", False))
+        except Exception:  # noqa: BLE001
+            _stuck_cleared = False
+
     resolved = 0
     for r in rows:
         d = dict(r)
@@ -301,6 +312,8 @@ def auto_resolve_stale_signals(db_path: Optional[Path] = None) -> int:
             reason = "informational"
         elif ep and ep in published:
             reason = "episode_published"
+        elif stype == "stuck_run" and _stuck_cleared:
+            reason = "stuck_run_cleared"
         if reason and auto_resolve_signal(d["signal_id"], reason, db_path=db_path):
             resolved += 1
     if resolved:

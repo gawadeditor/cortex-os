@@ -205,6 +205,15 @@ MODEL_CREDIT_COSTS: dict[str, float] = {
     "flux-kontext-dev-i2i": 0.02,
     "bytedance-seedream-v4": 0.09,
     "wan2.7-text-to-image": 0.05,
+    # Video T2V/I2V — the MUAPI catalogue marks these dynamic_pricing and
+    # lists a floor ($0.10) that is NOT what production settings (portrait,
+    # 8s, audio) are billed. These are the effective per-clip prices
+    # measured from real production charges (charged_amount), which is
+    # stronger evidence than a catalogue probe:
+    "wan2.7-text-to-video": 0.65,        # measured 2026-09-03: $0.65 flat, 53/53 calls (5s clip)
+    "wan2.7-image-to-video": 0.65,       # same family/tier; keep aligned pending its own measurement
+    "seedance-pro-t2v-fast": 0.10,       # measured 2026-09-03: $0.10 flat, 81/81 calls (~5s clip)
+    "seedance-pro-i2v-fast": 0.10,       # measured 2026-09-03: $0.10 flat, 18/18 calls
     # GPT Image 2 via MUAPI (confirmed 2026-06-11 — primary thumbnail model)
     "gpt-image-2-text-to-image": 0.09,
     "gpt-image-2-image-to-image": 0.09,

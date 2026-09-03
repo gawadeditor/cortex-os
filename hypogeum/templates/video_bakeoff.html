@@ -102,7 +102,7 @@
          style="max-height:260px; overflow-y:auto; border:1px solid var(--border);
                 border-radius:8px; padding:6px;">
       {% for m in models %}
-      <label class="mck-row" data-id="{{ m.id }}" data-price="{{ m.price_usd }}"
+      <label class="mck-row" data-id="{{ m.id }}" data-price="{{ m.billed_price_usd or m.price_usd }}"
              data-family="{{ m.family }}" data-note="{{ m.notes }}"
              data-dyn="{{ 1 if m.dynamic_pricing else 0 }}"
              style="display:flex; gap:8px; align-items:baseline; padding:4px 6px;
@@ -112,7 +112,17 @@
         <span style="flex:1;">{{ m.id }}
           <span class="muted" style="font-size:10px;">· {{ m.family }}</span>
         </span>
-        <span style="font-variant-numeric:tabular-nums; font-weight:700;">${{ '%.2f' | format(m.price_usd) }}{% if m.dynamic_pricing %}<span class="muted">*</span>{% endif %}</span>
+        <span style="font-variant-numeric:tabular-nums; font-weight:700; text-align:right;">
+          {% if m.billed_price_usd %}
+            ${{ '%.2f' | format(m.billed_price_usd) }}
+            <span class="muted" style="font-weight:400; font-size:10px;">billed · {{ m.billed_calls }}×</span>
+            {% if m.price_usd and (m.billed_price_usd - m.price_usd) / m.price_usd > 0.25 %}
+              <span style="display:block; font-weight:400; font-size:10px; color:var(--critical);">listed ${{ '%.2f' | format(m.price_usd) }}</span>
+            {% endif %}
+          {% else %}
+            ${{ '%.2f' | format(m.price_usd) }}{% if m.dynamic_pricing %}<span class="muted">*</span>{% endif %}
+          {% endif %}
+        </span>
       </label>
       {% endfor %}
     </div>

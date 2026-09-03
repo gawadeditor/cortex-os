@@ -2636,13 +2636,27 @@ def video_test_page():
     if run_id:
         run = _bo.get_bakeoff(run_id)
 
+    # Overlay the effective (actually-billed) price on the catalogue list —
+    # the catalogue price is a floor for dynamic-priced models.
+    _bo_models = _bo.list_video_models()
+    try:
+        from hypogeum.model_effective_pricing import effective_prices as _ep
+        _es = _ep(db_path=_db_path())
+        for _m in _bo_models:
+            _s = _es.get(_m.get("id"))
+            if _s and _s.effective_price:
+                _m["billed_price_usd"] = round(_s.effective_price, 4)
+                _m["billed_calls"] = _s.n_calls
+    except Exception:  # noqa: BLE001
+        pass
+
     return render_template(
         "video_bakeoff.html",
         channels=[{"channel_id": c.channel_id, "name": getattr(c, "name", "") or c.channel_id}
                   for c in channels],
         selected_channel=sel,
         aspect=aspect,
-        models=_bo.list_video_models(),
+        models=_bo_models,
         prompt_pack=prompt_pack,
         current_model=current_model,
         run=run,
@@ -2702,10 +2716,19 @@ def video_bakeoff_adopt():
             update_channel_profile(channel_id, model_profile_id=mp_id, db_path=_db_path())
         except Exception:  # noqa: BLE001
             pass
-    # Capture the model's live price now so the Production Plan can price it
-    # even though it is not in muapi.MODEL_CREDIT_COSTS.
+    # Capture the model's price now so the Production Plan can price it even
+    # though it is not in muapi.MODEL_CREDIT_COSTS. Prefer the effective
+    # (actually-billed) price over the catalogue floor — a dynamic-priced
+    # model lists a floor that is not what production settings are billed.
     from hypogeum import video_bakeoff as _bo
-    price = next((m["price_usd"] for m in _bo.list_video_models() if m["id"] == model), None)
+    price = None
+    try:
+        from hypogeum.model_effective_pricing import effective_price as _efp
+        price = _efp(model, db_path=_db_path())
+    except Exception:  # noqa: BLE001
+        pass
+    if price is None:
+        price = next((m["price_usd"] for m in _bo.list_video_models() if m["id"] == model), None)
     # Capture the model's REAL delivered clip duration from its own bake-off
     # evidence (video_bakeoff._execute_run ffprobes every generated clip and
     # records duration_s via provider_evidence.record). Without this, the

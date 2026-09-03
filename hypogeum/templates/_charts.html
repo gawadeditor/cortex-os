@@ -62,6 +62,48 @@
   {%- endif -%}
 {%- endmacro -%}
 
+{#- delta(current, previous): a ▲/▼ change chip. Green up, red down, grey flat.
+    Pass unit='%' to render a percentage-point change instead of a ratio. -#}
+{%- macro delta(current, previous, unit='') -%}
+  {%- set c = current | float if current is not none else none -%}
+  {%- set p = previous | float if previous is not none else none -%}
+  {%- if c is not none and p is not none -%}
+    {%- if unit == 'pp' -%}
+      {%- set diff = (c - p) * 100 -%}
+      {%- set txt = ('%+.0f'|format(diff)) ~ 'pp' -%}
+    {%- elif p != 0 -%}
+      {%- set diff = (c - p) / (p | abs) * 100 -%}
+      {%- set txt = ('%+.0f'|format(diff)) ~ '%' -%}
+    {%- else -%}
+      {%- set diff = 1 if c > 0 else 0 -%}
+      {%- set txt = 'new' -%}
+    {%- endif -%}
+    {%- set dir = 'up' if diff > 0.5 else ('down' if diff < -0.5 else 'flat') -%}
+    <span class="delta delta-{{ dir }}" title="was {{ p | round(2) }}, now {{ c | round(2) }}">
+      <span class="delta-arrow">{{ '▲' if dir == 'up' else ('▼' if dir == 'down' else '■') }}</span>{{ txt }}
+    </span>
+  {%- endif -%}
+{%- endmacro -%}
+
+{#- radial(pct, label): a donut progress ring, value centred. pct is 0..1
+    (or 0..100 — auto-detected). tone = accent|good|warn|critical. -#}
+{%- macro radial(pct, label='', size=96, tone='accent') -%}
+  {%- set v = (pct | float) if pct is not none else 0 -%}
+  {%- set frac = (v / 100.0) if v > 1 else v -%}
+  {%- set frac = 1 if frac > 1 else (0 if frac < 0 else frac) -%}
+  {%- set r = 42 -%}{%- set circ = 2 * 3.14159 * r -%}
+  <svg class="radial radial-{{ tone }}" viewBox="0 0 100 100" width="{{ size }}" height="{{ size }}"
+       role="img" aria-label="{{ (frac * 100) | round | int }}%{{ ' ' ~ label if label }}">
+    <title>{{ (frac * 100) | round | int }}%{{ ' — ' ~ label if label }}</title>
+    <circle cx="50" cy="50" r="{{ r }}" class="radial-track"/>
+    <circle cx="50" cy="50" r="{{ r }}" class="radial-arc"
+            stroke-dasharray="{{ (circ * frac) | round(2) }} {{ circ | round(2) }}"
+            transform="rotate(-90 50 50)"/>
+    <text x="50" y="{{ 46 if (label and size >= 88) else 50 }}" class="radial-val">{{ (frac * 100) | round | int }}%</text>
+    {%- if label and size >= 88 %}<text x="50" y="64" class="radial-lbl">{{ label }}</text>{%- endif %}
+  </svg>
+{%- endmacro -%}
+
 {#- hbar(value, max): one horizontal bar. tone = accent|good|warn|critical. -#}
 {%- macro hbar(value, max, tone='accent', track=true) -%}
   {%- set pct = (value / max * 100) if max and max > 0 else 0 -%}

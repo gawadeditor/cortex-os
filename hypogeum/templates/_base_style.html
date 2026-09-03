@@ -589,6 +589,28 @@
     .bullet-good { background: var(--good); } .bullet-warn { background: var(--warn); } .bullet-critical { background: var(--critical); }
     .bullet-mark { position: absolute; top: -1px; width: 2px; height: 12px; background: var(--text); }
 
+    /* ── delta chip: ▲/▼ change indicator ── */
+    .delta { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; font-weight: 700;
+             padding: 2px 7px; border-radius: 999px; line-height: 1.4; letter-spacing: .01em;
+             font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .delta-arrow { font-size: 8px; }
+    .delta-up   { color: var(--good);     background: var(--good-bg); }
+    .delta-down { color: var(--critical); background: var(--critical-bg); }
+    .delta-flat { color: var(--muted);    background: var(--overlay); }
+
+    /* ── radial: donut progress ring ── */
+    .radial { display: block; }
+    .radial-track { fill: none; stroke: var(--overlay); stroke-width: 9; }
+    .radial-arc   { fill: none; stroke: var(--accent); stroke-width: 9; stroke-linecap: round;
+                    transition: stroke-dasharray var(--dur-slow, 500ms) var(--ease); }
+    .radial-val   { fill: var(--text); font-size: 24px; font-weight: 700; text-anchor: middle;
+                    dominant-baseline: central; font-variant-numeric: tabular-nums; }
+    .radial-lbl   { fill: var(--muted); font-size: 9px; text-anchor: middle; text-transform: uppercase; letter-spacing: .06em; }
+    .radial-good .radial-arc { stroke: var(--good); }
+    .radial-warn .radial-arc { stroke: var(--warn); }
+    .radial-critical .radial-arc { stroke: var(--critical); }
+    :root[data-skin="presentation"] .radial-arc { filter: drop-shadow(0 0 6px var(--accent-line)); }
+
     /* ── New shared primitives (opt-in; used by the wizard + refreshed pages) ── */
     .container { max-width: 1440px; margin: 0 auto; }
     .grid { display: grid; gap: var(--gap); }

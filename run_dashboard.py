@@ -1877,8 +1877,32 @@ def providers_page():
     # Providers with Secret Profile connect forms in the Publishing section
     publishing_sp_providers = {"facebook", "instagram", "tiktok"}
 
+    # Per-channel saved video-model head-to-heads
+    try:
+        from hypogeum.channel_video_comparison import get_comparison as _gc
+        from hypogeum.channel_config import list_channel_profiles as _lcp
+        video_comparisons = []
+        for _cp in _lcp(status="active", db_path=db):
+            _cid = getattr(_cp, "channel_id", None)
+            if not _cid:
+                continue
+            _cmp = _gc(_cid, db_path=db)
+            if _cmp:
+                video_comparisons.append({
+                    "channel_id": _cid,
+                    "channel_name": getattr(_cp, "name", None) or _cid,
+                    "current_model": _cmp["current"]["model"],
+                    "current_cost_ep": _cmp["current"]["cost_per_episode"],
+                    "alt_model": _cmp["alternative"]["model"],
+                    "alt_cost_ep": _cmp["alternative"]["cost_per_episode"],
+                    "delta_week": _cmp["delta"]["per_week"],
+                })
+    except Exception:  # noqa: BLE001
+        video_comparisons = []
+
     return render_template(
         "providers.html",
+        video_comparisons=video_comparisons,
         ai_providers=ai_providers,               # legacy alias = ai_image_providers
         ai_image_providers=ai_image_providers,
         ai_audio_providers=ai_audio_providers,

@@ -349,6 +349,40 @@
   {% endfor %}
 </div>
 
+{# Per-channel video model head-to-head #}
+<div class="section-label" style="margin-top: calc(var(--gap) * 1.5);">
+  Video model — per channel
+  <span style="font-weight:400; font-size:11px; text-transform:none; letter-spacing:0;">
+    — same real prompt, current model vs one alternative, quality against cost
+  </span>
+</div>
+<div class="card" style="margin-bottom:var(--gap); padding:0;">
+  {% if video_comparisons %}
+  <div class="table-wrap" style="border:none;"><table>
+    <thead><tr><th>Channel</th><th>In use now</th><th class="num">$/episode</th><th>Alternative</th><th class="num">$/episode</th><th class="num">Switch</th><th></th></tr></thead>
+    <tbody>
+    {% for v in video_comparisons %}
+    <tr>
+      <td>{{ v.channel_name }}</td>
+      <td class="mono" style="font-size:11px;">{{ v.current_model }}</td>
+      <td class="num mono">${{ '%.2f' % v.current_cost_ep }}</td>
+      <td class="mono" style="font-size:11px;">{{ v.alt_model }}</td>
+      <td class="num mono">${{ '%.2f' % v.alt_cost_ep }}</td>
+      <td class="num mono" style="color:{{ 'var(--good)' if v.delta_week < 0 else 'var(--critical)' }};">
+        {{ '−' if v.delta_week < 0 else '+' }}${{ '%.0f' % (v.delta_week | abs) }}/wk
+      </td>
+      <td><a href="/channel/{{ v.channel_id }}/video-compare?scope={{ v.channel_id }}" class="btn" style="font-size:11px;">Watch head-to-head →</a></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}
+  <p style="font-size:12px; color:var(--muted); margin:0; padding:16px;">
+    No saved comparison yet. Run one from <a href="/providers/video-test">Video test</a>.
+  </p>
+  {% endif %}
+</div>
+
 
 {# ─────────────────────────────────────────────────────────── #}
 {# Publishing Platforms — Zernio account pool (per-channel)      #}

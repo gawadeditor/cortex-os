@@ -37,6 +37,16 @@ from typing import Optional
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _WORKING_EPISODES_DIR = _PROJECT_ROOT / ".hypogeum-assets" / "episodes"
 
+# Per-process backoff for a persistently-unreachable archive root (e.g. a
+# launchd worker that lacks macOS permission to write the mounted SMB
+# volume — EPERM/errno 1 on every attempt). Without this the sweep retries
+# every worker iteration forever and floods the log. After
+# _ARCHIVE_FAIL_LIMIT consecutive whole-sweep failures the sweep is skipped
+# until _ARCHIVE_BACKOFF_SECONDS have passed, then it tries once more.
+_ARCHIVE_FAIL_LIMIT = 3
+_ARCHIVE_BACKOFF_SECONDS = 1800
+_archive_backoff = {"consecutive_fail": 0, "skip_until": 0.0, "last_reason": ""}
+
 _JSONL_CATALOGS = (
     "asset_catalog.jsonl",
     "clip_catalog.jsonl",
@@ -482,18 +492,43 @@ def relocate_pending_published_episodes(
     Relocate up to ``limit`` episodes that are published but not yet archived.
     Non-blocking, safe to call every worker iteration. Returns the records.
     """
+    import time as _time
     log = _log()
     out: list[dict] = []
     pending = find_pending_published_episodes(db_path)
     if not pending:
         return out
+
+    bo = _archive_backoff
+    if bo["consecutive_fail"] >= _ARCHIVE_FAIL_LIMIT and _time.monotonic() < bo["skip_until"]:
+        return out  # archive root persistently unreachable — backing off, silent
+
     log.info("archive_relocation_sweep", pending=len(pending))
+    any_moved = any_failed = False
     for episode_id, channel_id in pending[: max(1, limit)]:
         try:
-            out.append(relocate_episode_assets(
-                episode_id, channel_id, db_path=db_path,
-            ))
+            rec = relocate_episode_assets(episode_id, channel_id, db_path=db_path)
+            out.append(rec)
+            if rec.get("verdict") == "FAILED":
+                any_failed = True
+                bo["last_reason"] = "; ".join(rec.get("failures", []))[:200]
+            elif rec.get("files_moved"):
+                any_moved = True
         except Exception as exc:  # noqa: BLE001
+            any_failed = True
+            bo["last_reason"] = str(exc)[:200]
             log.warn("archive_relocation_sweep_item_failed",
                      episode_id=episode_id, error=str(exc))
+
+    if any_failed and not any_moved:
+        bo["consecutive_fail"] += 1
+        if bo["consecutive_fail"] == _ARCHIVE_FAIL_LIMIT:
+            bo["skip_until"] = _time.monotonic() + _ARCHIVE_BACKOFF_SECONDS
+            log.warn("archive_relocation_backoff",
+                     consecutive_fail=bo["consecutive_fail"],
+                     backoff_seconds=_ARCHIVE_BACKOFF_SECONDS,
+                     reason=bo["last_reason"])
+    else:
+        bo["consecutive_fail"] = 0
+        bo["skip_until"] = 0.0
     return out

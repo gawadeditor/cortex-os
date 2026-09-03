@@ -70,7 +70,21 @@ per-page `<style>` unless truly page-local.
 | 16 | Analytics Sync Health | `analytics_sync.html` | ✅ done | hero; renamed the colliding `.stat-*` classes; friendly platforms/times |
 | 17 | Failures → "What went wrong" | `failures.html` | ✅ done | insight cards via plain_problem, traceback in a drawer |
 | 18 | Asset archive | `archive.html` | ✅ done | hero; renamed the colliding `.pill`; plainer columns |
-| — | consistency + bug sweep | remaining ~55 | todo | Providers / Infrastructure / Governance / Storage / decisions / setup / channel_builder / analytics_episode + analytics_platform / the deep episode_detail tabs |
+| 19 | Per-episode analytics | `analytics_episode.html` | ✅ done | hero, "By platform" comparison, insight cards, plain lessons |
+| 20 | Per-platform analytics | `analytics_platform.html` | ✅ done | hero, friendly_platform, "Click rate"/"Watch-through", titles |
+| 21 | Channel Settings | `channel_settings.html` | ✅ done | hero, "Payment authorization", friendly_money, "Cortex default" |
+| 22 | Production plan editor | `channel_operations_edit.html` | ✅ done | dropped 90 lines of divergent page-CSS; hero; plain field labels + checkbox explainers |
+| 23 | Advanced | `advanced.html` | ✅ done | hero; "operational-alerts log" not "OIS signal log" |
+| 24 | Governance / Decisions | `decisions.html` | ✅ done | hero; "strong evidence" not "72% confidence + priority 1"; no JSON-API footer |
+| — | plain_problem free-text | `dashboard_humanize.py` | ✅ done | `_ERROR_PHRASES` — raw pipeline errors → plain label + fix, never dumped as a heading |
+| — | consistency + bug sweep | remaining ~45 | todo | Providers / Infrastructure / Storage settings / decision_inputs+reviews / setup / channel_builder / model+brand+publishing edit / connect_* / command / execution_plans / preflight / approvals_history / episode_qa / the deep episode_detail tabs |
+
+## Known follow-ups (found while working)
+
+- Production plan editor's "Publish time" field maps to the weekly
+  `publishing_schedule` — a shorts channel's DAILY release time lives in
+  `deliverable_schedule_policy.main_episode.time_of_day` (set via DB this
+  session) and has no form field yet.
 
 ## Known follow-ups (found while working)
 

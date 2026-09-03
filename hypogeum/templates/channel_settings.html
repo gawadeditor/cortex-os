@@ -45,8 +45,13 @@
       <div class="cs-fr"><span class="k">Image / video tools</span><span class="v mono">{{ model.image_provider or '—' }} / {{ model.video_provider or '—' }}</span></div>
       <div class="cs-fr"><span class="k">Video model</span><span class="v mono">{{ model.video_model or 'Cortex default' }}{% if model.video_model and model.video_model_price_usd %} · {{ model.video_model_price_usd | friendly_money }}/clip{% endif %}</span></div>
       <div class="cs-fr"><span class="k">Image-to-video model</span><span class="v mono">{{ model.video_i2v_model or 'Cortex default' }}{% if model.video_i2v_model and model.video_i2v_model_price_usd %} · {{ model.video_i2v_model_price_usd | friendly_money }}/clip{% endif %}</span></div>
+      {% if model.video_model and model.video_model_price_usd %}
+      <div class="cs-fr"><span class="k">Video model — actual bill</span>
+        <span class="v mono">{{ (model.video_model | model_billed_price) or (model.video_model_price_usd | friendly_money) }}/clip</span></div>
+      {% endif %}
       <a href="/model/{{ channel.model_profile_id }}/edit" class="btn" style="margin-top:10px;">{{ icon('pencil') }} Edit tools</a>
-      <a href="/providers/video-test?channel={{ channel.channel_id }}" class="btn" style="margin-top:10px;">Compare video quality →</a>
+      <a href="/channel/{{ channel.channel_id }}/video-compare?scope={{ channel.channel_id }}" class="btn" style="margin-top:10px;">{{ icon('play') }} Video model — head to head</a>
+      <a href="/providers/video-test?channel={{ channel.channel_id }}" class="btn" style="margin-top:10px;">Run a new comparison →</a>
       {% else %}<p class="page-meta">No model profile.</p>{% endif %}
     </div>
 

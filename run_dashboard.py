@@ -292,6 +292,18 @@ def _f_friendly_money(value, currency="$"):
     return _hz.friendly_money(value, currency=currency)
 
 
+@app.template_filter("model_billed_price")
+def _f_model_billed_price(model_id):
+    """The per-call price this model has actually been billed (from spend
+    history), formatted; empty string when it's never been billed."""
+    try:
+        from hypogeum.model_effective_pricing import effective_price
+        p = effective_price(model_id, db_path=_db_path())
+        return f"${p:.2f}" if p is not None else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 @app.template_filter("friendly_platform")
 def _f_friendly_platform(value):
     return _hz.friendly_platform(value)
@@ -7359,6 +7371,31 @@ def channel_keyword_research_refresh(channel_id):
     threading.Thread(target=_run, daemon=True).start()
     return redirect(url_for("channel_settings_page", channel_id=channel_id,
                             scope=channel_id, kw="started"))
+
+
+@app.route("/channel/<channel_id>/video-compare")
+def channel_video_compare_page(channel_id):
+    """Head-to-head: this channel's current video model vs one alternative,
+    run on the same real prompt from one of the channel's episodes —
+    clips side by side, cost per shot / second / episode, the exact prompt."""
+    db = _db_path()
+    channel = get_channel_detail(channel_id, db_path=db)
+    if channel is None:
+        return render_template("not_found.html", kind="Channel", id=channel_id), 404
+    from hypogeum.channel_video_comparison import get_comparison
+    comparison = get_comparison(channel_id, db_path=db)
+    return render_template("channel_video_compare.html",
+                           channel=channel, comparison=comparison, channel_id=channel_id)
+
+
+@app.route("/channel/<channel_id>/video-compare/clip/<path:model>")
+def channel_video_compare_clip(channel_id, model):
+    from flask import send_file, abort
+    from hypogeum.channel_video_comparison import clip_path
+    p = clip_path(channel_id, model)
+    if p is None:
+        abort(404)
+    return send_file(str(p), mimetype="video/mp4", conditional=True)
 
 
 @app.route("/channel/<channel_id>/operating-grant", methods=["GET", "POST"])

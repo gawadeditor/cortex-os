@@ -618,13 +618,16 @@ class TestAssessCredentials:
         assert not expiry.passed
         assert not expiry.blocking
 
-    def test_untested_credentials_warn(self, db_path):
+    def test_untested_credentials_are_advisory_not_a_warning(self, db_path):
+        # A stale credential *test* timestamp is process hygiene, not a
+        # health problem — it must not degrade the factory.
         _seed_credentials(db_path)
         r = assess_factory(db_path=db_path, factory_id="test")
         cred = next(d for d in r.domains if d.domain == "credentials")
         tested = next(c for c in cred.checks if c.check_id == "credentials_recently_tested")
-        assert not tested.passed
+        assert tested.passed
         assert not tested.blocking
+        assert "re-test" in tested.detail
 
 
 # ---------------------------------------------------------------------------

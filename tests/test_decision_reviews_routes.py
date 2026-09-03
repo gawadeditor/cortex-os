@@ -252,7 +252,7 @@ class TestDecisionsPageSyncButton:
         ):
             resp = client.get("/decisions")
         assert resp.status_code == 200
-        assert b"Sync to review queue" in resp.data
+        assert b"Send to review queue" in resp.data
 
 
 # ---------------------------------------------------------------------------

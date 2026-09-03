@@ -155,7 +155,7 @@ class TestDecisionsPage:
 
     def test_page_links_to_api_endpoint(self, client):
         html = client.get("/decisions").data.decode()
-        assert "/api/decisions" in html
+        assert "/decision-reviews" in html  # page links into the governance workflow (raw JSON API link removed 2026-09-03)
 
     def test_page_no_fake_recommendations(self, client):
         html = client.get("/decisions").data.decode().lower()

@@ -84,32 +84,20 @@
 <div class="container">
 
 
-<div class="page-header">
-  <h1>Decisions</h1>
-  <span class="page-meta">{{ state.checked_at[:19] | replace("T"," ") }}Z — proposed decisions only</span>
-</div>
-
-<!-- ── Engine status banner ── -->
 {%- set es = state.engine_status %}
-<div class="engine-banner engine-{{ es }}">
-  <span class="engine-level engine-level-{{ es }}">
-    {{ {'ready':'● Ready','partial':'◆ Partial','not_ready':'○ Not ready'}[es] | default('○ Unknown') }}
-  </span>
-  <span class="engine-summary">{{ state.summary }}</span>
-</div>
-
-<!-- ── Computed vs persisted notice ── -->
-<div class="flash flash-ok" style="margin-bottom:var(--gap); font-size:12px;">
-  This page shows <strong>computed, live decisions</strong> — recalculated on every page load, never stored.
-  To review and track decisions, sync them to the review queue first.
-</div>
-
-<!-- ── Sync to review queue ── -->
-<div style="display:flex; gap:8px; align-items:center; margin-bottom:var(--gap); flex-wrap:wrap;">
-  <button class="btn" id="sync-btn" onclick="syncReviews()">Sync to review queue</button>
-  <span id="sync-result" style="font-size:12px; color:var(--muted);"></span>
-  <a href="/decision-reviews" class="btn">Open review queue →</a>
-</div>
+{% from '_hero.html' import hero %}
+{% call hero(
+     eyebrow='Governance',
+     title='What the data suggests you change',
+     lede='Cortex reads the real operational numbers and proposes strategic moves. Nothing here happens on its own — send a proposal to the review queue to act on it.',
+     figure=state.decisions | length,
+     figure_label='proposal' ~ ('' if state.decisions|length == 1 else 's'),
+     pill={'ready':'engine ready','partial':'partly ready','not_ready':'not enough data yet'}.get(es, 'unknown'),
+     pill_class={'ready':'is-good','partial':'is-warn','not_ready':''}.get(es, '')) %}
+  <button class="btn btn-primary" id="sync-btn" onclick="syncReviews()">Send to review queue</button>
+  <a href="/decision-reviews" class="btn">Open review queue</a>
+{% endcall %}
+<div style="margin-bottom:var(--gap);"><span id="sync-result" style="font-size:12px; color:var(--muted);"></span></div>
 
 <!-- ── Proposed decisions ── -->
 <div class="section-header">
@@ -123,7 +111,7 @@
   <div class="dec-card dec-card-{{ d.priority }}">
     <div class="dec-header">
       <div class="dec-title">{{ d.title }}</div>
-      <span class="dec-type-badge">{{ d.type | replace("_"," ") }}</span>
+      <span class="dec-type-badge">{{ d.type | replace("_"," ") | title }}</span>
     </div>
     <div class="dec-recommendation">{{ d.recommendation }}</div>
     {%- if d.evidence %}
@@ -131,32 +119,30 @@
     {%- endif %}
     <div class="dec-meta">
       <div class="confidence-bar">
-        confidence
         <div class="conf-track">
           <div class="conf-fill {{ conf_class }}" style="width:{{ "%.0f"|format(d.confidence * 100) }}%"></div>
         </div>
-        <span>{{ "%.0f"|format(d.confidence * 100) }}%</span>
+        <span>{% if d.confidence >= 0.7 %}strong evidence{% elif d.confidence >= 0.4 %}some evidence{% else %}early signal{% endif %}</span>
       </div>
-      <div>priority {{ d.priority }}</div>
       <div class="dec-impact">{{ d.expected_impact }}</div>
     </div>
     <div class="dec-actions">
       <a href="{{ d.investigate_url }}" class="btn btn-primary">{{ d.action_label }}</a>
       <a href="/decision-reviews" class="btn">Review queue →</a>
-      <span class="review-note">— sync to /decision-reviews to accept/reject</span>
+      <span class="review-note">— send to the review queue to accept or reject</span>
     </div>
   </div>
   {%- endfor %}
 {%- else %}
 <div class="no-decisions">
   {%- if es == 'not_ready' %}
-  <div style="font-weight:600; margin-bottom:6px;">Decision engine not ready</div>
+  <div style="font-weight:600; margin-bottom:6px;">Not enough data to suggest anything yet</div>
   <div>{{ state.summary }}</div>
   <div style="margin-top:10px;">
-    <a href="/decision-inputs" class="btn">View decision inputs</a>
+    <a href="/decision-inputs" class="btn">See what data is missing</a>
   </div>
   {%- else %}
-  <div style="font-weight:600; color:var(--green); margin-bottom:6px;">● No decisions pending</div>
+  <div style="font-weight:600; color:var(--good); margin-bottom:6px;">Nothing to change right now</div>
   <div>{{ state.summary }}</div>
   {%- endif %}
 </div>
@@ -169,12 +155,11 @@
   <span class="section-count">{{ state.insufficient_data | length }}</span>
 </div>
 <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">
-  These decision types cannot be evaluated yet. The engine will produce decisions
-  automatically once the required data is available.
+  Cortex can't weigh in on these yet — it will once enough data comes in.
 </div>
 {%- for i in state.insufficient_data %}
 <div class="insuff-card">
-  <span class="insuff-type">{{ i.type | replace("_"," ") }}</span>
+  <span class="insuff-type">{{ i.type | replace("_"," ") | title }}</span>
   <span class="insuff-reason">{{ i.reason }}</span>
 </div>
 {%- endfor %}
@@ -182,17 +167,15 @@
 
 <!-- ── Footer ── -->
 <div class="card" style="margin-top:var(--gap); margin-bottom:0;">
-  <div class="card-title">About this page</div>
+  <div class="card-title">How this works</div>
   <div style="font-size:12px; color:var(--muted); line-height:1.6;">
-    Decisions are computed live from real operational data. No LLM-generated strategy.
-    No mock data treated as truth. Confidence scores reflect evidence quality, not certainty.
-    Content direction recommendations require ≥{{ 3 }} real audience snapshots.
+    Every proposal here is worked out from the channel's real numbers — never a
+    guess. "Strong evidence" means several data points agree, not that it's
+    certain. Topic-direction proposals need at least 3 real audience readings first.
   </div>
   <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
-    <a href="/command"          class="btn">Command</a>
     <a href="/decision-reviews" class="btn">Review queue</a>
-    <a href="/decision-inputs"  class="btn">Decision Inputs</a>
-    <a href="/api/decisions"    class="btn" target="_blank">JSON API</a>
+    <a href="/decision-inputs"  class="btn">What the data shows</a>
   </div>
 </div>
 
@@ -210,7 +193,7 @@ function syncReviews() {
   .then(function(r){ return r.json(); })
   .then(function(d){
     if (d.ok) {
-      res.textContent = 'Created: ' + d.created + '  Updated: ' + d.updated + '  Skipped: ' + d.skipped;
+      res.textContent = d.created + ' new, ' + d.updated + ' updated in the review queue.';
     } else {
       res.textContent = 'Error: ' + (d.error || 'unknown');
     }

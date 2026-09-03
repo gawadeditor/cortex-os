@@ -14,17 +14,17 @@
 <div class="container">
 
 
-<div class="page-header">
-  <h1>Approval History</h1>
-  <span class="page-meta">{{ approvals | length }} record{% if approvals|length != 1 %}s{% endif %}</span>
-</div>
+{% from '_hero.html' import hero %}
+{% from '_icons.html' import icon %}
+{{ hero(eyebrow='Review', title='Approvals',
+   lede='Every time an episode needed your sign-off before it went ahead — what it was, who decided, and when.',
+   figure=approvals|length, figure_label='record' ~ ('' if approvals|length == 1 else 's')) }}
 
 <div class="filters">
-  <span class="muted" style="font-size:12px;">Filter:</span>
   <a href="/approvals"                  class="filter-link {% if not status_filter %}active{% endif %}">All</a>
-  <a href="/approvals?status=pending"   class="filter-link {% if status_filter == 'pending' %}active{% endif %}">Pending</a>
+  <a href="/approvals?status=pending"   class="filter-link {% if status_filter == 'pending' %}active{% endif %}">Waiting</a>
   <a href="/approvals?status=approved"  class="filter-link {% if status_filter == 'approved' %}active{% endif %}">Approved</a>
-  <a href="/approvals?status=rejected"  class="filter-link {% if status_filter == 'rejected' %}active{% endif %}">Rejected</a>
+  <a href="/approvals?status=rejected"  class="filter-link {% if status_filter == 'rejected' %}active{% endif %}">Turned down</a>
   <a href="/approvals?status=expired"   class="filter-link {% if status_filter == 'expired' %}active{% endif %}">Expired</a>
 </div>
 
@@ -33,43 +33,38 @@
   <table>
     <thead>
       <tr>
-        <th>Type</th>
+        <th>What for</th>
         <th>Episode</th>
-        <th>Run</th>
         <th>Status</th>
-        <th>Requested</th>
+        <th>Asked</th>
         <th>Decided by</th>
         <th>Notes</th>
-        <th>Actions</th>
+        <th></th>
       </tr>
     </thead>
     <tbody>
       {% for a in approvals %}
       <tr>
-        <td style="font-weight:500; white-space:nowrap;">{{ a.approval_type }}</td>
-        <td style="font-size:12px;">
-          {{ a.episode_id }}
-          {% if a.episode_title or a.episode_topic %}
-            <br><span class="muted" style="font-size:11px;">{{ (a.episode_title or a.episode_topic)[:50] }}</span>
-          {% endif %}
+        <td style="font-weight:600; white-space:nowrap;">{{ a.approval_type | plain_status }}</td>
+        <td style="font-size:12.5px; max-width:280px;">
+          <a href="/run/{{ a.run_id }}" style="color:var(--text); font-weight:600;">
+            <span class="cell-title">{{ (a.episode_id or a.run_id) | episode_name }}</span>
+          </a>
         </td>
-        <td style="font-size:12px;" class="muted">
-          <a href="/run/{{ a.run_id }}">{{ a.run_id[:10] }}…</a>
-        </td>
-        <td><span class="badge badge-{{ a.status }}">{{ a.status }}</span></td>
-        <td class="muted" style="font-size:12px; white-space:nowrap;">{{ a.requested_at[:16] if a.requested_at else '—' }}</td>
+        <td><span class="badge badge-{{ a.status }}">{{ a.status | plain_status }}</span></td>
+        <td class="muted" style="font-size:12px; white-space:nowrap;">{{ a.requested_at | rel_time if a.requested_at else '—' }}</td>
         <td class="muted" style="font-size:12px;">{{ a.decided_by or '—' }}</td>
         <td style="font-size:12px; max-width:160px; word-break:break-word;">{{ a.notes or '—' }}</td>
         <td>
           {% if a.status == 'pending' %}
           <div class="btn-row">
             <button class="btn btn-approve"
-                    onclick="postAction('/api/action/approve/{{ a.approval_id|e }}', {})">✓</button>
+                    onclick="postAction('/api/action/approve/{{ a.approval_id|e }}', {})">{{ icon('check') }} Approve</button>
             <button class="btn btn-reject"
-                    onclick="postAction('/api/action/reject/{{ a.approval_id|e }}', {}, 'Reject this approval?')">✗</button>
+                    onclick="postAction('/api/action/reject/{{ a.approval_id|e }}', {}, 'Turn down this request?')">{{ icon('x') }} Turn down</button>
           </div>
           {% else %}
-          <span class="muted" style="font-size:12px;">{{ a.decided_at[:16] if a.decided_at else '—' }}</span>
+          <span class="muted" style="font-size:12px;">{{ a.decided_at | rel_time if a.decided_at else '—' }}</span>
           {% endif %}
         </td>
       </tr>
@@ -78,7 +73,7 @@
   </table>
 </div>
 {% else %}
-<div class="empty">No approval records found{% if status_filter %} with status "{{ status_filter }}"{% endif %}.</div>
+<div class="empty">Nothing needed your approval{% if status_filter %} in this filter{% endif %} yet.</div>
 {% endif %}
 
 <div id="toast" class="toast"></div>

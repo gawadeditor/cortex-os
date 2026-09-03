@@ -7129,10 +7129,19 @@ def channel_detail(channel_id):
         recent_runs = list_runs(db_path=db, channel_id=channel_id, limit=6)
     except Exception:  # noqa: BLE001
         recent_runs = []
+    caption_on = False
+    caption_summary = ""
+    try:
+        from hypogeum.caption_style import burn_enabled, resolve_caption_style
+        caption_on = burn_enabled(channel_id, db_path=db)
+        caption_summary = resolve_caption_style(channel_id, db_path=db).summary()
+    except Exception:  # noqa: BLE001
+        pass
     return render_template("channel_detail.html",
                            channel=channel, brand=brand, model=model, publishing=publishing,
                            runtime=runtime, recommendations=recommendations, readiness=readiness,
-                           rollup=rollup, recent_runs=recent_runs)
+                           rollup=rollup, recent_runs=recent_runs,
+                           caption_on=caption_on, caption_summary=caption_summary)
 
 
 @app.route("/channel/<channel_id>/edit", methods=["GET", "POST"])
@@ -7478,6 +7487,64 @@ def channel_settings_page(channel_id):
                            keyword_research=keyword_research,
                            keyword_research_stale=keyword_research_stale,
                            keyword_research_status=keyword_research_status)
+
+
+@app.route("/channel/<channel_id>/captions", methods=["GET", "POST"])
+def channel_captions_page(channel_id):
+    """On-screen (burned-in) caption settings for this channel's vertical
+    deliverable: the on/off toggle plus font / size / weight / position /
+    words-per-line / colours, with a 9:16 safe-area preview."""
+    db = _db_path()
+    channel = get_channel_detail(channel_id, db_path=db)
+    if channel is None:
+        return render_template("not_found.html", kind="Channel", id=channel_id), 404
+
+    from hypogeum.channel_config import get_channel_profile, update_publishing_profile
+    from hypogeum.caption_style import (
+        resolve_caption_style, burn_enabled, merge_style, build_ass_style,
+        SHORT_NATIVE_DEFAULT, POSITIONS,
+    )
+    from hypogeum.agents.video_renderer import _probe_subtitle_filter_available
+
+    cp = get_channel_profile(channel_id, db_path=db)
+    pub_id = getattr(cp, "publishing_profile_id", None)
+
+    if request.method == "POST" and pub_id:
+        f = request.form
+        style = {
+            "font": f.get("font", "").strip() or SHORT_NATIVE_DEFAULT.font,
+            "font_size": f.get("font_size", "64"),
+            "bold": f.get("bold") == "on",
+            "position": f.get("position", "lower-third"),
+            "max_words_per_line": f.get("max_words_per_line", "3"),
+            "primary_hex": f.get("primary_hex", "FFFFFF"),
+            "outline_hex": f.get("outline_hex", "000000"),
+            "outline_px": f.get("outline_px", "6"),
+            "uppercase": f.get("uppercase") == "on",
+            "extra_margin_v": f.get("extra_margin_v", "24"),
+        }
+        # validate/clamp through the model before persisting
+        style = merge_style(style).as_dict()
+        update_publishing_profile(
+            pub_id, db_path=db,
+            auto_captions=1 if f.get("enabled") == "on" else 0,
+            caption_style=style,
+        )
+        return redirect(url_for("channel_captions_page", channel_id=channel_id,
+                                scope=channel_id) + "&saved=1")
+
+    style = resolve_caption_style(channel_id, db_path=db)
+    preview = build_ass_style(style, 1080, 1920)
+    libass_ok = _probe_subtitle_filter_available("ffmpeg")
+
+    return render_template(
+        "channel_captions.html",
+        channel=channel, channel_id=channel_id,
+        enabled=burn_enabled(channel_id, db_path=db),
+        style=style, preview=preview, positions=list(POSITIONS),
+        libass_ok=libass_ok,
+        saved=request.args.get("saved"),
+    )
 
 
 # In-memory status for the per-channel keyword-research refresh (best-effort;

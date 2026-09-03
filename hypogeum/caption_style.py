@@ -37,6 +37,7 @@ SAFE_SIDE_FRAC   = 0.055  # left gutter
 SAFE_RIGHT_FRAC  = 0.16   # right action rail
 
 _POSITIONS = ("bottom", "lower-third", "center", "top")
+POSITIONS = _POSITIONS  # public alias for UI
 
 # ASS alignment (numpad): 2 = bottom-center, 5 = middle-center, 8 = top-center
 _ALIGN = {"bottom": 2, "lower-third": 2, "center": 5, "top": 8}

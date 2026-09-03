@@ -196,7 +196,9 @@
       <div class="fr"><span class="fr-k">Images</span><span class="fr-v">{{ model.image_provider | friendly_provider }}</span></div>
       <div class="fr"><span class="fr-k">Video</span><span class="fr-v">{{ model.video_provider | friendly_provider }}</span></div>
       <div class="fr"><span class="fr-k">Writing</span><span class="fr-v">{{ model.episode_producer | friendly_model }}</span></div>
-      <div class="btn-row"><a href="/model/{{ model.model_profile_id|e }}/edit" class="btn btn-sm">Edit tools</a></div>
+      <div class="fr"><span class="fr-k">On-screen captions</span><span class="fr-v">{{ 'On' if caption_on else 'Off' }}{% if caption_on and caption_summary %}<span class="muted" style="font-size:11px;"> · {{ caption_summary }}</span>{% endif %}</span></div>
+      <div class="btn-row"><a href="/model/{{ model.model_profile_id|e }}/edit" class="btn btn-sm">Edit tools</a>
+        <a href="/channel/{{ channel.channel_id|e }}/captions?scope={{ channel.channel_id|e }}" class="btn btn-sm">Captions</a></div>
       {% else %}
       <div class="dv-empty"><div class="dv-empty-title">No creative tools set</div></div>
       {% endif %}

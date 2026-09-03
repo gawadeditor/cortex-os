@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>On-screen captions — Cortex</title>
+  {% include '_base_style.html' %}
+  <style>
+    .cap-wrap { display:grid; grid-template-columns: 1fr 300px; gap:28px; align-items:start; }
+    @media (max-width: 780px){ .cap-wrap { grid-template-columns: 1fr; } }
+    .cap-form .fr { display:grid; grid-template-columns: 150px 1fr; gap:12px; align-items:center;
+                    padding:9px 0; border-bottom:1px solid var(--line); }
+    .cap-form .fr:last-child { border-bottom:none; }
+    .cap-form label.fr-k { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+    .cap-form input[type=text], .cap-form input[type=number], .cap-form select {
+      width:100%; max-width:220px; }
+    .cap-form input[type=color] { width:44px; height:30px; padding:2px; border:1px solid var(--line);
+      border-radius:6px; background:var(--panel); vertical-align:middle; }
+    .cap-form .row-inline { display:flex; align-items:center; gap:8px; }
+    .toggle-row { display:flex; align-items:center; gap:12px; margin-bottom:6px; }
+    .toggle-row input { width:auto; }
+    /* 9:16 preview */
+    .phone { width:270px; aspect-ratio:9/16; border-radius:22px; overflow:hidden; position:relative;
+      background:linear-gradient(160deg,#2b3a4a,#141a22); border:1px solid var(--line);
+      box-shadow:0 8px 30px rgba(0,0,0,.28); }
+    .safe { position:absolute; inset:0; pointer-events:none; }
+    .safe::before, .safe::after { content:''; position:absolute; left:0; right:0; background:rgba(255,80,80,.10);
+      border-color:rgba(255,90,90,.35); border-style:dashed; }
+    .safe::before { top:0; height:10%; border-bottom-width:1px; }
+    .safe::after  { bottom:0; height:18%; border-top-width:1px; }
+    .safe-rail { position:absolute; top:0; bottom:0; right:0; width:16%; background:rgba(255,80,80,.10);
+      border-left:1px dashed rgba(255,90,90,.35); }
+    .cap-line { position:absolute; left:5.5%; right:16%; text-align:center; color:#fff;
+      font-weight:800; line-height:1.15; text-shadow:0 0 4px #000, 0 2px 6px #000;
+      font-family:'Helvetica Neue',Arial,sans-serif; }
+    .safe-note { font-size:11px; color:var(--muted); margin-top:10px; max-width:270px; }
+    .flash-ok { background:var(--good-bg,rgba(60,180,110,.14)); border:1px solid rgba(60,180,110,.4);
+      padding:10px 14px; border-radius:8px; margin-bottom:16px; }
+  </style>
+</head>
+<body>
+{% include "_nav.html" %}
+{% from '_hero.html' import hero %}
+{% from '_icons.html' import icon %}
+
+<div class="container">
+
+{{ hero(
+   eyebrow=(channel_id | channel_name),
+   title='On-screen captions',
+   lede='Text burned into the vertical video itself — separate from the caption file platforms show. Off means the video ships clean.',
+   pill=('On' if enabled else 'Off'),
+   pill_class=('is-good' if enabled else '')) }}
+
+{% if saved %}<div class="flash-ok">{{ icon('check') }} Saved. Applies to the next episode this channel produces.</div>{% endif %}
+
+{% if not libass_ok %}
+<div class="flash" style="margin-bottom:18px; background:rgba(230,160,30,.12);
+     border:1px solid rgba(230,160,30,.45); color:var(--text);">
+  <strong>This machine can't burn captions yet.</strong> Its ffmpeg was built without the text
+  renderer (libass). Captions are <em>skipped</em> on every render until that's fixed — the video
+  still ships, just without on-screen text. Rebuild ffmpeg with libass, or run in the container.
+</div>
+{% endif %}
+
+<div class="cap-wrap">
+  <form method="POST" action="/channel/{{ channel_id|e }}/captions?scope={{ channel_id|e }}" class="cap-form card">
+    <div class="toggle-row">
+      <input type="checkbox" id="enabled" name="enabled" {{ 'checked' if enabled else '' }}>
+      <label for="enabled" style="font-weight:600; font-size:14px;">Burn captions into this channel's videos</label>
+    </div>
+    <p class="muted" style="font-size:12px; margin:0 0 14px;">3 words per line by default, timed to the narration.</p>
+
+    <div class="fr"><label class="fr-k" for="font">Font</label>
+      <input type="text" id="font" name="font" value="{{ style.font }}"
+             placeholder="Helvetica Neue"></div>
+    <div class="fr"><label class="fr-k" for="font_size">Size</label>
+      <div class="row-inline">
+        <input type="number" id="font_size" name="font_size" min="24" max="160" value="{{ style.font_size }}">
+        <span class="muted" style="font-size:12px;">px · for a 1080-wide frame</span>
+      </div></div>
+    <div class="fr"><label class="fr-k" for="bold">Weight</label>
+      <div class="row-inline"><input type="checkbox" id="bold" name="bold" {{ 'checked' if style.bold else '' }}>
+        <label for="bold" style="font-size:13px;">Bold</label></div></div>
+    <div class="fr"><label class="fr-k" for="position">Position</label>
+      <select id="position" name="position">
+        {% for p in positions %}<option value="{{ p }}" {{ 'selected' if style.position == p else '' }}>{{ p | replace('-',' ') | title }}</option>{% endfor %}
+      </select></div>
+    <div class="fr"><label class="fr-k" for="max_words_per_line">Words / line</label>
+      <input type="number" id="max_words_per_line" name="max_words_per_line" min="1" max="8" value="{{ style.max_words_per_line }}"></div>
+    <div class="fr"><label class="fr-k" for="primary_hex">Text colour</label>
+      <input type="color" id="primary_hex" name="primary_hex" value="#{{ style.primary_hex }}"></div>
+    <div class="fr"><label class="fr-k" for="outline_hex">Outline colour</label>
+      <input type="color" id="outline_hex" name="outline_hex" value="#{{ style.outline_hex }}"></div>
+    <div class="fr"><label class="fr-k" for="outline_px">Outline width</label>
+      <div class="row-inline"><input type="number" id="outline_px" name="outline_px" min="0" max="24" value="{{ style.outline_px }}">
+        <span class="muted" style="font-size:12px;">px</span></div></div>
+    <div class="fr"><label class="fr-k" for="extra_margin_v">Extra lift</label>
+      <div class="row-inline"><input type="number" id="extra_margin_v" name="extra_margin_v" min="0" max="600" value="{{ style.extra_margin_v }}">
+        <span class="muted" style="font-size:12px;">px above the safe area</span></div></div>
+    <div class="fr"><label class="fr-k" for="uppercase">Case</label>
+      <div class="row-inline"><input type="checkbox" id="uppercase" name="uppercase" {{ 'checked' if style.uppercase else '' }}>
+        <label for="uppercase" style="font-size:13px;">ALL CAPS</label></div></div>
+
+    <div style="margin-top:18px; display:flex; gap:10px;">
+      <button type="submit" class="btn btn-primary">Save</button>
+      <a href="/channel/{{ channel_id|e }}?scope={{ channel_id|e }}" class="btn btn-sm">Back to channel</a>
+    </div>
+  </form>
+
+  <div>
+    <div class="phone" id="phone">
+      <div class="safe"></div><div class="safe-rail"></div>
+      <div class="cap-line" id="capLine">The Colosseum swallowed</div>
+    </div>
+    <div class="safe-note">
+      Red bands = the space TikTok / Reels / Shorts cover with their own buttons and text.
+      Captions stay inside the clear zone.
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  var P = document.getElementById('phone'), L = document.getElementById('capLine');
+  function g(id){ return document.getElementById(id); }
+  function draw(){
+    var h = P.clientHeight, w = P.clientWidth;
+    var size = Math.max(8, (parseInt(g('font_size').value,10) || 64) * (w/1080));
+    L.style.fontFamily = "'" + (g('font').value || 'Helvetica Neue') + "', 'Helvetica Neue', Arial, sans-serif";
+    L.style.fontSize = size + 'px';
+    L.style.fontWeight = g('bold').checked ? 800 : 500;
+    L.style.color = g('primary_hex').value;
+    var ow = Math.max(0,(parseInt(g('outline_px').value,10)||0)) * (w/1080);
+    var oc = g('outline_hex').value;
+    L.style.textShadow = ow > 0
+      ? [-1,1].flatMap(function(x){return [-1,1].map(function(y){return (x*ow)+'px '+(y*ow)+'px 0 '+oc;});}).join(',')
+      : 'none';
+    L.textContent = g('uppercase').checked ? 'THE COLOSSEUM SWALLOWED' : 'The Colosseum swallowed';
+    var pos = g('position').value;
+    var extra = Math.max(0,(parseInt(g('extra_margin_v').value,10)||0)) * (h/1920);
+    L.style.top=''; L.style.bottom=''; L.style.transform='';
+    if (pos === 'top') { L.style.top = (h*0.10 + extra) + 'px'; }
+    else if (pos === 'center') { L.style.top = '50%'; L.style.transform = 'translateY(-50%)'; }
+    else { L.style.bottom = (h*0.18 + extra) + 'px'; }  /* bottom + lower-third */
+    P.style.opacity = g('enabled').checked ? 1 : 0.35;
+  }
+  P.parentElement.parentElement.querySelectorAll('input,select').forEach(function(el){
+    el.addEventListener('input', draw); el.addEventListener('change', draw);
+  });
+  window.addEventListener('resize', draw); draw();
+})();
+</script>
+
+</div><!-- /.container -->
+</body>
+</html>

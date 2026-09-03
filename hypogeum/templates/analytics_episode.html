@@ -3,255 +3,150 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{{ d.episode_id }} Analytics — Cortex</title>
+  <title>Episode performance — Cortex</title>
   {% include '_base_style.html' %}
   <style>
-    .insight-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
-    .insight-row:last-child { border-bottom: none; }
-    .insight-meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 4px; }
-    .insight-type-label { font-weight: 600; font-size: 13px; }
-    .cross-table td:first-child { color: var(--muted); font-size: 12px; white-space: nowrap; min-width: 130px; }
+    .cross-table td:first-child { color: var(--muted); font-size: 12px; white-space: nowrap; min-width: 130px; text-align: left; }
     .cross-table td { text-align: right; }
-    .cross-table td:first-child { text-align: left; }
     .cross-table th:first-child { text-align: left; }
     .cross-table th { text-align: right; }
-    .action-ep-row { padding: 8px 0; border-bottom: 1px solid var(--border); }
+    .action-ep-row { padding: 10px 0; border-bottom: 1px solid var(--hairline); }
     .action-ep-row:last-child { border-bottom: none; }
-    .flash-ok { background:var(--good-bg); border:1px solid var(--good); color:var(--green);
-                padding:10px 14px; border-radius:var(--radius); margin-bottom:var(--gap); font-size:13px; }
   </style>
 </head>
 <body>
 {% include '_nav.html' %}
 {% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
 
 <div class="container">
 
-{% include '_intelligence_subnav.html' %}
-
-{# ── Breadcrumb ── #}
 <div class="breadcrumb">
-  <a href="/intelligence/performance">Intelligence</a>
+  <a href="/intelligence/performance">Performance</a>
   <span class="breadcrumb-sep">/</span>
-  <span>{{ d.episode_id }}</span>
+  <span>{{ d.episode_id | episode_name }}</span>
 </div>
 
 {% if request.args.get('import_result') == 'ok' %}
-<div class="flash-ok">Analytics imported and insights extracted successfully.</div>
+<div class="flash flash-ok">{{ icon('check') }} Analytics imported — new lessons pulled out.</div>
 {% endif %}
 
-{% set _DIM_CLS = {
-  'thumbnail': 'dim-thumbnail', 'title': 'dim-title', 'hook': 'dim-hook',
-  'pacing': 'dim-pacing', 'retention': 'dim-retention', 'cta': 'dim-cta',
-  'audio': 'dim-audio', 'topic': 'dim-topic',
-} %}
-
-{# ── Page header with production cost ── #}
-<div class="page-header">
-  <h1>{{ d.episode_id }}</h1>
-  {% if d.episode.get('title') or d.episode.get('topic') %}
-    <span class="page-meta">{{ d.episode.get('title') or d.episode.get('topic') }}</span>
-  {% endif %}
-  {% if d.production_cost > 0 %}
-    <span class="muted" style="font-size:12px;">Cost: <strong style="color:var(--text);">${{ "%.4f"|format(d.production_cost) }}</strong></span>
-  {% endif %}
-  <div style="margin-left:auto; display:flex; gap:8px;">
-    <a href="/analytics/import" class="btn" style="font-size:11px;">Add data →</a>
-    <a href="/analytics" class="btn">← Analytics</a>
-  </div>
-</div>
-
-{# ── Pending action banner ── #}
 {% set _pending = d.actions | selectattr('status', 'equalto', 'pending') | list %}
+{% call hero(
+     eyebrow='Performance',
+     title=d.episode_id | episode_name,
+     lede=(d.episode.get('topic') or '') if (d.episode.get('topic') and d.episode.get('topic') != (d.episode_id | episode_name)) else 'How this episode did across every platform it was published to.',
+     figure=("%.0f%%" % ((d.platforms.values() | selectattr('avg_view_pct') | map(attribute='avg_view_pct') | sum / (d.platforms.values() | selectattr('avg_view_pct') | list | length)) * 100)) if (d.platforms and d.platforms.values() | selectattr('avg_view_pct') | list) else '',
+     figure_label='average watch-through' if (d.platforms and d.platforms.values() | selectattr('avg_view_pct') | list) else '',
+     pill=(_pending|length ~ (' lesson' if _pending|length == 1 else ' lessons') ~ ' to review') if _pending else '',
+     pill_class='is-warn' if _pending else '') %}
+  {% if d.production_cost > 0 %}<span class="pill" style="align-self:center;">Cost to make · {{ d.production_cost | friendly_money }}</span>{% endif %}
+  <a href="/analytics/import?episode_id={{ d.episode_id }}" class="btn">Import analytics</a>
+{% endcall %}
+
 {% if _pending %}
 <div class="action-banner">
   {{ icon("bolt", "i-lg") }}
   <div class="action-banner-body">
-    <div class="action-banner-title">
-      {{ _pending | length }} pending action{% if _pending | length != 1 %}s{% endif %} from this episode
-    </div>
-    <div class="action-banner-sub">
-      Review in <a href="/learning">Intelligence →</a> to apply to the next production run.
-    </div>
+    <div class="action-banner-title">{{ _pending|length }} lesson{{ 's' if _pending|length != 1 }} from this episode</div>
+    <div class="action-banner-sub">Review them on the <a href="/learning">Learning page</a> to shape the next episode.</div>
   </div>
-  <span class="action-banner-count">{{ _pending | length }}</span>
+  <span class="action-banner-count">{{ _pending|length }}</span>
 </div>
 {% endif %}
 
-{# ── Cross-platform comparison table ── #}
+{# ── Cross-platform comparison ── #}
 {% if d.platforms %}
-<div class="card" style="padding:0; margin-bottom:var(--gap);">
-  <table class="cross-table">
+<div class="sec-head"><h2>By platform</h2></div>
+<div class="card" style="padding:0;">
+  <div class="table-wrap" style="border:none;"><table class="cross-table">
     <thead>
-      <tr>
-        <th>Metric</th>
-        {% for p_name in d.platforms.keys() %}
-          <th>{{ p_name | capitalize }}</th>
-        {% endfor %}
-      </tr>
+      <tr><th>Metric</th>{% for p_name in d.platforms.keys() %}<th>{{ p_name | friendly_platform }}</th>{% endfor %}</tr>
     </thead>
     <tbody>
-      {# Views #}
-      {% if d.platforms.values() | selectattr('views') | list %}
-      <tr>
-        <td>Views</td>
-        {% for p, rec in d.platforms.items() %}
-          <td>{% if rec.views %}{{ "{:,}".format(rec.views|int) }}{% else %}<span class="muted">—</span>{% endif %}</td>
-        {% endfor %}
+      {% macro row(label, key, fmt='int') %}
+      {% if d.platforms.values() | selectattr(key) | list %}
+      <tr><td>{{ label }}</td>
+      {% for p, rec in d.platforms.items() %}
+        <td>{% set v = rec.get(key) %}
+          {% if v is none or not v %}<span class="muted">—</span>
+          {% elif fmt == 'pct' %}{{ "%.0f%%"|format(v * 100) }}
+          {% elif fmt == 'sec' %}{{ v|int }}s
+          {% else %}{{ "{:,}".format(v|int) }}{% endif %}
+        </td>
+      {% endfor %}
       </tr>
       {% endif %}
-      {# Impressions #}
-      {% if d.platforms.values() | selectattr('impressions') | list %}
-      <tr>
-        <td>Impressions</td>
-        {% for p, rec in d.platforms.items() %}
-          <td>{% if rec.impressions %}{{ "{:,}".format(rec.impressions|int) }}{% else %}<span class="muted">—</span>{% endif %}</td>
-        {% endfor %}
+      {% endmacro %}
+      {{ row('Views', 'views') }}
+      {{ row('Times shown', 'impressions') }}
+      <tr><td>Click rate</td>
+      {% for p, rec in d.platforms.items() %}
+        <td>{% if rec.ctr is not none and rec.ctr %}<span class="{% if rec.ctr < 0.02 %}err{% elif rec.ctr > 0.05 %}ok{% else %}warn{% endif %}">{{ "%.1f%%"|format(rec.ctr * 100) }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+      {% endfor %}
       </tr>
-      {% endif %}
-      {# CTR #}
-      {% if d.platforms.values() | selectattr('ctr') | list %}
-      <tr>
-        <td>CTR</td>
-        {% for p, rec in d.platforms.items() %}
-          <td>
-            {% if rec.ctr is not none %}
-              <span class="{% if rec.ctr < 0.02 %}err{% elif rec.ctr > 0.05 %}ok{% else %}warn{% endif %}">
-                {{ "%.1f%%"|format(rec.ctr * 100) }}
-              </span>
-            {% else %}<span class="muted">—</span>{% endif %}
-          </td>
-        {% endfor %}
+      <tr><td>Watch-through</td>
+      {% for p, rec in d.platforms.items() %}
+        <td>{% if rec.avg_view_pct is not none %}<span class="{% if rec.avg_view_pct < 0.3 %}err{% elif rec.avg_view_pct > 0.5 %}ok{% else %}warn{% endif %}">{{ "%.0f%%"|format(rec.avg_view_pct * 100) }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+      {% endfor %}
       </tr>
-      {% endif %}
-      {# Retention — always shown #}
-      <tr>
-        <td>Retention</td>
-        {% for p, rec in d.platforms.items() %}
-          <td>
-            {% if rec.avg_view_pct is not none %}
-              <span class="{% if rec.avg_view_pct < 0.3 %}err{% elif rec.avg_view_pct > 0.5 %}ok{% else %}warn{% endif %}">
-                {{ "%.0f%%"|format(rec.avg_view_pct * 100) }}
-              </span>
-            {% else %}<span class="muted">—</span>{% endif %}
-          </td>
-        {% endfor %}
+      {{ row('Avg watch time', 'avg_watch_time_s', 'sec') }}
+      {{ row('Likes', 'likes') }}
+      {{ row('Comments', 'comments') }}
+      {{ row('Shares', 'shares') }}
+      {{ row('Saves', 'saves') }}
+      <tr><td>Data</td>
+      {% for p, rec in d.platforms.items() %}
+        <td>{% if rec.source == 'mock' %}<span class="badge badge-demo">Sample</span>{% else %}<span class="badge badge-complete" style="font-size:10px;">Live</span>{% endif %}</td>
+      {% endfor %}
       </tr>
-      {# Watch time #}
-      {% if d.platforms.values() | selectattr('avg_watch_time_s') | list %}
-      <tr>
-        <td>Avg watch time</td>
-        {% for p, rec in d.platforms.items() %}
-          <td>{% if rec.avg_watch_time_s %}{{ rec.avg_watch_time_s|int }}s{% else %}<span class="muted">—</span>{% endif %}</td>
-        {% endfor %}
-      </tr>
-      {% endif %}
-      {# Likes #}
-      {% if d.platforms.values() | selectattr('likes') | list %}
-      <tr>
-        <td>Likes</td>
-        {% for p, rec in d.platforms.items() %}
-          <td>{% if rec.likes %}{{ "{:,}".format(rec.likes|int) }}{% else %}<span class="muted">—</span>{% endif %}</td>
-        {% endfor %}
-      </tr>
-      {% endif %}
-      {# Comments #}
-      {% if d.platforms.values() | selectattr('comments') | list %}
-      <tr>
-        <td>Comments</td>
-        {% for p, rec in d.platforms.items() %}
-          <td>{% if rec.comments %}{{ "{:,}".format(rec.comments|int) }}{% else %}<span class="muted">—</span>{% endif %}</td>
-        {% endfor %}
-      </tr>
-      {% endif %}
-      {# Shares #}
-      {% if d.platforms.values() | selectattr('shares') | list %}
-      <tr>
-        <td>Shares</td>
-        {% for p, rec in d.platforms.items() %}
-          <td>{% if rec.shares %}{{ "{:,}".format(rec.shares|int) }}{% else %}<span class="muted">—</span>{% endif %}</td>
-        {% endfor %}
-      </tr>
-      {% endif %}
-      {# Saves #}
-      {% if d.platforms.values() | selectattr('saves') | list %}
-      <tr>
-        <td>Saves</td>
-        {% for p, rec in d.platforms.items() %}
-          <td>{% if rec.saves %}{{ "{:,}".format(rec.saves|int) }}{% else %}<span class="muted">—</span>{% endif %}</td>
-        {% endfor %}
-      </tr>
-      {% endif %}
-      {# Source #}
-      <tr>
-        <td>Source</td>
-        {% for p, rec in d.platforms.items() %}
-          <td>
-            {% if rec.source == 'mock' %}
-              <span class="badge badge-demo">Demo</span>
-            {% else %}
-              <span class="badge badge-active" style="font-size:10px;">{{ rec.source }}</span>
-            {% endif %}
-          </td>
-        {% endfor %}
-      </tr>
-      {# Snapshot date #}
-      <tr>
-        <td>Snapshot</td>
-        {% for p, rec in d.platforms.items() %}
-          <td class="muted" style="font-size:12px;">{{ rec.snapshot_date or '—' }}</td>
-        {% endfor %}
+      <tr><td>Last updated</td>
+      {% for p, rec in d.platforms.items() %}
+        <td class="muted" style="font-size:12px;">{{ rec.snapshot_date | friendly_date if rec.snapshot_date else '—' }}</td>
+      {% endfor %}
       </tr>
     </tbody>
-  </table>
+  </table></div>
 </div>
 {% endif %}
 
-{# ── Insights (sorted by signal strength) ── #}
+{# ── Insights ── #}
 {% if d.insights %}
-<div class="card" style="padding:0; margin-bottom:var(--gap);">
-  <div style="padding:12px 16px 0;"><div class="card-title">Insights ({{ d.insights | length }})</div></div>
-  <div style="padding:0 16px 4px;">
-    {% for ins in d.insights | sort_by_signal %}
-    {% set _pos = ins.signal_strength >= 0 %}
-    <div class="insight-row">
-      <div class="insight-meta">
-        <span class="dim-badge {{ _DIM_CLS.get(ins.affected_dim|lower, 'dim-default') }}">{{ ins.affected_dim }}</span>
-        <span class="muted" style="font-size:11px; text-transform:uppercase;">{{ ins.platform }}</span>
-        <span class="{% if _pos %}signal-pos{% else %}signal-neg{% endif %}" style="font-size:12px;">
-          {% if _pos %}▲{% else %}▼{% endif %} {{ "%.2f"|format(ins.signal_strength | abs) }}
-        </span>
-        <span class="insight-type-label">{{ ins.insight_type | human_label }}</span>
-      </div>
-      {% if ins.detail %}
-        <div class="muted" style="font-size:12px; margin-top:2px;">{{ ins.detail }}</div>
-      {% endif %}
+<div class="sec-head"><h2>What the numbers say</h2><span class="sec-count">{{ d.insights | length }}</span></div>
+<div class="insight-list">
+  {% for ins in d.insights | sort_by_signal %}
+  {% set _sig = ins.signal_strength | signal_words %}
+  {% set _dc = {'up':'dir-up','down':'dir-down','flat':'dir-change'} %}
+  <article class="insight-card {{ _dc.get(_sig.direction, 'dir-change') }}">
+    <div class="insight-head">
+      <span class="insight-dir {{ _dc.get(_sig.direction, 'dir-change') }}">{{ ins.insight_type | human_label }}</span>
+      <span class="dim-badge dim-default">{{ ins.affected_dim | plain_dimension }}</span>
+      <span class="pill" style="padding:2px 8px; font-size:10px;">from {{ ins.platform | friendly_platform }}</span>
+      {% if _sig.label %}<span class="sig-meter sig-{{ _sig.direction }}" style="margin-left:auto;">
+        {% for n in range(3) %}<i class="{{ 'on' if n < _sig.level }}"></i>{% endfor %}<span>{{ _sig.label }}</span></span>{% endif %}
     </div>
-    {% endfor %}
-  </div>
+    {% if ins.detail %}<p class="insight-body">{{ ins.detail }}</p>{% endif %}
+  </article>
+  {% endfor %}
 </div>
 {% endif %}
 
-{# ── Learning actions (directly after insights) ── #}
+{# ── Learning actions ── #}
 {% if d.actions %}
-<div class="card" style="padding:0; margin-bottom:var(--gap);">
-  <div style="padding:12px 16px 0;"><div class="card-title">Learning Actions ({{ d.actions | length }})</div></div>
-  <div style="padding:0 16px 4px;">
-    {% for a in d.actions %}
-    <div class="action-ep-row">
-      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:4px;">
-        <span class="dim-badge {{ _DIM_CLS.get(a.dimension|lower, 'dim-default') }}">{{ a.dimension }}</span>
-        <span class="badge badge-{% if a.status == 'applied' %}complete{% elif a.status == 'dismissed' %}cancelled{% else %}queued{% endif %}">
-          {{ a.action_type }}
-        </span>
-        <span class="badge badge-{% if a.status == 'applied' %}complete{% elif a.status == 'dismissed' %}cancelled{% else %}queued{% endif %}" style="text-transform:none; letter-spacing:0;">
-          {{ a.status }}
-        </span>
-      </div>
-      <div style="font-size:12px; color:var(--muted);">{{ a.rationale[:180] }}</div>
+<div class="sec-head"><h2>Lessons from this episode</h2><span class="sec-count">{{ d.actions | length }}</span></div>
+<div class="card">
+  {% for a in d.actions %}
+  {% set _act = a.action_type | plain_learning_action %}
+  <div class="action-ep-row">
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:4px;">
+      <strong style="font-size:13px;">{{ _act.label }}</strong>
+      <span class="dim-badge dim-default">{{ a.dimension | plain_dimension }}</span>
+      <span class="pill {{ 'is-good' if a.status == 'applied' else ('' if a.status == 'dismissed' else 'is-warn') }}"
+            style="margin-left:auto; padding:2px 8px; font-size:10px;">{{ a.status | plain_status }}</span>
     </div>
-    {% endfor %}
+    <div style="font-size:12.5px; color:var(--muted);">{{ a.rationale | clean_rationale }}</div>
   </div>
+  {% endfor %}
 </div>
 {% endif %}
 

@@ -73,7 +73,8 @@
 {% if pulse %}
 {% set _w = pulse.worker %}
 {% set _cls = 'is-live' if (_w.alive and not _w.paused) else ('is-paused' if _w.paused else 'is-down') %}
-<div id="pulse" class="pulse {{ _cls }}" data-live-url="/api/factory/pulse" role="status" aria-live="polite">
+<div id="pulse" class="pulse {{ _cls }}" data-live-url="/api/factory/pulse"
+     {% if scope_channel %}data-channel-scoped="1"{% endif %} role="status" aria-live="polite">
   <span class="pulse-dot" aria-hidden="true"></span>
   <span class="pulse-status" id="pulse-status">
     {% if _w.paused %}Production paused{% elif _w.alive %}Production running{% else %}Production not running{% endif %}
@@ -83,8 +84,13 @@
     {% elif _w.alive %}— waiting for the next scheduled episode{% endif %}
   </span>
   <span class="pulse-counts" id="pulse-counts">
+    {% if scope_channel %}
+    <a href="#queue"><b>{{ _q }}</b> waiting</a>
+    <a href="/runs?status=running"><b>{{ _c }}</b> in production</a>
+    {% else %}
     <a href="#queue"><b>{{ pulse.queued.count }}</b> waiting</a>
     <a href="/runs?status=running"><b>{{ (pulse.in_production.count or pulse.active_runs|length) }}</b> in production</a>
+    {% endif %}
   </span>
 </div>
 <script>
@@ -100,10 +106,14 @@
     if (p.activity && p.activity.phrase) act.innerHTML = '— <b>' + p.activity.phrase + '</b>';
     else if (w.alive) act.textContent = '— waiting for the next scheduled episode';
     else act.textContent = '';
-    var inProd = (p.in_production && p.in_production.count) || (p.active_runs || []).length;
-    document.getElementById('pulse-counts').innerHTML =
-      '<a href="#queue"><b>' + ((p.queued && p.queued.count) || 0) + '</b> waiting</a>' +
-      '<a href="/runs?status=running"><b>' + inProd + '</b> in production</a>';
+    // Only the factory-wide view live-updates its counts from the pulse API;
+    // a channel-scoped page keeps its own server-rendered channel numbers.
+    if (!el.dataset.channelScoped) {
+      var inProd = (p.in_production && p.in_production.count) || (p.active_runs || []).length;
+      document.getElementById('pulse-counts').innerHTML =
+        '<a href="#queue"><b>' + ((p.queued && p.queued.count) || 0) + '</b> waiting</a>' +
+        '<a href="/runs?status=running"><b>' + inProd + '</b> in production</a>';
+    }
   }
   function tick() {
     fetch(el.dataset.liveUrl, { headers: { 'Accept': 'application/json' } })

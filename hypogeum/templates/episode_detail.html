@@ -2314,6 +2314,18 @@ function resumeEpisode(episodeId, kind) {
 
 {% else %}
 
+{% set _ov = (d.analytics or {}).get('overview', {}) %}
+{% set _impr = _ov.get('total_impressions') or 0 %}
+{% set _vws = _ov.get('total_views') or 0 %}
+{% if _impr < 1000 or _vws < 500 %}
+<div style="margin-bottom:var(--gap); padding:10px 14px; border-radius:var(--radius);
+            background:var(--raised); border:1px solid var(--hairline); font-size:12.5px; color:var(--muted);">
+  ⏳ <strong>Early days.</strong> These lessons are drawn from {{ "{:,}".format(_vws) }} views
+  and {{ "{:,}".format(_impr) }} impressions so far. Click-rate and retention verdicts
+  can still move a lot until the numbers grow — treat anything below as a first read, not a final call.
+</div>
+{% endif %}
+
 {# ── 1. Episode Lessons Summary ──────────────────────────────────── #}
 <div class="lrn-verdict-banner">
   <span style="font-size:20px;">

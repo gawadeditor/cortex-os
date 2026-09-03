@@ -53,8 +53,13 @@
         </td>
         <td><span class="badge badge-{{ a.status }}">{{ a.status | plain_status }}</span></td>
         <td class="muted" style="font-size:12px; white-space:nowrap;">{{ a.requested_at | rel_time if a.requested_at else '—' }}</td>
-        <td class="muted" style="font-size:12px;">{{ a.decided_by or '—' }}</td>
-        <td style="font-size:12px; max-width:160px; word-break:break-word;">{{ a.notes or '—' }}</td>
+        <td class="muted" style="font-size:12px;">
+          {%- set _db = (a.decided_by or '') | string -%}
+          {%- if not _db %}—
+          {%- elif _db | length >= 32 and '-' in _db %}Cortex (automatic)
+          {%- else %}{{ _db }}{%- endif -%}
+        </td>
+        <td style="font-size:12px; max-width:160px; word-break:break-word;">{{ (a.notes | plain_ids) or '—' }}</td>
         <td>
           {% if a.status == 'pending' %}
           <div class="btn-row">

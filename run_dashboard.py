@@ -351,12 +351,18 @@ def _f_friendly_model(value):
 
 @app.template_filter("plain_tech")
 def _f_plain_tech(value):
-    return _hz.plain_tech(value)
+    return _hz.plain_ids(_hz.plain_tech(value), db_path=_db_path())
 
 
 @app.template_filter("plain_evidence")
 def _f_plain_evidence(value):
-    return _hz.plain_evidence(value)
+    return _hz.plain_ids(_hz.plain_evidence(value), db_path=_db_path())
+
+
+@app.template_filter("plain_ids")
+def _f_plain_ids(value):
+    """Raw episode ids / run UUIDs inside a sentence → the episode's title."""
+    return _hz.plain_ids(value, db_path=_db_path())
 
 
 @app.template_filter("basename")

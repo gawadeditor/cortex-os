@@ -202,7 +202,7 @@
       <div class="dc-why">{{ item.why }}</div>
       {%- endif %}
       {%- if item.evidence %}
-      <div class="dc-evidence">{{ item.evidence }}</div>
+      <div class="dc-evidence">{{ item.evidence | plain_evidence }}</div>
       {%- endif %}
       <div class="dc-actions">
         <a href="{{ item.action_url }}" class="btn btn-primary">{{ item.action_label }}</a>
@@ -243,7 +243,7 @@
       <div class="dc-title">{{ rev.decision_title }}</div>
       <div class="dc-why">{{ rev.recommendation }}</div>
       {%- if rev.evidence %}
-      <div class="dc-evidence">{{ rev.evidence | join('\n') }}</div>
+      <div class="dc-evidence">{% for e in rev.evidence %}{{ e | plain_evidence }}{% if not loop.last %}<br>{% endif %}{% endfor %}</div>
       {%- endif %}
       <div style="font-size:11px; color:var(--muted); margin-bottom:6px;">
         Decision waiting for review &nbsp;·&nbsp; confidence {{ "%.0f"|format((rev.confidence or 0) * 100) }}%
@@ -267,7 +267,7 @@
       <div class="dc-title">{{ top.title }}</div>
       <div class="dc-why">{{ top.recommendation }}</div>
       {%- if top.evidence %}
-      <div class="dc-evidence">{{ top.evidence | join('\n') }}</div>
+      <div class="dc-evidence">{% for e in top.evidence %}{{ e | plain_evidence }}{% if not loop.last %}<br>{% endif %}{% endfor %}</div>
       {%- endif %}
       <div style="font-size:11px; color:var(--muted); margin-bottom:6px;">
         confidence {{ "%.0f"|format(top.confidence * 100) }}%
@@ -362,8 +362,8 @@
   <div style="font-size:12px; color:var(--muted); margin-bottom:4px;">
     {{ draft_count }} draft &nbsp;·&nbsp; {{ approved_count }} approved
   </div>
-  <div style="font-size:11px; color:var(--yellow); margin-bottom:10px;">
-    ◆ Dry-run only — no live execution available
+  <div style="font-size:11px; color:var(--muted); margin-bottom:10px;">
+    These are plans for your review — nothing runs until you approve it.
   </div>
   <a href="/execution-plans" class="btn" style="font-size:12px;">View action plans →</a>
 </div>
@@ -385,9 +385,9 @@
     {%- if cmd.run_state.active_runs %}
       {%- for r in cmd.run_state.active_runs %}
       <div class="run-item">
-        <span class="run-ep">{{ r.episode_id }}</span>
+        <span class="run-ep">{{ r.episode_id | episode_name }}</span>
         <a href="/run/{{ r.run_id }}/live" class="btn" style="font-size:11px;padding:2px 8px;">Live →</a>
-        <span class="run-ts">{{ r.started_at[:16] | replace("T"," ") }}</span>
+        <span class="run-ts">started {{ r.started_at | rel_time }}</span>
       </div>
       {%- endfor %}
     {%- else %}
@@ -400,8 +400,8 @@
     {%- if cmd.run_state.queued_runs %}
       {%- for r in cmd.run_state.queued_runs %}
       <div class="run-item">
-        <span class="badge badge-{{ r.status }}">{{ r.status }}</span>
-        <span class="run-ep">{{ r.episode_id }}</span>
+        <span class="badge badge-{{ r.status }}">{{ r.status | plain_status }}</span>
+        <span class="run-ep">{{ r.episode_id | episode_name }}</span>
         <a href="/run/{{ r.run_id }}" class="muted" style="font-size:11px;">view</a>
       </div>
       {%- endfor %}
@@ -415,11 +415,11 @@
     {%- if cmd.run_state.last_completed %}
     {%- set lc = cmd.run_state.last_completed %}
     <div style="font-size:13px;">
-      <span class="run-ep">{{ lc.episode_id }}</span>
-      <span class="badge badge-completed" style="margin-left:6px;">completed</span>
+      <span class="run-ep">{{ lc.episode_id | episode_name }}</span>
+      <span class="badge badge-completed" style="margin-left:6px;">Finished</span>
     </div>
     <div class="run-ts" style="margin-top:4px;">
-      {{ lc.get('completed_at', lc.get('started_at',''))[:16] | replace("T"," ") }}
+      {{ lc.get('completed_at', lc.get('started_at','')) | rel_time }}
       &nbsp;·&nbsp; <a href="/run/{{ lc.run_id }}">details →</a>
     </div>
     {%- else %}
@@ -432,9 +432,10 @@
     {%- if cmd.run_state.recent_failures %}
       {%- for r in cmd.run_state.recent_failures %}
       <div class="run-item">
-        <span class="run-ep">{{ r.episode_id }}</span>
+        <span class="run-ep">{{ r.episode_id | episode_name }}</span>
         {%- if r.error_message %}
-        <span class="run-err" title="{{ r.error_message }}">{{ r.error_message[:55] }}</span>
+        {%- set _p = r.error_message | plain_problem %}
+        <span class="run-err" title="{{ _p.meaning or _p.label }} {{ _p.action }}">{{ _p.label }}</span>
         {%- endif %}
         <a href="/run/{{ r.run_id }}" class="muted" style="font-size:11px;">view</a>
       </div>

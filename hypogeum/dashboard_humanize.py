@@ -90,6 +90,39 @@ def clear_episode_title_cache() -> None:
     _EP_TITLE_CACHE.clear()
 
 
+# Episode ids embedded *inside* a free-text sentence (error messages, signal
+# text, decision evidence). "ep_af078f34" / 'ep_twinkle_sep10' — optional
+# surrounding quotes are consumed so we don't end up double-quoting.
+_INLINE_EP_RE = re.compile(r"['\"]?\bep[_-][a-z0-9]{6,}\b['\"]?", re.IGNORECASE)
+# a bare run/queue UUID an operator has no use for, with any leading label
+_INLINE_UUID_RE = re.compile(
+    r"\b(?:run|queue|worker|item|id)?\s*['\"]?"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}['\"]?", re.IGNORECASE)
+
+
+def plain_ids(text, *, db_path=None) -> str:
+    """Rewrite raw episode ids inside a sentence to the episode's real
+    title in quotes, and drop bare run/queue UUIDs. For anything shown to
+    a channel owner: signal text, run errors, decision evidence."""
+    if not text:
+        return ""
+    s = str(text)
+
+    def _ep(m):
+        raw = m.group(0).strip("'\"")
+        name = episode_display_name(raw, db_path=db_path, fallback="")
+        return f'"{name}"' if name and name != raw else "this episode"
+
+    s = _INLINE_EP_RE.sub(_ep, s)
+    s = _INLINE_UUID_RE.sub("this run", s)
+    # tidy the gaps left behind: "( )", doubled spaces, "run this run"
+    s = re.sub(r"\(\s*\)", "", s)
+    s = re.sub(r"\b(run|queue item)\s+this run\b", "this run", s, flags=re.I)
+    s = re.sub(r"\bepisode\s+this episode\b", "this episode", s, flags=re.I)
+    s = re.sub(r"\s{2,}", " ", s).strip()
+    return s[0].upper() + s[1:] if s else s
+
+
 _CHANNEL_NAME_CACHE: dict = {}
 
 
@@ -272,6 +305,22 @@ _PROBLEM_ALIASES = {
 # Free-text error phrases → a plain (label, meaning, action). Matched as a
 # case-insensitive substring against the raw error message, in order.
 _ERROR_PHRASES: list[tuple[str, tuple[str, str, str]]] = [
+    ("blocked by qa", (
+        "Quality review held the episode",
+        "The automated quality review found a problem serious enough to stop "
+        "the episode before publishing — often a missing video or music track.",
+        "Open the episode's Quality tab to see what failed, then re-run it.",
+    )),
+    ("assembly did not produce a viable package", (
+        "Final video didn't come together",
+        "The assembly step finished without a usable video file.",
+        "Re-run the episode; if it repeats, open the run to see where it stalled.",
+    )),
+    ("already completed under admission", (
+        "This episode was already produced",
+        "Cortex refused to run it a second time because it finished once already.",
+        "No action needed — look at the finished episode instead.",
+    )),
     ("run orphaned", (
         "Production stopped when the worker restarted",
         "The production process was interrupted — usually a worker restart, not a real fault.",
@@ -834,7 +883,7 @@ def plain_tech(text) -> str:
         tok = m.group(1)
         return _MODEL_NAMES.get(tok) or _PROVIDER_NAMES.get(tok.lower()) or tok
 
-    return _TECH_TOKEN_RE.sub(_sub, s)
+    return plain_ids(_TECH_TOKEN_RE.sub(_sub, s))
 
 
 def signal_strength_words(value) -> dict:

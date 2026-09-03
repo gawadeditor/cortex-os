@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Signals — Cortex</title>
+  <title>Alert history — Cortex</title>
   {% include '_base_style.html' %}
 </head>
 <body>
@@ -13,16 +13,21 @@
 
 
 <div class="page-header">
-  <h1>OIS Signal History</h1>
+  <h1>Alert history</h1>
   <span class="page-meta">{{ signals | length }} record{% if signals|length != 1 %}s{% endif %}</span>
 </div>
+<p class="muted" style="font-size:12.5px; margin:-6px 0 14px; max-width:620px;">
+  Everything the factory has flagged for a look — production stops, budget
+  warnings, platform issues. Open items still need attention; resolved ones
+  are kept for the record.
+</p>
 
 <div class="filters">
   <span class="muted" style="font-size:12px;">Filter:</span>
   <a href="/signals"               class="filter-link {% if not status_filter %}active{% endif %}">All</a>
   <a href="/signals?status=open"   class="filter-link {% if status_filter == 'open' %}active{% endif %}">Open</a>
   <a href="/signals?status=resolved" class="filter-link {% if status_filter == 'resolved' %}active{% endif %}">Resolved</a>
-  <a href="/signals?status=auto_resolved" class="filter-link {% if status_filter == 'auto_resolved' %}active{% endif %}">Auto-resolved</a>
+  <a href="/signals?status=auto_resolved" class="filter-link {% if status_filter == 'auto_resolved' %}active{% endif %}">Cleared automatically</a>
 </div>
 
 {% if signals %}
@@ -30,40 +35,40 @@
   <table>
     <thead>
       <tr>
-        <th>Type</th>
-        <th>Severity</th>
-        <th>Message</th>
-        <th>Source</th>
+        <th>What</th>
+        <th>Level</th>
+        <th>Details</th>
+        <th>From</th>
         <th>Status</th>
-        <th>Blocking</th>
-        <th>Ingested</th>
-        <th>Resolved by</th>
+        <th>Held production</th>
+        <th>When</th>
+        <th>Cleared by</th>
         <th></th>
       </tr>
     </thead>
     <tbody>
       {% for s in signals %}
       <tr>
-        <td style="font-weight:500; white-space:nowrap; font-size:13px;">{{ s.signal_type }}</td>
+        <td style="font-weight:500; white-space:nowrap; font-size:13px;">{{ s.signal_type | plain_status }}</td>
         <td>
           <span class="badge badge-{{ s.severity|lower }}
             {% if s.severity == 'CRITICAL' %}badge-failed
             {% elif s.severity == 'WARNING' %}badge-queued
             {% else %}badge-running{% endif %}">
-            {{ s.severity }}
+            {{ {'CRITICAL': 'Needs action', 'WARNING': 'Warning', 'INFO': 'For info'}.get(s.severity, s.severity | title) }}
           </span>
         </td>
-        <td style="max-width:260px; font-size:12px; word-break:break-word;">{{ s.message[:120] or '—' }}</td>
-        <td class="muted" style="font-size:12px;">{{ s.source_system or '—' }}</td>
-        <td><span class="badge badge-{{ s.lifecycle_status }}">{{ s.lifecycle_status }}</span></td>
+        <td style="max-width:320px; font-size:12px; word-break:break-word;">{{ (s.message | plain_tech) or '—' }}</td>
+        <td class="muted" style="font-size:12px;">{{ s.source_system | friendly_provider }}</td>
+        <td><span class="badge badge-{{ s.lifecycle_status }}">{{ s.lifecycle_status | plain_status }}</span></td>
         <td style="text-align:center;">
           {% if s.blocking %}
-            <span class="err" style="font-weight:700;">✗</span>
+            <span class="err" style="font-weight:700;" title="Held production until resolved">✗</span>
           {% else %}
             <span class="muted">—</span>
           {% endif %}
         </td>
-        <td class="muted" style="font-size:12px; white-space:nowrap;">{{ s.ingested_at[:16] if s.ingested_at else '—' }}</td>
+        <td class="muted" style="font-size:12px; white-space:nowrap;">{{ s.ingested_at | rel_time if s.ingested_at else '—' }}</td>
         <td class="muted" style="font-size:12px;">{{ s.resolved_by or '—' }}</td>
         <td>
           {% if s.lifecycle_status == 'open' %}

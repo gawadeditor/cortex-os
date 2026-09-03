@@ -257,12 +257,12 @@
   {% if is_del %}
   <div class="status-note" style="color:var(--muted);">Configured through MUAPI — no direct API key needed.</div>
   {% elif entry.operational_note and not is_ph %}
-  <div class="status-note">{{ entry.operational_note[:160] }}</div>
+  <div class="status-note">{{ entry.operational_note[:160] | plain_tech }}</div>
   {% endif %}
 
-  {# Smoke test latency if successful #}
+  {# Smoke test result if successful #}
   {% if entry.smoke_test_latency_ms and entry.operational_readiness in ('ready','ready_via_muapi') %}
-  <div class="provider-cost">Smoke test: {{ entry.smoke_test_latency_ms }}ms — {{ entry.smoke_test_model }}</div>
+  <div class="provider-cost">Test call took {{ entry.smoke_test_latency_ms | dur_ms }}{% if entry.smoke_test_model %} · {{ entry.smoke_test_model | friendly_model }}{% endif %}</div>
   {% endif %}
 
   {# Stale smoke report age — shown when result is unreliable #}
@@ -274,12 +274,12 @@
 
   {# Usage cost #}
   {% if entry.total_cost_usd and entry.total_cost_usd > 0 %}
-  <div class="provider-cost">Usage: ${{ "%.4f"|format(entry.total_cost_usd) }}</div>
+  <div class="provider-cost">Spent so far: {{ entry.total_cost_usd | friendly_money }}</div>
   {% endif %}
 
-  {# Credential key name #}
+  {# Credential key name — kept for the ops person; small + last #}
   {% if entry.credential_key_name %}
-  <div class="cred-key-row">Env: {{ entry.credential_key_name }}</div>
+  <div class="cred-key-row" style="opacity:.65;">key: <span class="mono">{{ entry.credential_key_name }}</span></div>
   {% endif %}
 
   {# Actions — only for direct and muapi_delegated with connect form #}
@@ -499,7 +499,7 @@
           {% if p.verif_checked_at %}
             {{ p.verif_checked_at[:16] | replace("T", " ") }} UTC
             {% if p.verif_latency_ms is not none and p.verif_latency_ms > 0 %}
-              <span style="color:var(--muted);">({{ p.verif_latency_ms }}ms)</span>
+              <span style="color:var(--muted);">({{ p.verif_latency_ms | dur_ms }})</span>
             {% elif p.verif_latency_ms == 0 %}
               <span style="color:var(--muted);">(format check only)</span>
             {% endif %}
@@ -575,7 +575,7 @@
   <div class="cmp-name">{{ r.provider }}</div>
   <div class="cmp-meta">
     {% if r.model %}<span>Model: {{ r.model }}</span>{% endif %}
-    {% if r.latency_ms is not none %}<span>Latency: {{ r.latency_ms }}ms</span>{% endif %}
+    {% if r.latency_ms is not none %}<span>Latency: {{ r.latency_ms | dur_ms }}</span>{% endif %}
     {% if r.estimated_cost_usd is not none %}<span>Est. cost: ${{ "%.3f"|format(r.estimated_cost_usd) }}</span>{% endif %}
     {% if r.credential_source %}
     <span>Source:

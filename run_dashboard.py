@@ -367,6 +367,15 @@ def _f_basename(value):
     return str(value).rstrip("/").rsplit("/", 1)[-1] or str(value)
 
 
+@app.template_filter("dur_ms")
+def _f_dur_ms(value):
+    """Milliseconds → a human duration ('42.5s', '1.2 min', '840 ms')."""
+    try:
+        return fmt_duration(float(value))
+    except (TypeError, ValueError):
+        return "—"
+
+
 @app.template_filter("channel_name")
 def _f_channel_name(channel_id):
     return _hz.channel_display_name(channel_id, db_path=_db_path())

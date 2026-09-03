@@ -483,7 +483,7 @@ class TestEmptyState:
         _ep(conn)
         conn.close()
         html = _tn_html((c, db_path), "ep_tn01")
-        assert "No thumbnail candidates found" in html
+        assert "No custom thumbnail for this episode" in html
 
     def test_empty_state_has_back_link(self, client):
         c, db_path = client
@@ -492,7 +492,7 @@ class TestEmptyState:
         conn.close()
         html = _tn_html((c, db_path), "ep_tn01")
         assert "?tab=production" in html
-        assert "Back to Production" in html
+        assert "Back to production" in html
 
 
 # ===========================================================================

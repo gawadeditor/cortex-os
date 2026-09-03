@@ -497,6 +497,37 @@ def _scope_channel():
     return None if s == "factory" else s
 
 
+_EP_CHANNEL_CACHE: dict = {}
+
+
+def _resolve_episode_channel(episode_id):
+    """episode_id -> channel_id, via runs then episode_topics. Cached."""
+    if not episode_id:
+        return None
+    if episode_id in _EP_CHANNEL_CACHE:
+        return _EP_CHANNEL_CACHE[episode_id]
+    cid = None
+    try:
+        from hypogeum.db import get_connection as _gc
+        _c = _gc(_db_path())
+        try:
+            for _sql in (
+                "SELECT channel_id FROM runs WHERE episode_id=? AND channel_id IS NOT NULL LIMIT 1",
+                "SELECT channel_id FROM episode_topics WHERE episode_id=? AND channel_id IS NOT NULL LIMIT 1",
+            ):
+                row = _c.execute(_sql, (episode_id,)).fetchone()
+                if row and row[0]:
+                    cid = row[0]
+                    break
+        finally:
+            _c.close()
+    except Exception:  # noqa: BLE001
+        cid = None
+    if cid:
+        _EP_CHANNEL_CACHE[episode_id] = cid
+    return cid
+
+
 @app.context_processor
 def _inject_scope():
     scope = _current_scope()
@@ -5766,13 +5797,24 @@ def episode_detail_page(episode_id):
     # On-screen (burned-in) caption state for this episode's channel.
     try:
         from hypogeum.caption_style import burn_enabled, resolve_caption_style
-        _cid = d.get("channel_id") or (d.get("run") or {}).get("channel_id")
+        _cid = (d.get("channel_id") or (d.get("run") or {}).get("channel_id")
+                or _resolve_episode_channel(episode_id))
         if _cid:
             d["caption_burn_on"] = burn_enabled(_cid, db_path=_db_path())
             d["caption_burn_summary"] = resolve_caption_style(_cid, db_path=_db_path()).summary()
             d["caption_burn_channel"] = _cid
     except Exception:  # noqa: BLE001
         pass
+
+    # Keep the left rail / top nav on THIS episode's channel. Without this the
+    # scope cookie is sticky, so a hypogeum episode opened after visiting a
+    # twinkle page shows "Twinkle Mini Tales" as the active channel.
+    _ep_channel = (d.get("channel_id") or (d.get("run") or {}).get("channel_id")
+                   or _resolve_episode_channel(episode_id))
+    if (_ep_channel and "scope" not in request.args
+            and request.cookies.get(_SCOPE_COOKIE) not in (_ep_channel, "factory")):
+        return redirect(f"/episode/{episode_id}?scope={_ep_channel}"
+                        + (f"&tab={request.args['tab']}" if request.args.get("tab") else ""))
 
     valid_tabs = {"production", "publishing", "thumbnails", "titles",
                   "analytics", "revenue", "learning", "branding", "artifacts"}

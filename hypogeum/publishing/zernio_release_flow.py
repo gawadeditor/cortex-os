@@ -206,7 +206,19 @@ def publish_channel_release(
         )
     if not publish_now and schedule_result.slot is not None:
         try:
-            from hypogeum.publishing.publish_slot_ledger import record_slot
+            from hypogeum.publishing.publish_slot_ledger import day_is_taken, record_slot
+            clash = day_is_taken(channel_id, schedule_result.slot, episode_id, db_path=db_path)
+            if clash:
+                return ReleasePublishResult(
+                    channel_id=channel_id, episode_id=episode_id, platforms=platforms,
+                    status="blocked_schedule", readiness_by_platform=readiness_by_platform,
+                    schedule=schedule_result, blocked_platforms=blocked_platforms,
+                    blocked_reason=(
+                        f"channel '{channel_id}' already has episode '{clash}' scheduled to "
+                        f"publish on {str(schedule_result.slot)[:10]} — refusing a second "
+                        f"release for the same day (one episode per day per channel)"
+                    ),
+                )
             record_slot(channel_id, schedule_result.slot, episode_id, db_path=db_path)
         except Exception:  # noqa: BLE001
             pass

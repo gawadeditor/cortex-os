@@ -71,6 +71,34 @@ def next_free_now(channel_id: str, base_now: datetime, *,
     return base_now
 
 
+def day_is_taken(channel_id: str, slot_utc, episode_id: str, *,
+                 db_path: Optional[Path] = None) -> Optional[str]:
+    """If another episode of `channel_id` is already assigned a slot on the
+    SAME calendar day (UTC) as `slot_utc`, return that episode_id — the
+    caller must not schedule a second release for that day. None = the day
+    is free (or already this episode's). Never raises → None on error, so a
+    counting bug can't block a legitimate release."""
+    if isinstance(slot_utc, datetime):
+        day = _iso(slot_utc)[:10]
+    else:
+        day = str(slot_utc)[:10]
+    try:
+        from hypogeum.db import get_connection
+        conn = get_connection(Path(db_path) if db_path else None)
+        try:
+            row = conn.execute(
+                "SELECT episode_id, slot_utc FROM channel_publish_slots "
+                "WHERE channel_id = ? AND substr(slot_utc, 1, 10) = ? "
+                "AND episode_id != ? LIMIT 1",
+                (channel_id, day, episode_id or ""),
+            ).fetchone()
+        finally:
+            conn.close()
+        return row[0] if row else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def record_slot(channel_id: str, slot_utc, episode_id: str, *,
                 db_path: Optional[Path] = None) -> None:
     """Record that `episode_id` has been assigned `slot_utc` for `channel_id`.

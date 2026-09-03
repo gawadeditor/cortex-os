@@ -66,3 +66,19 @@ def test_buffer_lands_on_consecutive_days(db_path):
     assert got[0] == datetime(2026, 9, 4, 16, 0, tzinfo=timezone.utc)
     assert got[1] == datetime(2026, 9, 5, 16, 0, tzinfo=timezone.utc)
     assert got[2] == datetime(2026, 9, 6, 16, 0, tzinfo=timezone.utc)
+
+
+def test_day_is_taken(db_path):
+    psl.record_slot("ch", datetime(2026, 9, 5, 16, 0, tzinfo=timezone.utc), "ep_a", db_path=db_path)
+    # same day, different episode -> taken
+    assert psl.day_is_taken("ch", datetime(2026, 9, 5, 16, 0, tzinfo=timezone.utc),
+                             "ep_b", db_path=db_path) == "ep_a"
+    # same day, SAME episode -> not a clash
+    assert psl.day_is_taken("ch", datetime(2026, 9, 5, 9, 0, tzinfo=timezone.utc),
+                            "ep_a", db_path=db_path) is None
+    # different day -> free
+    assert psl.day_is_taken("ch", datetime(2026, 9, 6, 16, 0, tzinfo=timezone.utc),
+                            "ep_b", db_path=db_path) is None
+    # different channel -> free
+    assert psl.day_is_taken("ch2", datetime(2026, 9, 5, 16, 0, tzinfo=timezone.utc),
+                            "ep_b", db_path=db_path) is None

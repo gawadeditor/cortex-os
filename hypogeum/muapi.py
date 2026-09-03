@@ -1033,6 +1033,13 @@ def _submit_scene_via_gate(
 
     conn = db.get_connection()
     weekly: Optional[weekly_budget.WeeklyReservationOutcome] = None
+    # runtime_lease bookkeeping — released in the finally once the gate call
+    # returns. The lease only guards against a concurrent execution of the
+    # SAME envelope; holding it for its full 30-min TTL after submit()
+    # returns serves nothing and locks out this run's own in-assembly
+    # clip-repair of a scene whose first generation failed (observed twice
+    # 2026-09-03: Herculaneum s09, Egyptian Tomb s06 — "gate_lease_unavailable").
+    _held_lease: Optional[tuple] = None  # (resource_id, owner_id, fencing_token)
 
     def _release_weekly_reservation(release_conn, *, at_ts: str) -> bool:
         """Compensating release for a pre-provider failure of the attempt
@@ -1146,6 +1153,7 @@ def _submit_scene_via_gate(
         if lease is None:
             _release_weekly_reservation(conn, at_ts=datetime.now(timezone.utc).isoformat())
             return None, "gate_lease_unavailable"
+        _held_lease = (envelope.envelope_id, lease_owner_id, lease["fencing_token"])
 
         receipt_store = WriteAheadReceiptStore(output_dir)
         live_sources = submission_gate.LiveSources(
@@ -1217,6 +1225,17 @@ def _submit_scene_via_gate(
                 )
             conn.commit()
     finally:
+        # The gate call has returned; this envelope's execution is settled.
+        # Release the concurrency lease now so a legitimate retry or this
+        # run's own clip-repair isn't locked out for the lease TTL.
+        if _held_lease is not None:
+            try:
+                db.release_lease(
+                    conn, _held_lease[0], _held_lease[1], _held_lease[2],
+                    released_at=datetime.now(timezone.utc).isoformat(),
+                )
+            except Exception:  # noqa: BLE001 - best-effort; TTL still bounds it
+                pass
         conn.close()
 
     if not result.approved:
@@ -1705,6 +1724,7 @@ def _generate_reference_image_via_gate(
         return None, f"gate_authorization_failed: {exc}"
 
     conn = db.get_connection()
+    _held_lease: Optional[tuple] = None
     try:
         authorization_store.persist_execution_envelope(conn, envelope)
 
@@ -1714,6 +1734,7 @@ def _generate_reference_image_via_gate(
         lease = db.acquire_lease(conn, envelope.envelope_id, lease_owner_id, acquired_at=at, expires_at=lease_expires_at)
         if lease is None:
             return None, "gate_lease_unavailable"
+        _held_lease = (envelope.envelope_id, lease_owner_id, lease["fencing_token"])
 
         receipt_store = WriteAheadReceiptStore(output_dir)
         live_sources = submission_gate.LiveSources(
@@ -1733,6 +1754,14 @@ def _generate_reference_image_via_gate(
             expected_deterministic_output_path=str(dest_path), output_already_exists=dest_path.exists(),
         )
     finally:
+        if _held_lease is not None:
+            try:
+                db.release_lease(
+                    conn, _held_lease[0], _held_lease[1], _held_lease[2],
+                    released_at=datetime.now(timezone.utc).isoformat(),
+                )
+            except Exception:  # noqa: BLE001
+                pass
         conn.close()
 
     if not result.approved:
@@ -3390,6 +3419,7 @@ def _generate_thumbnail_via_gate(
         raise MUAPIError(f"Thumbnail gate authorization failed for {deliverable_id!r}: {exc}") from exc
 
     conn = db.get_connection()
+    _held_lease: Optional[tuple] = None
     try:
         authorization_store.persist_execution_envelope(conn, envelope)
 
@@ -3399,6 +3429,7 @@ def _generate_thumbnail_via_gate(
         lease = db.acquire_lease(conn, envelope.envelope_id, lease_owner_id, acquired_at=at, expires_at=lease_expires_at)
         if lease is None:
             raise MUAPIError(f"Thumbnail gate lease unavailable for {deliverable_id!r}")
+        _held_lease = (envelope.envelope_id, lease_owner_id, lease["fencing_token"])
 
         receipt_store = WriteAheadReceiptStore(output_dir)
         live_sources = submission_gate.LiveSources(
@@ -3418,6 +3449,14 @@ def _generate_thumbnail_via_gate(
             expected_deterministic_output_path=str(local_path), output_already_exists=local_path.exists(),
         )
     finally:
+        if _held_lease is not None:
+            try:
+                db.release_lease(
+                    conn, _held_lease[0], _held_lease[1], _held_lease[2],
+                    released_at=datetime.now(timezone.utc).isoformat(),
+                )
+            except Exception:  # noqa: BLE001
+                pass
         conn.close()
 
     if not result.approved:

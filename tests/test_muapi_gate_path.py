@@ -351,6 +351,41 @@ class TestGrantDerivedGatePath:
         assert result["generation_status"] == "generated", result
         assert result["provider"] == "muapi"
 
+    def test_gate_releases_runtime_lease_so_repair_can_reacquire(self, keypair, tmp_path, monkeypatch):
+        """A failed scene generation used to hold its runtime_lease for the
+        full 30-min TTL, locking out this run's own in-assembly clip-repair
+        of that scene (observed 2026-09-03: Herculaneum s09, Egyptian Tomb
+        s06). The gate call must release the lease once it returns."""
+        priv, _pub = keypair
+        db_path = tmp_path / "auth.db"
+        config = make_config()
+        spec = make_scene_spec(scene_id="s01b01")
+        import hypogeum.db as db
+        db.initialize_schema(db_path)
+        _register_grant(priv, db_path, model=config.MUAPI_T2_MODEL)
+        monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
+        _configure_channel_weekly(db_path)
+        _persist_matching_plan(tmp_path, model=config.MUAPI_T2_MODEL)
+
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.requests.get") as mock_get, \
+             patch("hypogeum.muapi.time.sleep"), \
+             patch("hypogeum.muapi._download_file", return_value=(True, "")), \
+             patch("hypogeum.muapi._validate_video_file", return_value=(True, "")):
+            mock_post.return_value = _mock_submit_ok("req_lease_1")
+            mock_get.return_value = _mock_poll_completed()
+            result = submit_scene(spec, config, "ep_gate_test", tmp_path, channel_id="test_channel")
+        assert result["generation_status"] == "generated", result
+
+        conn = db.get_connection(db_path)
+        try:
+            leases = conn.execute(
+                "SELECT status FROM runtime_leases WHERE owner_id LIKE 'muapi_video_adapter:%'"
+            ).fetchall()
+        finally:
+            conn.close()
+        assert leases and all(r["status"] == "released" for r in leases), leases
+
     def test_accepted_call_advances_authorization_past_authorized(self, keypair, tmp_path, monkeypatch):
         """The lifecycle-reconciliation fix: a real, accepted, charged
         execution through the gate must not leave its AuthorizationRecord

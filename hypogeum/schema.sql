@@ -2253,3 +2253,23 @@ CREATE TABLE IF NOT EXISTS channel_keyword_research (
     total_cost_usd   REAL NOT NULL DEFAULT 0.0,
     metadata_version TEXT NOT NULL DEFAULT 'v1'
 );
+
+-- ---------------------------------------------------------------------------
+-- channel_publish_slots (2026-09-03)
+-- Write-through ledger of the daily publish slot each finished-but-not-yet-
+-- live episode has been assigned, so a produce-ahead buffer (several
+-- episodes finished, waiting) hands each one a DISTINCT future slot instead
+-- of every release-flow compilation independently resolving "today/tomorrow
+-- at time_of_day" and colliding. Consumed by
+-- hypogeum.publishing.publish_slot_ledger.next_free_now(). Rows are advisory
+-- — the authoritative schedule is on the provider (Zernio scheduledFor);
+-- this only spaces out assignment. Safe to prune once slot_utc is in the past.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS channel_publish_slots (
+    channel_id   TEXT NOT NULL,
+    slot_utc     TEXT NOT NULL,
+    episode_id   TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    PRIMARY KEY (channel_id, slot_utc)
+);
+CREATE INDEX IF NOT EXISTS idx_channel_publish_slots_ch ON channel_publish_slots(channel_id, slot_utc);

@@ -45,7 +45,7 @@ Public API:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -181,9 +181,22 @@ def publish_channel_release(
         deliverable_ids if deliverable_ids is not None
         else [d.deliverable_id for d in package.all_deliverables()]
     )
+    # Produce-ahead buffer: if the caller didn't pin `now` and this is a
+    # scheduled (not publish-now) release, advance the reference time past
+    # any slot already handed to another finished-but-unpublished episode of
+    # this channel, so back-to-back releases land on consecutive days
+    # instead of colliding on the same "today/tomorrow at time_of_day" slot.
+    _compile_now = now
+    if _compile_now is None and not publish_now:
+        try:
+            from hypogeum.publishing.publish_slot_ledger import next_free_now
+            _compile_now = next_free_now(channel_id, datetime.now(timezone.utc), db_path=db_path)
+        except Exception:  # noqa: BLE001
+            _compile_now = now
+
     schedule_result = compile_schedule_plan_from_channel_package(
         channel_id, target_deliverable_ids, db_path=db_path, publish_now=publish_now,
-        require_explicit_policy=require_explicit_schedule_policy, now=now,
+        require_explicit_policy=require_explicit_schedule_policy, now=_compile_now,
     )
     if schedule_result.blocked:
         return ReleasePublishResult(
@@ -191,6 +204,12 @@ def publish_channel_release(
             status="blocked_schedule", readiness_by_platform=readiness_by_platform, schedule=schedule_result,
             blocked_reason=schedule_result.blocked_reason, blocked_platforms=blocked_platforms,
         )
+    if not publish_now and schedule_result.slot is not None:
+        try:
+            from hypogeum.publishing.publish_slot_ledger import record_slot
+            record_slot(channel_id, schedule_result.slot, episode_id, db_path=db_path)
+        except Exception:  # noqa: BLE001
+            pass
 
     outcome = publish_episode_package(
         package, platforms=passed_platforms, channel_id=channel_id, db_path=db_path,

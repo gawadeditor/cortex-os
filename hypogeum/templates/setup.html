@@ -18,8 +18,8 @@
     .env-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
     .env-row  { display: flex; align-items: center; gap: 8px; font-size: 12px; }
     .env-name { font-family: monospace; color: var(--text); }
-    .env-ok   { color: var(--green); font-weight: 600; }
-    .env-miss { color: var(--red); font-weight: 600; }
+    .env-ok   { color: var(--good); font-weight: 600; }
+    .env-miss { color: var(--critical); font-weight: 600; }
     .cost-row { display: flex; justify-content: space-between; align-items: center;
                 padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
     .cost-row:last-child { border-bottom: none; }
@@ -58,7 +58,12 @@
 <div class="container">
 
 
-<div class="page-header">
+{% from '_hero.html' import hero %}
+{% call hero(eyebrow='Factory', title='Setup',
+   lede='One-time checks for whoever runs the Cortex server — accounts, budget, tools. Once these are green, day-to-day work happens on the other pages.',
+   pill=('ready' if preflight.ready else (preflight.blocker_count ~ ' to fix')),
+   pill_class='is-good' if preflight.ready else 'is-critical') %}{% endcall %}
+<div style="display:none;">
   <h1>Factory Setup</h1>
   {% if preflight.ready %}
     <span class="badge badge-complete">READY</span>
@@ -80,7 +85,7 @@
     </div>
   {% else %}
     <div class="err" style="font-size:14px; font-weight:600;">
-      ✗ {{ preflight.blocker_count }} blocker{% if preflight.blocker_count != 1 %}s{% endif %} must be resolved before launch.
+      ✗ {{ preflight.blocker_count }} blocker{% if preflight.blocker_count != 1 %}s{% endif %} must be fixed before Cortex can produce.
     </div>
     {% if preflight.blockers %}
     <div style="margin-top:12px;">
@@ -105,7 +110,7 @@
 
 {# ── Environment Variables ── #}
 <div class="card">
-  <div class="card-title">Required Environment Variables</div>
+  <div class="card-title">Server configuration</div>
   <div class="env-grid">
     {% for var, present in (preflight.env_vars or {}).items() %}
     <div class="env-row">
@@ -223,10 +228,10 @@
 
 {# ── OIS Blocking Signals ── #}
 <div class="card">
-  <div class="card-title">OIS Blocking Signals</div>
+  <div class="card-title">Blocking alerts</div>
   {% if preflight.active_signals %}
   <div style="margin-bottom:6px; font-size:12px; color:var(--red); font-weight:600;">
-    {{ preflight.active_signals|length }} active blocking signal{% if preflight.active_signals|length != 1 %}s{% endif %}
+    {{ preflight.active_signals|length }} alert{% if preflight.active_signals|length != 1 %}s{% endif %} blocking production
   </div>
   {% for sig in preflight.active_signals %}
   <div class="signal-row">
@@ -245,7 +250,7 @@
 
 {# ── Channel ── #}
 <div class="card">
-  <div class="card-title">Active Channels</div>
+  <div class="card-title">Active channels</div>
   {% if preflight.active_channel_count and preflight.active_channel_count > 0 %}
   <div class="ok" style="font-size:13px;">
     ✓ {{ preflight.active_channel_count }} active channel{% if preflight.active_channel_count != 1 %}s{% endif %}
@@ -259,7 +264,7 @@
 {# ── Full Check Log ── #}
 {% if preflight.checks %}
 <div class="card">
-  <div class="card-title">Full Check Log ({{ preflight.checks|length }} checks)</div>
+  <div class="card-title">Every check ({{ preflight.checks|length }})</div>
   {% for c in preflight.checks %}
     {% if c.passed %}
       {% set icon = '✓' %}{% set cls = 'ok' %}

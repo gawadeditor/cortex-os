@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{{ platform | capitalize }} Analytics — Cortex</title>
+  <title>{{ platform | friendly_platform }} Analytics — Cortex</title>
   {% include '_base_style.html' %}
   <style>
     .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); margin-bottom: var(--gap); }
@@ -22,7 +22,7 @@
   <a href="/intelligence/performance"          class="sub-nav-link">Portfolio</a>
   {% for _p in ['youtube','tiktok','instagram','facebook'] %}
   <a href="/intelligence/platform/{{ _p }}"
-     class="sub-nav-link {% if _p == platform %}active{% endif %}">{{ _p | capitalize }}</a>
+     class="sub-nav-link {% if _p == platform %}active{% endif %}">{{ _p | friendly_platform }}</a>
   {% endfor %}
   <a href="/intelligence/sync"                 class="sub-nav-link">Sync Health</a>
 </div>
@@ -31,16 +31,20 @@
 <div class="breadcrumb">
   <a href="/intelligence/performance">Intelligence</a>
   <span class="breadcrumb-sep">/</span>
-  <span>{{ platform | capitalize }}</span>
+  <span>{{ platform | friendly_platform }}</span>
 </div>
 
-<div class="page-header">
-  <h1>{{ platform | capitalize }}</h1>
-  <span class="page-meta">{{ summary.kpis.get('episodes_tracked', 0) }} episode{% if summary.kpis.get('episodes_tracked', 0) != 1 %}s{% endif %} tracked</span>
-  <div style="margin-left:auto;">
-    <a href="/intelligence/sync" class="btn" style="font-size:12px;">Sync Health →</a>
-  </div>
-</div>
+{% from '_hero.html' import hero %}
+{% set _ep_n = summary.kpis.get('episodes_tracked', 0) %}
+{% call hero(
+     eyebrow='Performance',
+     title='How the channel is doing on ' ~ (platform | friendly_platform),
+     lede='Every episode published to ' ~ (platform | friendly_platform) ~ ', with views, watch-through and click rate pulled in automatically.',
+     figure="{:,}".format(summary.kpis.get('total_views', 0) | int) if summary.kpis.get('total_views') else '',
+     figure_label='views on ' ~ (platform | friendly_platform) if summary.kpis.get('total_views') else '',
+     pill=(_ep_n ~ (' episode' if _ep_n == 1 else ' episodes') ~ ' tracked')) %}
+  <a href="/intelligence/sync" class="btn">Connection status</a>
+{% endcall %}
 
 {% set k = summary.kpis %}
 
@@ -50,7 +54,7 @@
     <div class="kpi-val {% if k.avg_ctr and k.avg_ctr < 0.02 %}err{% elif k.avg_ctr and k.avg_ctr > 0.05 %}ok{% elif k.avg_ctr %}warn{% endif %}">
       {% if k.avg_ctr %}{{ "%.1f%%"|format(k.avg_ctr * 100) }}{% else %}—{% endif %}
     </div>
-    <div class="kpi-lbl">Avg CTR</div>
+    <div class="kpi-lbl">Click rate</div>
   </div>
   <div class="kpi-card">
     {% set _ret = k.avg_view_pct or 0 %}
@@ -60,15 +64,15 @@
     {% if k.avg_view_pct %}
       <div class="kpi-sub">{{ k.avg_view_pct | pct_bar(12) }}</div>
     {% endif %}
-    <div class="kpi-lbl">Avg Retention</div>
+    <div class="kpi-lbl">Watch-through</div>
   </div>
   <div class="kpi-card">
     <div class="kpi-val">{% if k.avg_watch_time_s %}{{ k.avg_watch_time_s | int }}s{% else %}—{% endif %}</div>
-    <div class="kpi-lbl">Avg Watch Time</div>
+    <div class="kpi-lbl">Avg watch time</div>
   </div>
   <div class="kpi-card">
     <div class="kpi-val">{{ "{:,}".format(k.total_views | int) if k.total_views else '—' }}</div>
-    <div class="kpi-lbl">Total Views</div>
+    <div class="kpi-lbl">Total views</div>
   </div>
 </div>
 
@@ -79,7 +83,7 @@
   {% set b = summary.best_episode %}
   <div class="score-card score-card-best">
     <div class="score-label score-label-best">Best retention</div>
-    <div class="score-ep"><a href="/analytics/episode/{{ b.episode_id }}" style="color:var(--text);">{{ b.episode_id }}</a></div>
+    <div class="score-ep"><a href="/analytics/episode/{{ b.episode_id }}" style="color:var(--text);">{{ b.episode_id | episode_name }}</a></div>
     <div class="score-stats">
       <span class="ok">{{ "%.0f%%"|format(b.avg_view_pct * 100) if b.avg_view_pct else '—' }}</span> retention
       {% if b.ctr %} · CTR {{ "%.1f%%"|format(b.ctr*100) }}{% endif %}
@@ -91,7 +95,7 @@
   {% set w = summary.worst_episode %}
   <div class="score-card score-card-worst">
     <div class="score-label score-label-worst">Needs attention</div>
-    <div class="score-ep"><a href="/analytics/episode/{{ w.episode_id }}" style="color:var(--text);">{{ w.episode_id }}</a></div>
+    <div class="score-ep"><a href="/analytics/episode/{{ w.episode_id }}" style="color:var(--text);">{{ w.episode_id | episode_name }}</a></div>
     <div class="score-stats">
       <span class="err">{{ "%.0f%%"|format(w.avg_view_pct * 100) if w.avg_view_pct else '—' }}</span> retention
       {% if w.ctr %} · CTR {{ "%.1f%%"|format(w.ctr*100) }}{% endif %}
@@ -109,20 +113,20 @@
     <thead>
       <tr>
         <th>Episode</th>
-        <th>Date</th>
+        <th>Updated</th>
         <th style="text-align:right;">Views</th>
-        <th style="text-align:right;">CTR</th>
-        <th style="text-align:right;">Retention</th>
+        <th style="text-align:right;">Click rate</th>
+        <th style="text-align:right;">Watch-through</th>
         <th style="text-align:right;">Watch time</th>
-        <th>Source</th>
+        <th>Data</th>
         <th></th>
       </tr>
     </thead>
     <tbody>
       {% for r in summary.episodes %}
       <tr>
-        <td style="font-size:12px;"><a href="/analytics/episode/{{ r.episode_id }}">{{ r.episode_id }}</a></td>
-        <td class="muted" style="font-size:12px; white-space:nowrap;">{{ r.snapshot_date }}</td>
+        <td style="font-size:12px; max-width:300px;"><a href="/analytics/episode/{{ r.episode_id }}"><span class="cell-title">{{ r.episode_id | episode_name }}</span></a></td>
+        <td class="muted" style="font-size:12px; white-space:nowrap;">{{ r.snapshot_date | friendly_date if r.snapshot_date else "—" }}</td>
         <td style="text-align:right; font-variant-numeric:tabular-nums;">
           {{ "{:,}".format(r.views|int) if r.views else '—' }}
         </td>
@@ -145,9 +149,9 @@
         </td>
         <td>
           {% if r.source == 'mock' %}
-            <span class="badge badge-demo">Demo</span>
+            <span class="badge badge-demo">Sample</span>
           {% else %}
-            <span class="badge badge-active" style="font-size:10px;">{{ r.source }}</span>
+            <span class="badge badge-complete" style="font-size:10px;">Live</span>
           {% endif %}
         </td>
         <td><a href="/analytics/episode/{{ r.episode_id }}" class="btn" style="font-size:11px; padding:2px 8px;">→</a></td>
@@ -158,18 +162,18 @@
 </div>
 {% else %}
 <div class="empty">
-  No {{ platform | capitalize }} analytics data yet.
+  No {{ platform | friendly_platform }} data yet.
   {% if platform == 'youtube' %}
-  <a href="/intelligence/sync" style="color:var(--blue);">Check sync status →</a>
+  <a href="/intelligence/sync" style="color:var(--accent);">Check sync status →</a>
   {% elif platform in ('facebook', 'instagram') %}
   <span class="muted" style="font-size:12px;">
-    Data syncs automatically via Meta Graph API once videos are published to this platform.
-    <a href="/intelligence/sync" style="color:var(--blue);">View sync status →</a>
+    Numbers appear here automatically once an episode is published to {{ platform | friendly_platform }}.
+    <a href="/intelligence/sync" style="color:var(--accent);">View sync status →</a>
   </span>
   {% elif platform == 'tiktok' %}
   <span class="muted" style="font-size:12px;">
-    Data syncs automatically via TikTok Video API once videos are published to this platform.
-    <a href="/intelligence/sync" style="color:var(--blue);">View sync status →</a>
+    Numbers appear here automatically once an episode is published to {{ platform | friendly_platform }}.
+    <a href="/intelligence/sync" style="color:var(--accent);">View sync status →</a>
   </span>
   {% endif %}
 </div>

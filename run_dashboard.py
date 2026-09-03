@@ -738,23 +738,48 @@ def create_launch():
 
 
 def _prioritize_topic(topic_id: str) -> bool:
-    """Move a queued topic to the front of its channel's queue + set its
-    production deadline to now, so the worker's next consume picks it up."""
+    """'Start now' on a queued topic: move it to the front of its channel's
+    backlog AND put a work item on the run queue so the worker's next poll
+    (≤60 s) claims it — instead of waiting for the channel's daily schedule
+    tick. Without the run-queue item the priority bump alone does nothing:
+    poll() only ever claims run_queue rows.
+    """
     try:
         from hypogeum.db import get_connection
         from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
         conn = get_connection(_db_path())
         try:
+            row = conn.execute(
+                "SELECT channel_id, episode_id FROM episode_topics "
+                "WHERE topic_id = ? AND status IN ('queued','claimed')", (topic_id,),
+            ).fetchone()
+            if not row:
+                return False
             conn.execute(
                 "UPDATE episode_topics SET priority = -1000, "
-                "production_deadline_at = ?, updated_at = ? "
-                "WHERE topic_id = ? AND status IN ('queued','claimed')",
-                (datetime.now(timezone.utc).isoformat(),
-                 datetime.now(timezone.utc).isoformat(), topic_id),
+                "production_deadline_at = ?, updated_at = ? WHERE topic_id = ?",
+                (now, now, topic_id),
             )
             conn.commit()
         finally:
             conn.close()
+
+        channel_id = row["channel_id"]
+        episode_id = row["episode_id"] if "episode_id" in row.keys() else None
+        # already a live run_queue item for this channel? don't double-enqueue
+        conn = get_connection(_db_path())
+        try:
+            live = conn.execute(
+                "SELECT 1 FROM run_queue WHERE channel_id = ? "
+                "AND status IN ('queued','claimed') LIMIT 1", (channel_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if not live:
+            from hypogeum.queue import enqueue as _enqueue
+            _enqueue(channel_id=channel_id, episode_id=episode_id or None,
+                     priority=-1000, source="manual", db_path=_db_path())
         return True
     except Exception:  # noqa: BLE001
         return False

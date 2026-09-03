@@ -136,16 +136,23 @@
   var pill=document.getElementById('worker-pill'), lbl=document.getElementById('wp-label'), btn=document.getElementById('wp-toggle');
   if(pill){
     var running=false;
-    function paint(s){
-      running = (s==='running'||s==='claiming');
-      pill.className='worker-pill '+(running?'is-running':(s==='idle'?'is-idle':'is-stopped'));
-      lbl.textContent = running?'worker running':(s==='idle'?'worker idle':'worker stopped');
-      btn.textContent = running?'Stop':'Start';
+    function paint(d){
+      // The daemon is "running" whenever the process is alive — 'idle' means
+      // alive but nothing queued right now, NOT stopped.
+      running = !!(d && d.running);
+      var s = (d && d.status) || 'stopped';
+      var busy = (s==='running'||s==='claiming');
+      pill.className='worker-pill '+(running ? (busy?'is-running':'is-idle') : 'is-stopped');
+      lbl.textContent = running ? (busy?'making an episode':'on — nothing queued') : 'stopped';
+      btn.textContent = running ? 'Stop' : 'Start';
+      btn.title = running
+        ? 'The factory is on. It produces on each channel’s schedule; use Production → to make one now.'
+        : 'Start the factory';
     }
     function poll(){
       fetch('/api/worker/status').then(function(r){return r.json();}).then(function(d){
-        paint(d.running ? (d.status||'running') : 'stopped');
-      }).catch(function(){ paint('stopped'); });
+        paint(d);
+      }).catch(function(){ paint(null); });
     }
     btn.addEventListener('click', function(){
       btn.disabled=true; btn.textContent='…';

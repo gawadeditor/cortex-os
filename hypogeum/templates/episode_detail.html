@@ -980,8 +980,8 @@
       <tbody>
       {% for s in d.raw_stages %}
       <tr>
-        <td style="font-family:monospace; font-size:11px;">{{ s.stage_name }}</td>
-        <td><span class="badge badge-{{ s.status }}" style="font-size:10px;">{{ s.status }}</span></td>
+        <td style="font-size:11px;">{{ s.stage_name | stage_name }}</td>
+        <td><span class="badge badge-{{ s.status }}" style="font-size:10px;">{{ s.status | plain_status }}</span></td>
         <td class="muted">{{ s.duration_fmt }}</td>
         <td class="muted">${{ "%.5f" | format(s.cost_usd or 0) }}</td>
         <td><span class="adv-mono">{{ s.stage_exec_id }}</span></td>
@@ -1005,9 +1005,9 @@
       <tbody>
       {% for a in d.assets %}
       <tr>
-        <td style="font-size:11px;">{{ a.asset_type }}</td>
-        <td class="muted" style="font-size:11px;">{{ a.provider }}</td>
-        <td class="adv-mono" style="word-break:break-all;">{{ a.file_path or '—' }}</td>
+        <td style="font-size:11px;">{{ (a.asset_type or '') | replace('_',' ') | title }}</td>
+        <td class="muted" style="font-size:11px;">{{ a.provider | friendly_provider }}</td>
+        <td class="adv-mono" style="word-break:break-all;">{{ (a.file_path or '—') | basename }}</td>
       </tr>
       {% endfor %}
       </tbody>

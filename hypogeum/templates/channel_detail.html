@@ -101,7 +101,7 @@
       </span>
       <div>
         <div class="rd-title">{{ i.title }}</div>
-        <div class="rd-detail">{{ i.detail }}{% if i.fix %}<br><span class="rd-fix">To fix:</span> {{ i.fix }}{% endif %}</div>
+        <div class="rd-detail">{{ i.detail | plain_tech }}{% if i.fix %}<br><span class="rd-fix">To fix:</span> {{ i.fix | plain_tech }}{% endif %}</div>
       </div>
     </div>
     {% endfor %}
@@ -192,10 +192,10 @@
     <div class="card">
       <div class="card-title">Creative tools</div>
       {% if model %}
-      <div class="fr"><span class="fr-k">Narration voice</span><span class="fr-v mono">{{ model.narration_voice_id or '—' }}</span></div>
-      <div class="fr"><span class="fr-k">Images</span><span class="fr-v mono">{{ model.image_provider }}</span></div>
-      <div class="fr"><span class="fr-k">Video</span><span class="fr-v mono">{{ model.video_provider }}</span></div>
-      <div class="fr"><span class="fr-k">Writing</span><span class="fr-v mono">{{ model.episode_producer }}</span></div>
+      <div class="fr"><span class="fr-k">Narration voice</span><span class="fr-v">{{ 'Custom voice set' if model.narration_voice_id else '—' }}</span></div>
+      <div class="fr"><span class="fr-k">Images</span><span class="fr-v">{{ model.image_provider | friendly_provider }}</span></div>
+      <div class="fr"><span class="fr-k">Video</span><span class="fr-v">{{ model.video_provider | friendly_provider }}</span></div>
+      <div class="fr"><span class="fr-k">Writing</span><span class="fr-v">{{ model.episode_producer | friendly_model }}</span></div>
       <div class="btn-row"><a href="/model/{{ model.model_profile_id|e }}/edit" class="btn btn-sm">Edit tools</a></div>
       {% else %}
       <div class="dv-empty"><div class="dv-empty-title">No creative tools set</div></div>

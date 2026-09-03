@@ -339,6 +339,29 @@ def _f_friendly_week(value):
     return _hz.friendly_week(value)
 
 
+@app.template_filter("friendly_provider")
+def _f_friendly_provider(value):
+    return _hz.friendly_provider(value)
+
+
+@app.template_filter("friendly_model")
+def _f_friendly_model(value):
+    return _hz.friendly_model(value)
+
+
+@app.template_filter("plain_tech")
+def _f_plain_tech(value):
+    return _hz.plain_tech(value)
+
+
+@app.template_filter("basename")
+def _f_basename(value):
+    """Last path segment — keeps internal directory layout off the page."""
+    if not value:
+        return "—"
+    return str(value).rstrip("/").rsplit("/", 1)[-1] or str(value)
+
+
 @app.template_filter("channel_name")
 def _f_channel_name(channel_id):
     return _hz.channel_display_name(channel_id, db_path=_db_path())

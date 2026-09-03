@@ -713,6 +713,79 @@ def clean_rationale(text) -> str:
     return s.strip().rstrip("—-").strip() or str(text).strip()
 
 
+_PROVIDER_NAMES = {
+    "muapi": "MUAPI (media generation)",
+    "openrouter": "OpenRouter",
+    "anthropic": "Anthropic",
+    "elevenlabs": "ElevenLabs (voice)",
+    "perplexity": "Perplexity (research)",
+    "youtube": "YouTube", "tiktok": "TikTok", "instagram": "Instagram",
+    "facebook": "Facebook", "zernio": "Zernio",
+}
+
+_MODEL_NAMES = {
+    "anthropic/claude-sonnet-4.6": "Claude Sonnet 4.6",
+    "anthropic/claude-opus-4.6": "Claude Opus 4.6",
+    "claude-sonnet-4.6": "Claude Sonnet 4.6",
+    "claude-opus-4.6": "Claude Opus 4.6",
+    "veo3-text-to-video": "Veo 3 (premium video)",
+    "veo3.1-lite-text-to-video": "Veo 3.1 Lite (video)",
+    "veo3-fast-text-to-video": "Veo 3 Fast (video)",
+    "wan2.7-text-to-video": "Wan 2.7 (portrait video)",
+    "wan2.7-image-to-video": "Wan 2.7 (image→video)",
+    "seedance-pro-t2v-fast": "Seedance Pro (video)",
+    "seedance-pro-i2v-fast": "Seedance Pro (image→video)",
+    "ai-video-upscaler": "AI video upscaler",
+    "eleven_multilingual_v2": "ElevenLabs Multilingual v2",
+    "music_v1": "ElevenLabs Music",
+}
+
+
+def friendly_provider(value) -> str:
+    """'muapi' → 'MUAPI (media generation)'. Unknown → title-cased."""
+    if not value:
+        return "—"
+    k = str(value).strip().lower()
+    if k in _PROVIDER_NAMES:
+        return _PROVIDER_NAMES[k]
+    return str(value).replace("_", " ").replace("-", " ").title()
+
+
+def friendly_model(value) -> str:
+    """A provider model slug → a name an operator recognises.
+    'anthropic/claude-sonnet-4.6' → 'Claude Sonnet 4.6'."""
+    if not value:
+        return "—"
+    k = str(value).strip()
+    if k in _MODEL_NAMES:
+        return _MODEL_NAMES[k]
+    if k.lower() in _MODEL_NAMES:
+        return _MODEL_NAMES[k.lower()]
+    tail = k.split("/")[-1]
+    return tail.replace("_", " ").replace("-", " ").strip().title() or "—"
+
+
+_TECH_TOKEN_RE = re.compile(
+    r"\b(" + "|".join(re.escape(k) for k in sorted(
+        list(_PROVIDER_NAMES) + list(_MODEL_NAMES), key=len, reverse=True))
+    + r")\b"
+)
+
+
+def plain_tech(text) -> str:
+    """Swap any known provider / model slug inside a free-text string for a
+    name an operator recognises. Leaves everything else untouched."""
+    if not text:
+        return ""
+    s = str(text)
+
+    def _sub(m):
+        tok = m.group(1)
+        return _MODEL_NAMES.get(tok) or _PROVIDER_NAMES.get(tok.lower()) or tok
+
+    return _TECH_TOKEN_RE.sub(_sub, s)
+
+
 def signal_strength_words(value) -> dict:
     """avg_signal_strength (−1..1) → {label, level 0-3, direction}."""
     try:

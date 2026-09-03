@@ -6563,13 +6563,47 @@ def episode_thumbnail_candidate(episode_id: str, rank: int):
     abort(404)
 
 
+def _archived_episode_asset(episode_id: str, *rel_parts: str):
+    """Locate an episode asset under the archive root after the working
+    copy has been relocated (hypogeum.archive_relocation). Returns a Path
+    that exists, or None. Path-traversal safe — rel_parts are joined and
+    re-checked to stay under the episode's archived dir."""
+    try:
+        from hypogeum.archive_storage import resolve_archive_root
+        from hypogeum.db import get_connection
+        conn = get_connection(_db_path())
+        try:
+            row = conn.execute(
+                "SELECT channel_id FROM runs WHERE episode_id = ? AND channel_id IS NOT NULL "
+                "ORDER BY started_at DESC LIMIT 1", (episode_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if not row or not row["channel_id"]:
+            return None
+        base = (resolve_archive_root(_db_path()) / row["channel_id"] / episode_id).resolve()
+        cand = base.joinpath(*rel_parts).resolve()
+        cand.relative_to(base)
+        if not (cand.exists() and cand.stat().st_size > 0):
+            return None
+        # The archive may sit on a volume this (launchd) process cannot read —
+        # confirm before handing the path to send_file, so an unreadable
+        # archive is a clean 404, not a 500.
+        with open(cand, "rb") as _f:
+            _f.read(1)
+        return cand
+    except Exception:  # noqa: BLE001
+        return None
+
+
 @app.route("/episode/<episode_id>/render")
 def episode_render(episode_id: str):
     """Serve the rendered main episode MP4.
 
     Streams inline for the in-dashboard <video> player by default (Range
     requests honoured so the timeline can be scrubbed). Add ?download=1 to
-    get it as a file instead.
+    get it as a file instead. Falls back to the archive root once the
+    working copy has been relocated post-publish.
     """
     path = safe_episode_asset_path(
         episode_id, "artifact", f"main_{episode_id}.mp4",
@@ -6585,6 +6619,8 @@ def episode_render(episode_id: str):
             abort(404)
         if candidate.exists() and candidate.stat().st_size > 0:
             path = candidate
+    if path is None:
+        path = _archived_episode_asset(episode_id, f"main_{episode_id}.mp4")
     _download = request.args.get("download", "0") == "1"
     return _send_asset(path, download_name=f"{episode_id}_main.mp4", inline=not _download)
 
@@ -6595,7 +6631,7 @@ def episode_narration(episode_id: str):
     path = safe_episode_asset_path(
         episode_id, "narration", "main_narration.mp3",
         assets_root=_ASSETS_ROOT_PATH,
-    )
+    ) or _archived_episode_asset(episode_id, "narration", "main_narration.mp3")
     return _send_asset(path, download_name=f"{episode_id}_narration.mp3")
 
 
@@ -6605,7 +6641,7 @@ def episode_captions(episode_id: str):
     path = safe_episode_asset_path(
         episode_id, "captions", "main.srt",
         assets_root=_ASSETS_ROOT_PATH,
-    )
+    ) or _archived_episode_asset(episode_id, "captions", "main.srt")
     return _send_asset(path, download_name=f"{episode_id}_captions.srt")
 
 
@@ -6616,7 +6652,7 @@ def episode_clip(episode_id: str, scene_id: str):
     path = safe_episode_asset_path(
         episode_id, "video", filename,
         assets_root=_ASSETS_ROOT_PATH,
-    )
+    ) or _archived_episode_asset(episode_id, "video", filename)
     return _send_asset(path, download_name=filename)
 
 

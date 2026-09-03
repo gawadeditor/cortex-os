@@ -15,13 +15,13 @@
 </head>
 <body>
 {% include '_nav.html' %}
+{% from '_hero.html' import hero %}
 
 <div class="container">
-  <div class="page-header">
-    <span class="eyebrow">{{ channel.name }}</span>
-    <h1>Settings</h1>
-    <span class="page-meta">{{ channel.channel_id }}</span>
-  </div>
+  {{ hero(
+     eyebrow=channel.name,
+     title='Channel settings',
+     lede='The brand, the creative tools, the publishing platforms, the budget and the payment authorization for this channel — all in one place.') }}
 
   <div class="cs-grid">
     <div class="card">
@@ -37,24 +37,24 @@
     </div>
 
     <div class="card">
-      <div class="card-title">Models &amp; voice</div>
+      <div class="card-title">Creative tools &amp; voice</div>
       {% if model %}
-      <div class="cs-fr"><span class="k">Episode producer</span><span class="v mono">{{ model.episode_producer or '—' }}</span></div>
-      <div class="cs-fr"><span class="k">Research director</span><span class="v mono">{{ model.research_director or '—' }}</span></div>
+      <div class="cs-fr"><span class="k">Writing model</span><span class="v mono">{{ model.episode_producer or '—' }}</span></div>
+      <div class="cs-fr"><span class="k">Research model</span><span class="v mono">{{ model.research_director or '—' }}</span></div>
       <div class="cs-fr"><span class="k">Narration voice</span><span class="v mono">{{ model.narration_voice_id or '—' }}</span></div>
-      <div class="cs-fr"><span class="k">Image / video</span><span class="v mono">{{ model.image_provider or '—' }} / {{ model.video_provider or '—' }}</span></div>
-      <div class="cs-fr"><span class="k">Video model</span><span class="v mono">{{ model.video_model or 'default (global tier config)' }}{% if model.video_model and model.video_model_price_usd %} · ${{ '%.2f' | format(model.video_model_price_usd) }}/clip{% endif %}</span></div>
-      <div class="cs-fr"><span class="k">Image-to-video model</span><span class="v mono">{{ model.video_i2v_model or 'default (veo3-image-to-video · $2.50/clip)' }}{% if model.video_i2v_model and model.video_i2v_model_price_usd %} · ${{ '%.2f' | format(model.video_i2v_model_price_usd) }}/clip{% endif %}</span></div>
-      <a href="/model/{{ channel.model_profile_id }}/edit" class="btn" style="margin-top:10px;">{{ icon('pencil') }} Edit models</a>
-      <a href="/providers/video-test?channel={{ channel.channel_id }}" class="btn" style="margin-top:10px;">Compare video models →</a>
+      <div class="cs-fr"><span class="k">Image / video tools</span><span class="v mono">{{ model.image_provider or '—' }} / {{ model.video_provider or '—' }}</span></div>
+      <div class="cs-fr"><span class="k">Video model</span><span class="v mono">{{ model.video_model or 'Cortex default' }}{% if model.video_model and model.video_model_price_usd %} · {{ model.video_model_price_usd | friendly_money }}/clip{% endif %}</span></div>
+      <div class="cs-fr"><span class="k">Image-to-video model</span><span class="v mono">{{ model.video_i2v_model or 'Cortex default' }}{% if model.video_i2v_model and model.video_i2v_model_price_usd %} · {{ model.video_i2v_model_price_usd | friendly_money }}/clip{% endif %}</span></div>
+      <a href="/model/{{ channel.model_profile_id }}/edit" class="btn" style="margin-top:10px;">{{ icon('pencil') }} Edit tools</a>
+      <a href="/providers/video-test?channel={{ channel.channel_id }}" class="btn" style="margin-top:10px;">Compare video quality →</a>
       {% else %}<p class="page-meta">No model profile.</p>{% endif %}
     </div>
 
     <div class="card">
       <div class="card-title">Publishing</div>
       {% if publishing %}
-      <div class="cs-fr"><span class="k">Platforms</span><span class="v">{{ publishing.enabled_platforms | join(', ') or '—' }}</span></div>
-      <div class="cs-fr"><span class="k">AI disclosure</span><span class="v">{{ 'Required' if publishing.ai_disclosure_required else 'Not required' }}</span></div>
+      <div class="cs-fr"><span class="k">Platforms</span><span class="v">{{ publishing.enabled_platforms | map("friendly_platform") | join(", ") or "—" }}</span></div>
+      <div class="cs-fr"><span class="k">AI disclosure</span><span class="v">{{ 'Added automatically' if publishing.ai_disclosure_required else 'Not required' }}</span></div>
       <div class="cs-fr"><span class="k">Auto captions</span><span class="v">{{ 'Yes' if publishing.auto_captions else 'No' }}</span></div>
       <div style="display:flex; gap:8px; margin-top:10px;">
         <a href="/channel/{{ channel.channel_id }}/publishing?scope={{ channel.channel_id }}" class="btn btn-primary">{{ icon('plug') }} Connect platforms</a>
@@ -64,36 +64,35 @@
     </div>
 
     <div class="card {{ 'is-good' if grant and grant.active else 'is-warn' }}">
-      <div class="card-title">Operating Grant</div>
+      <div class="card-title">Payment authorization</div>
       {% if grant and grant.active %}
-      <div class="cs-fr"><span class="k">Status</span><span class="v" style="color:var(--good);">active · {{ grant.days_left }}d left</span></div>
-      <div class="cs-fr"><span class="k">Weekly ceiling</span><span class="v">${{ grant.weekly_exposure_ceiling_usd }}</span></div>
+      <div class="cs-fr"><span class="k">Status</span><span class="v" style="color:var(--good);">signed · {{ grant.days_left | round | int }} days left</span></div>
+      <div class="cs-fr"><span class="k">Weekly limit</span><span class="v">{{ grant.weekly_exposure_ceiling_usd | friendly_money }}</span></div>
       {% if grant.ceiling_matches_config is false %}
-      <div class="cs-fr"><span class="k">Note</span><span class="v miss">ceiling ≠ current budget — re-sign</span></div>
+      <div class="cs-fr"><span class="k">Note</span><span class="v miss">limit no longer matches the budget — re-sign</span></div>
       {% endif %}
       {% else %}
-      <div class="cs-fr"><span class="k">Status</span><span class="v miss">not signed — autonomous production is blocked</span></div>
+      <div class="cs-fr"><span class="k">Status</span><span class="v miss">not signed — this channel can't produce on its own</span></div>
       {% endif %}
       <p style="font-size:11.5px; color:var(--muted); margin:8px 0 0; line-height:1.5;">
-        Authorizes the daily scheduler to produce for this channel without
-        per-episode approval, up to the weekly budget.
+        Lets Cortex produce for this channel every day without asking you each time, up to the weekly limit.
       </p>
       {% if grant_dashboard_signing %}
       <a href="/channel/{{ channel.channel_id }}/operating-grant?scope={{ channel.channel_id }}" class="btn btn-primary" style="margin-top:10px;">
-        {{ icon('lock') }} {{ 'Re-sign grant' if grant and grant.active else 'Sign grant' }}
+        {{ icon('lock') }} {{ 'Re-sign' if grant and grant.active else 'Sign now' }}
       </a>
       {% else %}
-      <a href="/channel/{{ channel.channel_id }}/operating-grant?scope={{ channel.channel_id }}" class="btn" style="margin-top:10px;">Signing instructions →</a>
+      <a href="/channel/{{ channel.channel_id }}/operating-grant?scope={{ channel.channel_id }}" class="btn" style="margin-top:10px;">How to sign →</a>
       {% endif %}
     </div>
 
     <div class="card">
       <div class="card-title">Production plan</div>
       {% if ops %}
-      <div class="cs-fr"><span class="k">Cadence</span><span class="v">{{ ops.production_cadence.get('videos_per_week', 0) }} video/wk · {{ ops.production_cadence.get('shorts_per_week', 0) }} short/wk</span></div>
-      <div class="cs-fr"><span class="k">Per-episode ceiling</span><span class="v">${{ ops.cost_ceiling_usd_per_episode or '—' }}</span></div>
-      <div class="cs-fr"><span class="k">Weekly budget</span><span class="v">${{ ops.weekly_video_budget_usd or '—' }}</span></div>
-      <div class="cs-fr"><span class="k">Operator</span><span class="v {{ 'miss' if not ops.operator_enabled }}">{{ 'Enabled' if ops.operator_enabled else 'Off' }}</span></div>
+      <div class="cs-fr"><span class="k">Cadence</span><span class="v">{% set _sw = ops.production_cadence.get('shorts_per_week', 0) %}{% set _vw = ops.production_cadence.get('videos_per_week', 0) %}{% if _vw %}{{ _vw }} long video{{ 's' if _vw != 1 }} + {% endif %}{{ _sw }} short{{ 's' if _sw != 1 }} a week</span></div>
+      <div class="cs-fr"><span class="k">Cap per episode</span><span class="v">{{ ops.cost_ceiling_usd_per_episode | friendly_money if ops.cost_ceiling_usd_per_episode else "—" }}</span></div>
+      <div class="cs-fr"><span class="k">Weekly budget</span><span class="v">{{ ops.weekly_video_budget_usd | friendly_money if ops.weekly_video_budget_usd else "—" }}</span></div>
+      <div class="cs-fr"><span class="k">Runs on its own</span><span class="v {{ 'miss' if not ops.operator_enabled }}">{{ 'Yes' if ops.operator_enabled else 'No' }}</span></div>
       <div class="cs-fr"><span class="k">Timezone</span><span class="v">{{ ops.timezone or '—' }}</span></div>
       <a href="/channel/{{ channel.channel_id }}/operations" class="btn" style="margin-top:10px;">{{ icon('pencil') }} Edit production plan</a>
       {% else %}<p class="page-meta">No operations profile.</p>{% endif %}

@@ -91,3 +91,69 @@ def test_price_view_never_billed_falls_back_to_listed(db_path):
 
 def test_never_raises_on_bad_db(tmp_path):
     assert mep.effective_prices(db_path=tmp_path / "nonexistent.db") == {}
+
+
+# --- episode_billed_spend --------------------------------------------------
+
+def _ep_gc(conn, key, reserved, charged, state="committed"):
+    conn.execute(
+        f"INSERT INTO run_authorization_grant_consumption ({_GC_COLS}) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (f"r_{key}", "g", 1, "muapi", "wan2.7-text-to-video", "video.text_to_video",
+         key, f"env_{key}", f"auth_{key}", reserved, charged, state,
+         "2026-09-03T00:00:00+00:00", "2026-09-03T00:00:00+00:00"),
+    )
+
+
+@pytest.fixture()
+def billed_db(tmp_path):
+    p = tmp_path / "b.db"
+    initialize_schema(p)
+    conn = get_connection(p)
+    try:
+        from hypogeum.authorization_store import ensure_tables
+        ensure_tables(conn)
+        for ep in ("ep_new", "ep_old"):
+            conn.execute("INSERT INTO episodes (episode_id, created_at) VALUES (?, '2026-09-03T00:00:00+00:00')", (ep,))
+            conn.execute("INSERT INTO runs (run_id, episode_id, started_at) VALUES (?, ?, '2026-09-03T00:00:00+00:00')", (f"run_{ep}", ep))
+        # ep_new: grant ledger present (video $9.75 + a released row that must be ignored)
+        for i in range(15):
+            _ep_gc(conn, f"ep_new:s{i:02d}", "0.10", "0.65")
+        _ep_gc(conn, "ep_new:void", "0.65", "0.65", state="released")
+        # ep_new also has a partial costs row that must NOT be added on top
+        conn.execute(
+            "INSERT INTO costs (cost_id, run_id, episode_id, provider, model, call_type, "
+            "tokens_or_credits, cost_usd, called_at, metadata_version) "
+            "VALUES ('cn', 'run_ep_new', 'ep_new', 'openrouter', 'x', 'text', 1, 2.00, "
+            "'2026-09-03T00:00:00+00:00', 'v1')",
+        )
+        # ep_old: no grant rows, only the costs ledger
+        conn.execute(
+            "INSERT INTO costs (cost_id, run_id, episode_id, provider, model, call_type, "
+            "tokens_or_credits, cost_usd, called_at, metadata_version) "
+            "VALUES ('co', 'run_ep_old', 'ep_old', 'openrouter', 'x', 'text', 1, 7.27, "
+            "'2026-08-20T00:00:00+00:00', 'v1')",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return p
+
+
+def test_episode_billed_prefers_complete_grant_ledger(billed_db):
+    out = mep.episode_billed_spend(db_path=billed_db)
+    assert out["ep_new"] == pytest.approx(9.75)  # 15 * 0.65, released row + costs row excluded
+
+
+def test_episode_billed_falls_back_to_costs_for_old_episode(billed_db):
+    out = mep.episode_billed_spend(db_path=billed_db)
+    assert out["ep_old"] == pytest.approx(7.27)
+
+
+def test_episode_billed_filters_by_requested_ids(billed_db):
+    out = mep.episode_billed_spend(db_path=billed_db, episode_ids=["ep_old"])
+    assert set(out) == {"ep_old"}
+
+
+def test_episode_billed_never_raises(tmp_path):
+    assert mep.episode_billed_spend(db_path=tmp_path / "nope.db") == {}

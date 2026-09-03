@@ -104,6 +104,20 @@ def list_runs(
                 d.get("status") in ("failed", "cancelled")
                 and (d.get("episode_status") or "") in ("complete", "completed", "published")
             )
+        # costs.cost_usd (per run) carries no MUAPI spend. Expose the full
+        # per-EPISODE bill as a separate field — a run row can't be split
+        # out of the episode-level grant ledger, so this is "episode billed
+        # to date", not this run's slice.
+        try:
+            from hypogeum.model_effective_pricing import episode_billed_spend
+            billed = episode_billed_spend(
+                db_path=_db(db_path),
+                episode_ids=[d["episode_id"] for d in out if d.get("episode_id")],
+            )
+            for d in out:
+                d["episode_billed_usd"] = billed.get(d.get("episode_id"))
+        except Exception:
+            pass
         return out
     except Exception:
         return []
@@ -273,7 +287,24 @@ def list_episodes(
             """, params).fetchall()
         finally:
             conn.close()
-        return [_row_to_dict(r) for r in rows]
+        out = [_row_to_dict(r) for r in rows]
+        # The joined SUM(costs.cost_usd) omits every MUAPI (video/upscale)
+        # charge — ~80% of a real episode bill. Overlay the complete
+        # per-episode spend from the grant-consumption ledger.
+        try:
+            from hypogeum.model_effective_pricing import episode_billed_spend
+            billed = episode_billed_spend(
+                db_path=_db(db_path),
+                episode_ids=[e["episode_id"] for e in out if e.get("episode_id")],
+            )
+            for e in out:
+                b = billed.get(e.get("episode_id"))
+                if b is not None:
+                    e["total_cost_usd"] = b
+                e["cost_basis"] = "billed" if b is not None else "partial"
+        except Exception:
+            pass
+        return out
     except Exception:
         return []
 

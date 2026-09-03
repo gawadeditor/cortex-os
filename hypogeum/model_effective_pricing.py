@@ -136,6 +136,78 @@ def _accum(out, charges, model, raw_amount, at, source):  # noqa: ANN001
         s.last_charged_at = str(at)
 
 
+# states in run_authorization_grant_consumption that never represent real spend
+_NON_SPEND_STATES = ("released", "voided", "refunded", "cancelled", "reserved")
+
+
+def episode_billed_spend(
+    *, db_path: Optional[Path] = None,
+    episode_ids: Optional[list[str]] = None,
+) -> dict[str, float]:
+    """{episode_id: total_usd} — what each episode ACTUALLY cost, all providers.
+
+    The `costs` table only ever recorded the pre-authorization LLM + audio
+    calls; it has never held a single MUAPI (video / upscale) charge, so a
+    dashboard that sums `costs` shows ~20% of a real episode bill (observed
+    2026-09-03: Baby Owl $2.10 shown vs $11.50 billed). For any episode that
+    went through the ADR-016 grant path, run_authorization_grant_consumption
+    is the complete ledger (elevenlabs + muapi + openrouter + perplexity);
+    fall back to the `costs` sum only for older episodes with no grant rows.
+
+    Keyed off the `ep_<id>:<...>` prefix both ledgers use. Never raises."""
+    out: dict[str, float] = {}
+    try:
+        from hypogeum.db import get_connection
+        conn = get_connection(Path(db_path) if db_path else None)
+        try:
+            want = set(episode_ids) if episode_ids else None
+            state_filter = ",".join("?" for _ in _NON_SPEND_STATES)
+            grant_rows = conn.execute(
+                f"""
+                SELECT idempotency_key, charged_amount, reserved_amount
+                FROM run_authorization_grant_consumption
+                WHERE idempotency_key LIKE 'ep\\_%' ESCAPE '\\'
+                  AND COALESCE(state, '') NOT IN ({state_filter})
+                """,
+                _NON_SPEND_STATES,
+            ).fetchall()
+            has_grant: set[str] = set()
+            for r in grant_rows:
+                ep = str(r["idempotency_key"]).split(":", 1)[0]
+                if want is not None and ep not in want:
+                    continue
+                amt = _num(r["charged_amount"])
+                if amt <= 0:
+                    amt = _num(r["reserved_amount"])
+                out[ep] = out.get(ep, 0.0) + max(amt, 0.0)
+                has_grant.add(ep)
+
+            cost_rows = conn.execute(
+                "SELECT episode_id, COALESCE(SUM(cost_usd), 0.0) AS s "
+                "FROM costs WHERE episode_id IS NOT NULL GROUP BY episode_id"
+            ).fetchall()
+            for r in cost_rows:
+                ep = r["episode_id"]
+                if want is not None and ep not in want:
+                    continue
+                if ep in has_grant:
+                    continue  # grant ledger is authoritative + complete
+                out[ep] = out.get(ep, 0.0) + _num(r["s"])
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001
+        log.warn("episode_billed_spend_failed", error=str(exc))
+        return out
+    return {k: round(v, 4) for k, v in out.items()}
+
+
+def _num(x) -> float:  # noqa: ANN001
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def effective_price(model_id: str, *, db_path: Optional[Path] = None) -> Optional[float]:
     """The representative per-call charge for `model_id`, or None if it has
     never been billed. Never raises."""

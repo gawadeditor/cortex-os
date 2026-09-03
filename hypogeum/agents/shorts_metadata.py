@@ -125,6 +125,14 @@ repeat the on-screen text_overlays verbatim as a bullet list. Captions must be
 distinct from each other and from any other Short's caption. Never output a
 caption equal to its own short_id, and never output an empty caption.
 
+If "channel_context" is present, the channel is brand-new with no name
+recognition. End every caption with 3-6 broad, high-search-volume hashtags
+for the channel's GENERIC CATEGORY / FORMAT / AUDIENCE (from channel_context
+genre/format/audience) -- the tags a stranger would search, e.g.
+#bedtimestories #kidsvideo #sleepstory #bedtimestory for a bedtime-cartoon
+channel -- NOT episode-specific tokens. Keep the rest of the caption grounded
+only in this Short's own content.
+
 Return ONLY a JSON object of this exact shape, one entry per input Short, using
 each Short's own short_id unchanged:
 {{"captions": [{{"short_id": "...", "caption": "..."}}, ...]}}"""
@@ -337,11 +345,25 @@ def generate_shorts_captions(
     if len(set(requested_ids)) != len(requested_ids):
         raise ShortsMetadataError(f"shorts_scripts contains duplicate short_id(s): {requested_ids}")
 
+    _payload = {"shorts": input_shorts}
+    try:
+        from hypogeum.channel_creative_brief import channel_brief_for  # noqa: PLC0415
+        _brief = channel_brief_for(channel_id) if channel_id else {}
+        if _brief:
+            _payload["channel_context"] = {
+                "genre": _brief.get("genre") or "",
+                "format": _brief.get("format") or "",
+                "audience": _brief.get("audience") or "",
+                "brand_is_unknown": True,
+            }
+    except Exception:  # noqa: BLE001
+        pass
+
     call = llm_call or _default_caption_llm_call
     try:
         response = call(
             _CAPTION_SYSTEM_PROMPT.format(rules=json.dumps(rules)),
-            {"shorts": input_shorts},
+            _payload,
             config=config, episode_id=episode_id, channel_id=channel_id,
         )
     except Exception as exc:

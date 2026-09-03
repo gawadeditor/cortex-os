@@ -75,6 +75,15 @@ You will receive a JSON object with:
       for this exact deliverable. You may summarize, rephrase, and add a CTA
       and hashtags, but you must NEVER introduce a fact, name, date, claim,
       or number that is not already present in grounding_text.
+  "channel_context" (may be absent): the channel's genre, format, audience and
+      content pillars. When present, "brand_is_unknown" is true -- treat the
+      channel as brand-new with ZERO name recognition. Almost all discovery
+      will come from people searching the GENERIC CATEGORY, FORMAT and
+      AUDIENCE -- e.g. "bedtime story", "bedtime stories for kids", "sleep
+      story for children", "kids bedtime cartoon", "calm bedtime story" for a
+      bedtime-cartoon channel; "true crime documentary", "unsolved mystery"
+      for a mystery channel. These broad, high-search-volume phrases are how
+      a new channel gets found -- NOT the episode's specific proper nouns.
   "sources": a list of {{"title", "url"}} objects -- real, verified sources for
       this episode. You may reference these in a CTA or description, but you
       must NEVER invent a different source or URL.
@@ -94,12 +103,24 @@ For EACH requested platform, produce:
       return byte-identical text across two different platforms.
   "visible_hashtags": a list of hashtags (each starting with '#', no spaces)
       that you have ALSO embedded, as complete tokens, inside "description"
-      itself. 3 to 8 hashtags, relevant to the deliverable's actual content.
+      itself. 3 to 8 hashtags. When channel_context is present, AT LEAST HALF
+      of them must be broad category/format/audience hashtags a stranger
+      would search (e.g. #bedtimestories #kidsvideo #sleepstory), not
+      episode-specific tokens.
   "backend_tags": ONLY for platforms where backend_tags_supported is true
       below -- a list of 8 to 17 lowercase search-intent phrases (never
       hashtags, never overlapping with visible_hashtags), each under 100
       characters, combined length under 500 characters. Omit entirely for
       a platform where backend_tags_supported is false.
+      When channel_context is present, AT LEAST 6 of these tags MUST be
+      broad, high-search-volume category / format / audience phrases derived
+      from channel_context (genre, format, audience) -- the terms a viewer
+      who has never heard of this channel would actually type. Order them
+      broadest-first. The remaining tags may be episode-specific. Include
+      natural variants and plurals of the core category phrase (e.g.
+      "bedtime story", "bedtime stories", "bedtime stories for kids",
+      "kids bedtime story", "sleep story for kids"). NEVER fill the list
+      with only episode proper nouns.
   "cta": one sentence encouraging engagement (subscribe/comment/share),
       grounded only in this deliverable's own content.
   "first_comment": ONLY for platforms where first_comment_supported is true
@@ -593,12 +614,36 @@ def generate_canonical_platform_metadata_for_deliverable(
     base_system_prompt = _SYSTEM_PROMPT.format(
         platform_rules=json.dumps(platform_rules, indent=2), youtube_title_limit=100,
     )
+
+    # Channel discovery context — genre/format/audience the tags must lean on.
+    # A new channel has no name recognition, so discovery comes almost entirely
+    # from generic category/format/audience search, not from episode specifics.
+    channel_context = None
+    try:
+        from hypogeum.channel_creative_brief import channel_brief_for  # noqa: PLC0415
+        _brief = channel_brief_for(channel_id) if channel_id else {}
+        if _brief:
+            channel_context = {
+                "channel_name": _brief.get("channel_name") or "",
+                "genre": _brief.get("genre") or "",
+                "format": _brief.get("format") or "",
+                "audience": _brief.get("audience") or "",
+                "language": _brief.get("language") or "en",
+                "content_pillars": _brief.get("content_pillars") or [],
+                "brand_is_unknown": True,
+            }
+    except Exception as exc:  # noqa: BLE001
+        log.warn("canonical_metadata_channel_context_unavailable",
+                 deliverable_id=deliverable_id, error=str(exc))
+
     input_package = {
         "deliverable_class": deliverable_class,
         "grounding_text": grounding_text,
         "sources": sources,
         "platforms": target_platforms,
     }
+    if channel_context:
+        input_package["channel_context"] = channel_context
     call = llm_call or _default_llm_call
     now_iso = datetime.now(timezone.utc).isoformat()
 

@@ -1359,9 +1359,50 @@ def get_active_signals(db_path: Optional[Path] = None) -> list:
                 WHERE lifecycle_status = 'open'
                 ORDER BY ingested_at DESC
             """).fetchall()
+            # episode_ids that were recovered / abandoned — their old
+            # run_failed signals are archaeology, not an operator task.
+            # Keyed straight off runs/topics: a failed early run often has
+            # no episodes row at all.
+            resolved_eps: set = set()
+            for q in (
+                "SELECT episode_id FROM episodes WHERE COALESCE(status,'') = 'superseded'",
+                "SELECT episode_id FROM runs WHERE status IN ('complete','completed')",
+                "SELECT episode_id FROM episode_topics WHERE status IN ('cancelled','skipped') AND episode_id IS NOT NULL",
+            ):
+                try:
+                    resolved_eps.update(r[0] for r in conn.execute(q).fetchall() if r[0])
+                except Exception:  # noqa: BLE001
+                    pass
+            # a failed run whose episode_id no longer maps to any live topic
+            # or queue item is also done-with (the operator moved on)
+            try:
+                live_eps = {
+                    r[0] for r in conn.execute("""
+                        SELECT episode_id FROM episode_topics
+                        WHERE status IN ('queued','claimed') AND episode_id IS NOT NULL
+                        UNION
+                        SELECT episode_id FROM run_queue
+                        WHERE status IN ('queued','claimed','running') AND episode_id IS NOT NULL
+                        UNION
+                        SELECT episode_id FROM runs WHERE status = 'running'
+                    """).fetchall() if r[0]
+                }
+                failed_eps = {
+                    r[0] for r in conn.execute(
+                        "SELECT DISTINCT episode_id FROM runs WHERE status IN ('failed','error') AND episode_id IS NOT NULL"
+                    ).fetchall() if r[0]
+                }
+                resolved_eps.update(failed_eps - live_eps)
+            except Exception:  # noqa: BLE001
+                pass
         finally:
             conn.close()
+
+        from datetime import datetime, timedelta, timezone
+        stale_before = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+
         result = []
+        seen_dedup: set = set()
         for r in rows:
             d = dict(r)
             try:
@@ -1371,6 +1412,21 @@ def get_active_signals(db_path: Optional[Path] = None) -> list:
                 d.pop("full_record", None)
                 d["message"] = ""
             d["created_at"] = d.pop("ingested_at", None)
+
+            if not d.get("blocking"):
+                # non-blocking noise controls — a blocking signal always shows
+                if d.get("episode_id") and d["episode_id"] in resolved_eps:
+                    continue
+                # collapse a signal type that re-emits every health sweep
+                # (stuck_run, retry_exhausted) to its most recent instance
+                key = (d.get("signal_type"), d.get("episode_id") or d.get("channel_id"))
+                if d.get("signal_type") in ("stuck_run", "retry_exhausted"):
+                    if key in seen_dedup:
+                        continue
+                    seen_dedup.add(key)
+                # drop anything non-blocking that's gone quiet for a day
+                if d.get("created_at") and d["created_at"] < stale_before:
+                    continue
             result.append(d)
         return result
     except Exception:

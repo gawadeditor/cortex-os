@@ -212,6 +212,8 @@ def populated_db(db_path):
     # Signal records (one blocking, one non-blocking, one resolved)
     # message is stored inside full_record JSON; created_at maps to ingested_at
     import json as _json
+    from datetime import datetime, timezone
+    _recent = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     conn.executemany(
         """INSERT INTO signal_records
                (signal_id, episode_id, run_id, ingested_at, window_days,
@@ -220,12 +222,12 @@ def populated_db(db_path):
                 source_system, blocking, lifecycle_status)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         [
-            ("sig_block", "sys", "r_sys", "2026-01-04T00:00:00", 0,
+            ("sig_block", "sys", "r_sys", _recent, 0,
              "ok", "v1",
              "budget_exhausted", "CRITICAL",
              _json.dumps({"message": "Budget ceiling hit"}),
              "finance_agent", 1, "open"),
-            ("sig_info", "sys", "r_sys", "2026-01-04T00:01:00", 0,
+            ("sig_info", "sys", "r_sys", _recent, 0,
              "ok", "v1",
              "run_completed", "INFO",
              _json.dumps({"message": "Run finished"}),

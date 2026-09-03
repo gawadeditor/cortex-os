@@ -135,6 +135,28 @@ def _analytics_key_channel_map(conn) -> dict:
     return out
 
 
+def _episode_title_map(conn, episode_ids: set) -> dict:
+    """{episode_id: best human title} for a set of ids. Never raises."""
+    if not episode_ids:
+        return {}
+    out: dict = {}
+    ph = ",".join("?" * len(episode_ids))
+    ids = list(episode_ids)
+    for sql in (
+        f"SELECT episode_id, title_text FROM titles WHERE selected = 1 AND episode_id IN ({ph})",
+        f"SELECT episode_id, title FROM episodes WHERE title IS NOT NULL AND episode_id IN ({ph})",
+        f"SELECT episode_id, topic FROM episodes WHERE topic IS NOT NULL AND episode_id IN ({ph})",
+        f"SELECT episode_id, topic_text FROM episode_topics WHERE topic_text IS NOT NULL AND episode_id IN ({ph})",
+    ):
+        try:
+            for r in conn.execute(sql, ids):
+                if r[0] not in out and r[1]:
+                    out[r[0]] = r[1]
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
 def get_analytics_overview(db_path: Optional[Path] = None,
                            channel_id: Optional[str] = None) -> dict:
     """
@@ -235,30 +257,35 @@ def _channel_scoped_overview(conn, channel_id: str) -> dict:
     for r in rows:
         latest.setdefault((r["episode_id"], r["platform"]), r)
 
+    titles = _episode_title_map(conn, {k for k, _ in latest})
+
+    # Key names mirror v_platform_kpis / v_episode_performance exactly — the
+    # analytics.html template reads `episodes_tracked` / `avg_view_pct` /
+    # `platforms_tracked`, and the factory-wide path already returns those.
     platform_breakdown: dict = {}
     episodes: dict = {}
     for (key, plat), r in latest.items():
         pb = platform_breakdown.setdefault(plat, {
-            "platform": plat, "episode_count": 0, "total_views": 0,
-            "avg_ctr": None, "avg_retention": None})
-        pb["episode_count"] += 1
+            "platform": plat, "episodes_tracked": 0, "total_views": 0,
+            "avg_ctr": None, "avg_view_pct": None})
+        pb["episodes_tracked"] += 1
         pb["total_views"] += r["views"] or 0
         _ctrs = [x for x in (pb.get("_ctrs") or []) + [r["ctr"]] if x is not None]
         _rets = [x for x in (pb.get("_rets") or []) + [r["avg_view_pct"]] if x is not None]
         pb["_ctrs"], pb["_rets"] = _ctrs, _rets
         pb["avg_ctr"] = round(sum(_ctrs) / len(_ctrs), 4) if _ctrs else None
-        pb["avg_retention"] = round(sum(_rets) / len(_rets), 4) if _rets else None
+        pb["avg_view_pct"] = round(sum(_rets) / len(_rets), 4) if _rets else None
 
         ep = episodes.setdefault(key, {
-            "episode_id": key, "episode_title": key, "platforms": 0,
-            "total_views": 0, "avg_ctr": None, "avg_retention": None,
-            "insight_count": 0})
-        ep["platforms"] += 1
+            "episode_id": key, "episode_title": titles.get(key) or key,
+            "platforms_tracked": 0, "total_views": 0,
+            "avg_ctr": None, "avg_view_pct": None, "insight_count": 0})
+        ep["platforms_tracked"] += 1
         ep["total_views"] += r["views"] or 0
         if r["ctr"] is not None:
             ep["avg_ctr"] = r["ctr"]
         if r["avg_view_pct"] is not None:
-            ep["avg_retention"] = r["avg_view_pct"]
+            ep["avg_view_pct"] = r["avg_view_pct"]
 
     for pb in platform_breakdown.values():
         pb.pop("_ctrs", None)

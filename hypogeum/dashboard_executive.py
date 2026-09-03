@@ -446,10 +446,18 @@ def _load_current_episode_title(conn, result: dict) -> None:
         ep_row = conn.execute(
             "SELECT title, topic FROM episodes WHERE episode_id = ?", [ep_id]
         ).fetchone()
-        if ep_row:
-            result["production"]["display_title"] = (
-                ep_row["title"] or ep_row["topic"] or ep_id
-            )
+        if ep_row and (ep_row["title"] or ep_row["topic"]):
+            result["production"]["display_title"] = ep_row["title"] or ep_row["topic"]
+            return
+        # Early in a run the `episodes` row may not exist yet — the topic
+        # text is there from the moment the item was claimed.
+        topic_row = conn.execute(
+            "SELECT topic_text FROM episode_topics WHERE episode_id = ? "
+            "AND topic_text IS NOT NULL AND topic_text != '' LIMIT 1",
+            [ep_id],
+        ).fetchone()
+        if topic_row:
+            result["production"]["display_title"] = topic_row["topic_text"]
     except Exception:
         pass
 

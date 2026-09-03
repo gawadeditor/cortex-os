@@ -213,17 +213,34 @@ def _gate_credentials(channel_id: str, db_path: Path) -> GateResult:
         return GateResult("credentials", False, f"Error checking credentials: {exc}")
 
 
-def _gate_budget(config) -> GateResult:
-    """Gate 4: budget ceiling must be > 0."""
-    if config is None:
-        # No config provided — try to load from environment
-        try:
-            from hypogeum.config import Config
-            config = Config()
-        except Exception as exc:
-            return GateResult("budget", False, f"Could not load config: {exc}")
+def _gate_budget(config, channel_id: Optional[str] = None,
+                 db_path: Optional[Path] = None) -> GateResult:
+    """Gate 4: a per-episode spend limit must be set (> 0).
 
-    ceiling = getattr(config, "FINANCE_BUDGET_CEILING_USD", 0.0) or 0.0
+    Prefer THIS channel's own configured cap over the factory-wide env
+    default so the readiness panel shows the number that actually applies.
+    """
+    ceiling = 0.0
+    # 1. the channel's own per-episode cap
+    if channel_id:
+        try:
+            from hypogeum.channel_config import get_channel_operations_profile
+            _p = get_channel_operations_profile(channel_id, db_path=db_path)
+            _c = getattr(_p, "cost_ceiling_usd_per_episode", None) if _p else None
+            if isinstance(_c, (int, float)) and _c > 0:
+                ceiling = float(_c)
+        except Exception:  # noqa: BLE001
+            pass
+    # 2. fall back to the factory-wide env default
+    if ceiling <= 0:
+        if config is None:
+            try:
+                from hypogeum.config import Config
+                config = Config()
+            except Exception as exc:
+                return GateResult("budget", False, f"Could not load config: {exc}")
+        ceiling = getattr(config, "FINANCE_BUDGET_CEILING_USD", 0.0) or 0.0
+
     if ceiling > 0:
         return GateResult("budget", True, f"Per-episode spend limit set: ${ceiling:.2f}.")
     return GateResult(
@@ -255,7 +272,7 @@ def _run_gates(
         _gate_channel_exists(channel_id, db_path),
         _gate_profile_complete(channel_id, db_path),
         _gate_credentials(channel_id, db_path),
-        _gate_budget(config),
+        _gate_budget(config, channel_id, db_path),
         _gate_ois_clear(channel_id, db_path),
     ]
 

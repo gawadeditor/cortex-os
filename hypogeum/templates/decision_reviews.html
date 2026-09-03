@@ -118,7 +118,7 @@
     </div>
     <div class="rev-recommendation">{{ r.recommendation }}</div>
     {%- if r.evidence %}
-    <div class="rev-evidence">{{ r.evidence | join('\n') }}</div>
+    <div class="rev-evidence">{% for e in r.evidence %}{{ e | plain_evidence }}{% if not loop.last %}<br>{% endif %}{% endfor %}</div>
     {%- endif %}
     <div class="rev-meta">
       <span>
@@ -159,7 +159,7 @@
     </div>
     <div class="rev-recommendation" style="color:var(--muted);">{{ r.recommendation }}</div>
     {%- if r.evidence %}
-    <div class="rev-evidence">{{ r.evidence | join('\n') }}</div>
+    <div class="rev-evidence">{% for e in r.evidence %}{{ e | plain_evidence }}{% if not loop.last %}<br>{% endif %}{% endfor %}</div>
     {%- endif %}
     <div class="rev-meta">
       <span>reviewed {{ r.reviewed_at[:10] if r.reviewed_at else '—' }}</span>

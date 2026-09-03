@@ -105,14 +105,13 @@
       {% for e in episodes %}
         <tr>
           <td style="padding:8px; border-bottom:1px solid var(--hairline);">
-            <a href="/archive?episode_id={{ e.episode_id }}" style="font-weight:600; color:var(--text);">{{ e.title }}</a>
-            
+            <a href="/archive?episode_id={{ e.episode_id }}" style="font-weight:600; color:var(--text);">{{ e.title or (e.episode_id | episode_name) }}</a>
           </td>
           <td style="padding:8px; border-bottom:1px solid var(--hairline); color:var(--muted);">{{ e.published_at | friendly_date if e.published_at else "—" }}</td>
           <td style="padding:8px; border-bottom:1px solid var(--hairline);">
             {% if e.state == 'archived' %}
-              <span class="st-src" style="background:var(--good-bg); color:var(--good);">in storage</span>
-              <span style="color:var(--faint); font-size:11px;">{{ e.total }} assets · {{ e.location }}</span>
+              <span class="st-src" style="background:var(--good-bg); color:var(--good);">in cold storage</span>
+              <span style="color:var(--faint); font-size:11px;">{{ e.total }} file{{ 's' if e.total != 1 }}</span>
             {% elif e.state == 'partial' %}
               <span class="st-src" style="background:var(--warn-bg); color:var(--warn);">{{ e.moved }} of {{ e.total }} moved</span>
             {% elif e.state == 'local' %}

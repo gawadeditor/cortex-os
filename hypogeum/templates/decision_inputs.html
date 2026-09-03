@@ -139,13 +139,13 @@
       </span>
     </div>
     <div class="di-card">
-      <div class="di-row"><span class="di-label">Total spend</span><span class="di-val">${{ "%.4f"|format(state.costs.total_cost_usd) }}</span></div>
+      <div class="di-row"><span class="di-label">Total spend</span><span class="di-val">{{ state.costs.total_cost_usd | friendly_money }}</span></div>
       <div class="di-row"><span class="di-label">Episodes costed</span><span class="di-val">{{ state.costs.total_episodes_costed }}</span></div>
       {%- if state.costs.avg_cost_per_episode %}
-      <div class="di-row"><span class="di-label">Avg / episode</span><span class="di-val">${{ "%.4f"|format(state.costs.avg_cost_per_episode) }}</span></div>
+      <div class="di-row"><span class="di-label">Avg / episode</span><span class="di-val">{{ state.costs.avg_cost_per_episode | friendly_money }}</span></div>
       {%- endif %}
       {%- for prov, cost in state.costs.by_provider.items() %}
-      <div class="di-row"><span class="di-label">{{ prov }}</span><span class="di-val">${{ "%.4f"|format(cost) }}</span></div>
+      <div class="di-row"><span class="di-label">{{ prov | friendly_provider }}</span><span class="di-val">{{ cost | friendly_money }}</span></div>
       {%- endfor %}
       {%- if not state.costs.has_data %}
       <div class="no-data">No cost records yet</div>
@@ -165,7 +165,7 @@
       <div class="di-row"><span class="di-label">Total outcomes</span><span class="di-val">{{ state.publishing.total_outcomes }}</span></div>
       <div class="di-row"><span class="di-label">Successful</span><span class="di-val ok">{{ state.publishing.successful }}</span></div>
       {%- for platform, cnt in state.publishing.by_platform.items() %}
-      <div class="di-row"><span class="di-label">{{ platform }}</span><span class="di-val">{{ cnt }}</span></div>
+      <div class="di-row"><span class="di-label">{{ platform | friendly_platform }}</span><span class="di-val">{{ cnt }}</span></div>
       {%- endfor %}
       {%- if not state.publishing.has_data %}
       <div class="no-data">No publishing outcomes recorded yet</div>
@@ -186,7 +186,7 @@
       <div class="di-row"><span class="di-label">Mock/demo snapshots</span><span class="di-val warn">{{ state.audience.mock_snapshots }}</span></div>
       {%- for platform, counts in state.audience.by_platform.items() %}
       <div class="di-row">
-        <span class="di-label">{{ platform }}</span>
+        <span class="di-label">{{ platform | friendly_platform }}</span>
         <span class="di-val">{{ counts.real }} real · {{ counts.mock }} mock</span>
       </div>
       {%- endfor %}

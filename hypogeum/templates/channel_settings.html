@@ -31,7 +31,7 @@
       <div class="cs-fr"><span class="k">Tone</span><span class="v">{{ brand.tone or '—' }}</span></div>
       <div class="cs-fr"><span class="k">Audience</span><span class="v">{{ brand.target_audience or '—' }}</span></div>
       <div class="cs-fr"><span class="k">Visual style</span><span class="v">{{ brand.visual_style or '—' }}</span></div>
-      <div class="cs-fr"><span class="k">Language</span><span class="v">{{ brand.language or '—' }}</span></div>
+      <div class="cs-fr"><span class="k">Language</span><span class="v">{{ {'en':'English','es':'Spanish','fr':'French','de':'German','pt':'Portuguese','ar':'Arabic'}.get(brand.language, brand.language) or '—' }}</span></div>
       <a href="/brand/{{ channel.brand_profile_id }}/edit" class="btn" style="margin-top:10px;">{{ icon('pencil') }} Edit brand</a>
       {% else %}<p class="page-meta">No brand profile.</p>{% endif %}
     </div>
@@ -39,12 +39,12 @@
     <div class="card">
       <div class="card-title">Creative tools &amp; voice</div>
       {% if model %}
-      <div class="cs-fr"><span class="k">Writing model</span><span class="v mono">{{ model.episode_producer or '—' }}</span></div>
-      <div class="cs-fr"><span class="k">Research model</span><span class="v mono">{{ model.research_director or '—' }}</span></div>
-      <div class="cs-fr"><span class="k">Narration voice</span><span class="v mono">{{ model.narration_voice_id or '—' }}</span></div>
-      <div class="cs-fr"><span class="k">Image / video tools</span><span class="v mono">{{ model.image_provider or '—' }} / {{ model.video_provider or '—' }}</span></div>
-      <div class="cs-fr"><span class="k">Video model</span><span class="v mono">{{ model.video_model or 'Cortex default' }}{% if model.video_model and model.video_model_price_usd %} · {{ model.video_model_price_usd | friendly_money }}/clip{% endif %}</span></div>
-      <div class="cs-fr"><span class="k">Image-to-video model</span><span class="v mono">{{ model.video_i2v_model or 'Cortex default' }}{% if model.video_i2v_model and model.video_i2v_model_price_usd %} · {{ model.video_i2v_model_price_usd | friendly_money }}/clip{% endif %}</span></div>
+      <div class="cs-fr"><span class="k">Writing model</span><span class="v">{{ model.episode_producer | friendly_model }}</span></div>
+      <div class="cs-fr"><span class="k">Research model</span><span class="v">{{ model.research_director | friendly_model }}</span></div>
+      <div class="cs-fr"><span class="k">Narration voice</span><span class="v">{{ 'Custom voice set' if model.narration_voice_id else 'Cortex default' }}</span></div>
+      <div class="cs-fr"><span class="k">Image &amp; video tools</span><span class="v">{{ model.image_provider | friendly_provider }}{% if model.video_provider and model.video_provider != model.image_provider %} · {{ model.video_provider | friendly_provider }}{% endif %}</span></div>
+      <div class="cs-fr"><span class="k">Video model</span><span class="v">{{ (model.video_model | friendly_model) if model.video_model else 'Cortex default' }}{% if model.video_model and model.video_model_price_usd %} · {{ model.video_model_price_usd | friendly_money }}/clip{% endif %}</span></div>
+      <div class="cs-fr"><span class="k">Image-to-video model</span><span class="v">{{ (model.video_i2v_model | friendly_model) if model.video_i2v_model else 'Cortex default' }}{% if model.video_i2v_model and model.video_i2v_model_price_usd %} · {{ model.video_i2v_model_price_usd | friendly_money }}/clip{% endif %}</span></div>
       {% if model.video_model and model.video_model_price_usd %}
       <div class="cs-fr"><span class="k">Video model — actual bill</span>
         <span class="v mono">{{ (model.video_model | model_billed_price) or (model.video_model_price_usd | friendly_money) }}/clip</span></div>

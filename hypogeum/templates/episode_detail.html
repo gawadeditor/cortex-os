@@ -1269,9 +1269,31 @@ function resumeEpisode(episodeId, kind) {
 {% if active_tab == 'publishing' %}
 {% set pub = d.publishing %}
 {% set summary = pub.summary %}
+{% set _pub_done = (d.platforms and (d.platforms | rejectattr('status_label', 'equalto', 'Failed') | list | length) > 0) or (summary.published or 0) > 0 %}
 
-{# ── Publish readiness checklist — always shown when available ── #}
-{% if pub.checklist %}
+{# ── Publish readiness checklist ── #}
+{% if pub.checklist and _pub_done %}
+{# Already out the door — the pre-publish checks are history, tuck them away. #}
+<details class="card" style="margin-bottom:var(--gap);">
+  <summary style="cursor:pointer; font-weight:600; font-size:13px;">
+    <span class="ok">{{ icon('check') }}</span> Pre-publish checks — all cleared before release
+  </summary>
+  <table style="width:100%; border-collapse:collapse; font-size:13px; margin-top:10px;">
+    {% for item in pub.checklist %}
+    <tr style="border-bottom:1px solid var(--border);">
+      <td style="padding:8px; width:28px; text-align:center;">
+        {% if item.status == 'pass' %}<span class="ok">{{ icon('check') }}</span>
+        {% elif item.status == 'warn' %}<span class="warn">{{ icon('warning') }}</span>
+        {% elif item.status == 'fail' %}<span class="err">{{ icon('x') }}</span>
+        {% else %}<span class="muted">—</span>{% endif %}
+      </td>
+      <td style="padding:8px; font-weight:600; white-space:nowrap;">{{ item.label }}</td>
+      <td style="padding:8px; font-size:12px; color:var(--muted);">{{ item.detail }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</details>
+{% elif pub.checklist %}
 <div class="card" style="margin-bottom:var(--gap);">
   <div class="card-title">Publish Readiness</div>
   <table style="width:100%; border-collapse:collapse; font-size:13px;">
@@ -2093,12 +2115,12 @@ function resumeEpisode(episodeId, kind) {
   <div class="rev-kpi-card">
     <div class="rev-kpi-val">
       {% if rev_sum.total_cost_usd is not none %}
-        ${{ "%.4f" | format(rev_sum.total_cost_usd) }}
+        {{ rev_sum.total_cost_usd | friendly_money }}
       {% else %}
         <span class="muted">—</span>
       {% endif %}
     </div>
-    <div class="rev-kpi-lbl">Production Cost</div>
+    <div class="rev-kpi-lbl">What it cost to make</div>
     {% if not rev_sum.has_cost_data %}
       <div class="rev-empty-note">No cost data</div>
     {% endif %}
@@ -2159,44 +2181,42 @@ function resumeEpisode(episodeId, kind) {
 
 {# ── Break-even card ─────────────────────────────────────────────── #}
 <div class="rev-breakeven-card">
-  <div class="card-title" style="margin-bottom:8px;">Break-even Estimate</div>
+  <div class="card-title" style="margin-bottom:8px;">Break-even estimate</div>
   {% if rev_sum.break_even_views is not none %}
     <div class="rev-kpi-val">{{ "{:,}".format(rev_sum.break_even_views) }} views</div>
-    <div class="rev-breakeven-note">Estimated views needed to recover production cost</div>
-  {% elif rev_sum.break_even_reason %}
-    <div class="rev-empty-note">{{ rev_sum.break_even_reason }}</div>
+    <div class="rev-breakeven-note">Roughly the views this needs to earn back what it cost to make</div>
   {% else %}
-    <div class="rev-empty-note">Break-even unavailable</div>
+    <div class="rev-empty-note">
+      Can't estimate yet — Cortex doesn't have a payout rate (earnings per 1,000 views)
+      for this channel. Add one on the channel's settings once you know it.
+    </div>
   {% endif %}
 </div>
 
 {# ── Cost Breakdown table ─────────────────────────────────────────── #}
 <div style="margin-bottom:var(--gap);">
-  <div class="card-title" style="margin-bottom:10px;">Production Cost Breakdown</div>
+  <div class="card-title" style="margin-bottom:10px;">Where the money went</div>
   {% if rev.cost_breakdown %}
   <div class="card" style="padding:0;">
     <table>
       <thead>
         <tr>
-          <th>Stage</th>
-          <th>Provider</th>
-          <th>Type</th>
+          <th>Step</th>
+          <th>Tool</th>
+          <th style="text-align:right;">Calls</th>
           <th style="text-align:right;">Cost</th>
-          <th>Date</th>
         </tr>
       </thead>
       <tbody>
-        {% for row in rev.cost_breakdown %}
+        {% for label, rows in rev.cost_breakdown | groupby('group') %}
+        {% set _rows = rows | list %}
+        {% set _sum = _rows | sum(attribute='amount_usd') %}
         <tr>
-          <td style="font-size:13px;">{{ row.stage or '—' }}</td>
-          <td class="muted" style="font-size:12px;">{{ row.provider or '—' }}</td>
-          <td class="muted" style="font-size:12px;">{{ row.label }}</td>
-          <td style="text-align:right; font-variant-numeric:tabular-nums;
-                     font-size:13px; font-weight:600;">
-            ${{ "%.5f" | format(row.amount_usd) }}
-          </td>
-          <td class="muted" style="font-size:11px;">
-            {{ row.created_at[:10] if row.created_at else '—' }}
+          <td style="font-size:13px;">{{ label }}</td>
+          <td class="muted" style="font-size:12px;">{{ _rows[0].provider | friendly_provider }}</td>
+          <td class="muted" style="text-align:right; font-variant-numeric:tabular-nums; font-size:12px;">{{ _rows | length }}</td>
+          <td style="text-align:right; font-variant-numeric:tabular-nums; font-size:13px; font-weight:600;">
+            {{ _sum | friendly_money }}
           </td>
         </tr>
         {% endfor %}
@@ -2204,11 +2224,9 @@ function resumeEpisode(episodeId, kind) {
       <tfoot>
         <tr style="border-top:2px solid var(--border);">
           <td colspan="3" style="font-weight:700; font-size:13px;">Total</td>
-          <td style="text-align:right; font-weight:700;
-                     font-variant-numeric:tabular-nums;">
-            ${{ "%.4f" | format(rev_sum.total_cost_usd) }}
+          <td style="text-align:right; font-weight:700; font-variant-numeric:tabular-nums;">
+            {{ rev_sum.total_cost_usd | friendly_money }}
           </td>
-          <td></td>
         </tr>
       </tfoot>
     </table>

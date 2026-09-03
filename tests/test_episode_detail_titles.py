@@ -502,7 +502,7 @@ class TestEmptyState:
         conn.close()
         html = _tl_html((c, db_path))
         assert "?tab=production" in html
-        assert "Back to Production" in html
+        assert "Back to production" in html
 
 
 # ===========================================================================

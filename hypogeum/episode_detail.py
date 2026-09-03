@@ -1130,6 +1130,7 @@ def _build_revenue_data(conn, episode_id: str, run_id: Optional[str],
                     "label":      label,
                     "provider":   d.get("provider"),
                     "stage":      stage_display,
+                    "group":      stage_display or label,
                     "amount_usd": round(amount, 6),
                     "created_at": d.get("called_at"),
                 })
@@ -1137,12 +1138,26 @@ def _build_revenue_data(conn, episode_id: str, run_id: Optional[str],
     except Exception:
         pass
 
-    # costs rows are LLM-only — the ROI math needs the full bill (MUAPI too).
+    # costs rows are LLM+audio only — the ROI math needs the full bill (MUAPI
+    # video too). Use the authoritative grant-ledger total, and add one
+    # rolled-up row for the difference so the breakdown still sums to the total.
     try:
         from hypogeum.model_effective_pricing import episode_billed_spend
         _billed = episode_billed_spend(db_path=db_path, episode_ids=[episode_id])
         if episode_id in _billed:
-            total_cost_usd = _billed[episode_id]
+            _line_sum = round(sum(r["amount_usd"] for r in cost_rows), 6)
+            _full = _billed[episode_id]
+            _gap = round(_full - _line_sum, 6)
+            if _gap >= 0.01:
+                cost_rows.append({
+                    "label":      "Video generation & upscaling",
+                    "provider":   "muapi",
+                    "stage":      "Visuals",
+                    "group":      "Video generation & upscaling",
+                    "amount_usd": _gap,
+                    "created_at": None,
+                })
+            total_cost_usd = _full
             has_cost_data = True
     except Exception:
         pass

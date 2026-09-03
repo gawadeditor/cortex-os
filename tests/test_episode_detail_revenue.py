@@ -455,8 +455,8 @@ class TestCostBreakdown:
         _cost(conn, run_id=rid, provider="anthropic", cost_usd=0.01234)
         conn.close()
         html = _rev_html((c, db_path))
-        assert "anthropic" in html
-        assert "Production Cost Breakdown" in html
+        assert "Anthropic" in html
+        assert "Where the money went" in html
 
     def test_cost_label_shown_in_breakdown(self, client):
         c, db_path = client
@@ -467,7 +467,8 @@ class TestCostBreakdown:
               stage_name="thumbnail_director")
         conn.close()
         html = _rev_html((c, db_path))
-        assert "Image Generation" in html
+        # costs are grouped by production step now
+        assert "Visuals" in html
 
     def test_stage_group_name_shown(self, client):
         c, db_path = client
@@ -568,7 +569,7 @@ class TestSummaryCards:
         _ep(conn)
         conn.close()
         html = _rev_html((c, db_path))
-        assert "Production Cost" in html
+        assert "What it cost to make" in html
         assert "No cost data" in html
 
     def test_revenue_card_shows_not_imported_when_no_revenue(self, client):
@@ -609,7 +610,7 @@ class TestSummaryCards:
         conn.close()
         html = _rev_html((c, db_path))
         # cost shown as $0.1234 in summary card
-        assert "0.1234" in html
+        assert "$0.12" in html
 
 
 # ===========================================================================
@@ -624,8 +625,8 @@ class TestBreakEven:
         _ep(conn)
         conn.close()
         html = _rev_html((c, db_path))
-        assert "Break-even unavailable" in html
-        assert "CPM/RPM" in html
+        assert "Can't estimate yet" in html
+        assert "payout rate" in html
 
     def test_break_even_shown_when_rpm_exists(self, client):
         c, db_path = client
@@ -665,7 +666,7 @@ class TestBreakEven:
         conn.commit()
         conn.close()
         html = _rev_html((c, db_path))
-        assert "Break-even unavailable" in html
+        assert "Can't estimate yet" in html
 
 
 # ===========================================================================

@@ -653,15 +653,16 @@
       <div class="ep-kpi-lbl">Time to make</div>
     </div>
     <div class="ep-kpi">
+      {% set _plive = d.platforms | selectattr('status_label', 'equalto', 'Published') | list | length %}
+      {% set _psched = d.platforms | selectattr('status_label', 'equalto', 'Scheduled') | list | length %}
       <div class="ep-kpi-val">
         {% if d.platforms %}
-          {{ d.platforms | selectattr('publishing_status', 'equalto', 'success') | list | length }}
-          / {{ d.platforms | length }}
+          {{ _plive if _plive else _psched }} / {{ d.platforms | length }}
         {% else %}
           <span style="color:var(--muted)">—</span>
         {% endif %}
       </div>
-      <div class="ep-kpi-lbl">Platforms live</div>
+      <div class="ep-kpi-lbl">{{ 'Platforms live' if _plive else ('Platforms scheduled' if _psched else 'Platforms live') }}</div>
     </div>
     <div class="ep-kpi">
       <div class="ep-kpi-val">{{ d.stage_groups | length }}</div>
@@ -706,7 +707,8 @@
   </div>
   <div class="ep-player-bar">
     <div class="epb-meta">
-      {% if d.run_duration_fmt %}<span>Runtime <b>{{ d.run_duration_fmt }}</b></span>{% endif %}
+      {% if _da.get('render_duration_fmt') %}<span>Length <b>{{ _da.render_duration_fmt }}</b></span>
+      {% elif d.run_duration_fmt %}<span>Made in <b>{{ d.run_duration_fmt }}</b></span>{% endif %}
       {% if _da.get('render_size_mb') %}<span><b>{{ _da.render_size_mb }} MB</b></span>{% endif %}
       {% if d.channel_name %}<span>{{ d.channel_name }}</span>{% endif %}
     </div>

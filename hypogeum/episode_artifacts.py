@@ -88,6 +88,29 @@ def get_episode_artifacts(
     has_render  = render_path.exists() and render_path.stat().st_size > 0
     render_size_mb = round(render_path.stat().st_size / 1_048_576, 1) if has_render else 0.0
 
+    # Real finished-video length (seconds) from the render package — NOT the
+    # production wall-clock time. Falls back silently.
+    render_duration_seconds = None
+    _frp = ep_dir / f"final_render_package_{episode_id}.json"
+    if _frp.exists():
+        try:
+            _frp_data = json.loads(_frp.read_text(encoding="utf-8"))
+            for _path in (("episode_render", "duration_seconds"),
+                          ("package_metadata", "render_duration_seconds")):
+                _v = _frp_data
+                for _k in _path:
+                    _v = _v.get(_k) if isinstance(_v, dict) else None
+                if isinstance(_v, (int, float)) and _v > 0:
+                    render_duration_seconds = round(float(_v), 1)
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+    if render_duration_seconds:
+        _m, _s = divmod(int(round(render_duration_seconds)), 60)
+        render_duration_fmt = f"{_m}:{_s:02d}" if _m else f"{_s}s"
+    else:
+        render_duration_fmt = None
+
     # ── Thumbnail ──────────────────────────────────────────────────────────
     thumb_dir = ep_dir / "thumbnails"
     thumb_path = None
@@ -179,6 +202,8 @@ def get_episode_artifacts(
         "display_title":    display_title,
         "has_render":       has_render,
         "render_size_mb":   render_size_mb,
+        "render_duration_seconds": render_duration_seconds,
+        "render_duration_fmt":     render_duration_fmt,
         "has_thumbnail":    has_thumbnail,
         "thumb_ext":        thumb_ext,
         "has_narration":    has_narration,

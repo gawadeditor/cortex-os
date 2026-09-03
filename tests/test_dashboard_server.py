@@ -227,7 +227,7 @@ class TestSections:
         assert "Test Factory" in html
 
     def test_run_health_section(self, html):
-        assert "Run Health" in html
+        assert "Production Overview" in html
 
     def test_director_section(self, html):
         assert "Factory Director" in html

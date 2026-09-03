@@ -631,8 +631,8 @@ class TestFourWayStateInHeader:
              patch.object(server, "get_episode_detail", return_value=None):
             resp = c.get(f"/episode/{ep_id}")
         body = resp.data.decode()
-        # header renders the plain-language production pill (2026-09-03)
-        assert "Made ·" in body
+        # header renders the made -> cleared -> published journey strip
+        assert "ep-journey" in body and ">Made" in body
 
     def test_episode_header_shows_release_status(self, client):
         c, tmp_path = client
@@ -645,7 +645,7 @@ class TestFourWayStateInHeader:
              patch.object(server, "get_episode_detail", return_value=None):
             resp = c.get(f"/episode/{ep_id}")
         body = resp.data.decode()
-        assert "Ready to publish ·" in body
+        assert "ep-journey" in body and ">Cleared" in body
 
     def test_ep003_like_header_shows_tig_blocker(self, client):
         c, tmp_path = client

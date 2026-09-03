@@ -30,7 +30,7 @@ Public API:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Optional
@@ -42,6 +42,15 @@ _DEFAULT_DB_PATH = _PROJECT_ROOT / ".hypogeum-assets" / "hypogeum.db"
 # touches worker_control.worker_status every iteration; default interval is
 # 60s, so ~5 missed iterations).
 _HEARTBEAT_STALE_SECONDS = 300
+
+# The worker runs the whole pipeline in-process and blocking, so it writes
+# no heartbeat for the 25-35 min an episode takes. A run whose row is still
+# 'running' and started within this window is treated as genuinely alive —
+# the loop demonstrably dispatched it — so a stale heartbeat during that
+# window is "busy", not "dead". Matches run_registry's orphan-lease TTL:
+# once a run outlives that, orphan reconciliation fails it and the real
+# "last run failed" blocker takes over.
+_RUN_ALIVE_SECONDS = 5400
 
 
 def _resolve_db(db_path: Optional[Path]) -> Path:
@@ -427,6 +436,31 @@ def _run_health(channel_id: str, db: Path, now_utc: datetime) -> dict:
     return out
 
 
+def _run_actively_progressing(db: Path, now_utc: datetime) -> bool:
+    """True when *some* pipeline run is genuinely in flight right now: a
+    runs row still marked 'running' that started within the orphan-lease
+    window. During such a run the worker is blocked in-process and writes
+    no heartbeat — a stale heartbeat then means "busy", not "stopped".
+    Factory-wide (not per-channel): the worker is single-threaded, so any
+    live run explains every channel's silent heartbeat. Never raises."""
+    try:
+        from hypogeum.db import get_connection
+
+        cutoff = (now_utc - timedelta(seconds=_RUN_ALIVE_SECONDS)).isoformat()
+        conn = get_connection(db)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM runs WHERE LOWER(status) = 'running' "
+                "AND started_at >= ? LIMIT 1",
+                (cutoff,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return row is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _operating_grant(channel_id: str, db: Path, now_utc: datetime) -> dict:
     """ADR-016 Channel Operating Grant status for the channel: is there an
     active, in-window, signature-verified grant, and does its bound weekly
@@ -571,6 +605,7 @@ def get_channel_runtime_status(
 
     health["_worker_stale_active_schedule"] = bool(
         worker.get("stale") and schedule.get("has_active_schedule")
+        and not _run_actively_progressing(db, now)
     )
     blockers = _derive_blockers(identity, ops, budget, clearance, schedule, health, grant)
     health.pop("_worker_stale_active_schedule", None)

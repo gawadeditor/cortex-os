@@ -374,6 +374,49 @@ class TestRunHealthBlockers:
         assert not any("last run failed" in b for b in snap["blockers"])
 
 
+def _set_stale_heartbeat(db: Path) -> None:
+    from hypogeum.db import get_connection
+    conn = get_connection(db)
+    try:
+        conn.execute(
+            "INSERT INTO worker_control (key, value, updated_at) VALUES "
+            "('worker_status', 'claiming', '2000-01-01T00:00:00+00:00')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+class TestStaleHeartbeatDuringRun:
+    def test_stale_heartbeat_with_live_run_is_not_a_blocker(self, tmp_path):
+        db = _fresh_db(tmp_path)
+        _make_channel(db)
+        _add_active_schedule(db)
+        _set_stale_heartbeat(db)
+        _add_run(db, "live", "running", None, started=_now())  # in flight now
+        snap = get_channel_runtime_status(CHANNEL_ID, db_path=db)
+        assert snap["worker"]["stale"] is True
+        assert not any("heartbeat is stale" in b for b in snap["blockers"])
+
+    def test_stale_heartbeat_with_no_run_is_a_blocker(self, tmp_path):
+        db = _fresh_db(tmp_path)
+        _make_channel(db)
+        _add_active_schedule(db)
+        _set_stale_heartbeat(db)
+        snap = get_channel_runtime_status(CHANNEL_ID, db_path=db)
+        assert any("heartbeat is stale" in b for b in snap["blockers"])
+
+    def test_stale_heartbeat_with_long_dead_run_is_a_blocker(self, tmp_path):
+        db = _fresh_db(tmp_path)
+        _make_channel(db)
+        _add_active_schedule(db)
+        _set_stale_heartbeat(db)
+        # a 'running' row older than the orphan-lease window — genuinely stuck
+        _add_run(db, "stuck", "running", None, started="2026-01-01T00:00:00+00:00")
+        snap = get_channel_runtime_status(CHANNEL_ID, db_path=db)
+        assert any("heartbeat is stale" in b for b in snap["blockers"])
+
+
 class TestOperatingGrantBlocker:
     def test_operator_enabled_without_grant_is_a_blocker(self, tmp_path):
         db = _fresh_db(tmp_path)

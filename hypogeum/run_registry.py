@@ -115,7 +115,15 @@ _DEFAULT_RUNS_DIR = _PROJECT_ROOT / ".hypogeum-assets" / "runs"
 # ---------------------------------------------------------------------------
 
 _PROCESS_LEASE_OWNER_ID = f"pid:{uuid.uuid4().hex[:12]}"
-_RUN_LEASE_TTL_SECONDS = 1800  # 30 min; renewed at every stage boundary (heartbeat)
+# 90 min. Renewed at every stage boundary — but VPD Stage B generates every
+# scene clip inside ONE stage (a 14-scene short's Stage B alone is ~20-25 min
+# of MUAPI polling), so the TTL must comfortably exceed the single longest
+# stage or a genuinely-live run gets false-orphaned mid-generation
+# (observed 2026-09-03: twinkle ep_0e01db91 orphaned at +34 min while VPD
+# Stage B was still producing scene clips). A real worker crash is still
+# caught by the singleton lock + launchd KeepAlive; the only cost of a
+# larger TTL is slower detection of the rare no-lease-row legacy case.
+_RUN_LEASE_TTL_SECONDS = 5400
 
 
 def _lease_resource_id(run_id: str) -> str:

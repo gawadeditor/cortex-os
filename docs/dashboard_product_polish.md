@@ -86,15 +86,37 @@ per-page `<style>` unless truly page-local.
   `deliverable_schedule_policy.main_episode.time_of_day` (set via DB this
   session) and has no form field yet.
 
+## Episode-detail tab bugs — all fixed 2026-09-03 (session 2)
+
+- **Publishing tab** — was "Not connected" + old OAuth flow on every
+  platform; now Zernio-aware (`_zernio_publish_outcomes` + bindings).
+- **Analytics tab** — same "Not published" bug + "real data only / Mock
+  rows / Import analytics" jargon; now Zernio-aware + "Numbers haven't
+  come in yet, Cortex pulls them automatically" plain language.
+- **Branding tab** — ran the full-length brand audit on shorts → all red
+  "Missing"; now `branding.not_applicable` for shorts-only channels, one
+  calm panel.
+- **Thumbnails tab** — "No thumbnail candidates found" → "Short videos use
+  the platform auto-cover" explanation.
+- **Duration** KPI relabelled "Time to make" (it's run time, not video
+  length).
+
 ## Known follow-ups (found while working)
 
-- `episode_detail` Branding tab runs the full-length branding audit on
-  short-native episodes → "0 assets found / Missing verdict" in red when
-  short-form genuinely needs none. Needs a short-native branch.
 - Publishing card shows the raw Zernio "Post ID" — fine in a record
   context but could be de-emphasised.
 - `/episodes` and `/create` both render the production queue (IA overlap).
 - ~10 old disk-only episodes have no title anywhere → "Untitled episode".
+- old long-form hypogeum episodes now show branding "not applicable"
+  because the channel switched to shorts-only — acceptable edge case.
+
+## Non-dashboard fixes prompted by the operator this session
+
+- **SEO tags** (`canonical_metadata_agent` + `shorts_metadata`): tags/
+  hashtags now lean on the channel's broad category/format/audience
+  ("bedtime story", "kids bedtime cartoon", …) instead of only
+  episode-specific proper nouns — a new channel with no name recognition
+  is found through generic search. Applies from the next episode.
 
 ## Log
 

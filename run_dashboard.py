@@ -354,6 +354,11 @@ def _f_plain_tech(value):
     return _hz.plain_tech(value)
 
 
+@app.template_filter("plain_evidence")
+def _f_plain_evidence(value):
+    return _hz.plain_evidence(value)
+
+
 @app.template_filter("basename")
 def _f_basename(value):
     """Last path segment — keeps internal directory layout off the page."""

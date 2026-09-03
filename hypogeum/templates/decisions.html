@@ -115,7 +115,7 @@
     </div>
     <div class="dec-recommendation">{{ d.recommendation }}</div>
     {%- if d.evidence %}
-    <div class="dec-evidence">{{ d.evidence | join('\n') }}</div>
+    <div class="dec-evidence">{% for e in d.evidence %}{{ e | plain_evidence }}{% if not loop.last %}<br>{% endif %}{% endfor %}</div>
     {%- endif %}
     <div class="dec-meta">
       <div class="confidence-bar">

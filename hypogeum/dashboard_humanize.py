@@ -772,6 +772,57 @@ _TECH_TOKEN_RE = re.compile(
 )
 
 
+_EVIDENCE_RULES = [
+    (re.compile(r"episode_readiness\.can_launch\s*=\s*True", re.I),
+     "The factory is cleared to start a run"),
+    (re.compile(r"episode_readiness\.can_launch\s*=\s*False", re.I),
+     "The factory is not cleared to start a run yet"),
+    (re.compile(r"episode_topics\.queued\s*=\s*(\d+)", re.I),
+     lambda m: f"{m.group(1)} topic{'s' if m.group(1) != '1' else ''} waiting in the queue"),
+    (re.compile(r"episode_topics\.consumed\s*=\s*(\d+)", re.I),
+     lambda m: f"{m.group(1)} topics already produced"),
+    (re.compile(r"episode_topics\.total\s*=\s*0", re.I),
+     "No topics have ever been queued"),
+    (re.compile(r"episode_topics\.total\s*=\s*(\d+)", re.I),
+     lambda m: f"{m.group(1)} topics in total"),
+    (re.compile(r"episodes\.completed\s*=\s*(\d+)", re.I),
+     lambda m: f"{m.group(1)} episodes finished production"),
+    (re.compile(r"publishing_outcomes\.total\s*=\s*0", re.I),
+     "Nothing has been published yet"),
+    (re.compile(r"avg_cost_per_episode\s*=\s*\$?([\d.]+)", re.I),
+     lambda m: f"Each episode costs about ${float(m.group(1)):.2f} on average"),
+    (re.compile(r"total_cost_usd\s*=\s*\$?([\d.]+)", re.I),
+     lambda m: f"${float(m.group(1)):.2f} spent so far"),
+    (re.compile(r"threshold\s*=\s*\$?([\d.]+)", re.I),
+     lambda m: f"the alert threshold is ${float(m.group(1)):.2f}"),
+    (re.compile(r"real_snapshots\s*=\s*(\d+)", re.I),
+     lambda m: f"{m.group(1)} real analytics readings collected"),
+    (re.compile(r"mock_snapshots\s*=\s*(\d+)", re.I),
+     lambda m: f"{m.group(1)} demo readings (not counted)"),
+    (re.compile(r"minimum_for_trends\s*=\s*(\d+)", re.I),
+     lambda m: f"{m.group(1)} are needed before trends are reliable"),
+]
+
+
+def plain_evidence(text) -> str:
+    """Turn a decision-engine 'evidence' line (a raw DB/attribute
+    expression) into a sentence an operator can read. Falls back to
+    plain_tech + light cleanup for anything unmatched."""
+    if not text:
+        return ""
+    s = str(text).strip()
+    for rx, repl in _EVIDENCE_RULES:
+        m = rx.search(s)
+        if m:
+            return repl(m) if callable(repl) else repl
+    # generic: "some.thing.here = value" -> "some thing here: value"
+    m = re.match(r"^([a-z_][a-z0-9_.]*)\s*=\s*(.+)$", s, re.I)
+    if m:
+        key = m.group(1).split(".")[-1].replace("_", " ")
+        return f"{key}: {m.group(2)}"
+    return plain_tech(s)
+
+
 def plain_tech(text) -> str:
     """Swap any known provider / model slug inside a free-text string for a
     name an operator recognises. Leaves everything else untouched."""

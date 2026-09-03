@@ -1,7 +1,12 @@
 """
 hypogeum/decision_inputs/costs.py
 
-Reads production cost facts from the costs table.
+Reads production cost facts. Spend totals / per-provider / per-episode
+come from the complete grant-consumption ledger (MUAPI video included) via
+hypogeum.model_effective_pricing.spend_breakdown(); the costs table alone
+omits every MUAPI charge (~70% of a real episode bill), which would let
+the decision engine's cost-review rule fire — or not — on a number that
+is 5x too low.
 No writes. No external calls. Non-blocking.
 
 Public API:
@@ -50,50 +55,40 @@ def get_cost_facts(db_path: Optional[Path] = None) -> dict:
     try:
         db = _resolve_db(db_path)
         initialize_schema(db)
+
+        from hypogeum.model_effective_pricing import spend_breakdown
+        bd = spend_breakdown(db_path=db)
+        by_episode = bd.get("by_episode", {})
+
         conn = get_connection(db)
         try:
-            summary_row = conn.execute("""
-                SELECT
-                    COUNT(DISTINCT episode_id) AS episodes,
-                    COALESCE(SUM(cost_usd), 0)           AS total_cost,
-                    COALESCE(SUM(tokens_or_credits), 0)  AS total_tokens
-                FROM costs
-            """).fetchone()
-
-            provider_rows = conn.execute("""
-                SELECT provider, ROUND(SUM(cost_usd), 6) AS total
-                FROM costs GROUP BY provider ORDER BY total DESC
-            """).fetchall()
-
-            model_rows = conn.execute("""
-                SELECT model, ROUND(SUM(cost_usd), 6) AS total
-                FROM costs WHERE model IS NOT NULL
-                GROUP BY model ORDER BY total DESC
-            """).fetchall()
-
-            recent_rows = conn.execute("""
-                SELECT episode_id, ROUND(SUM(cost_usd), 6) AS total
-                FROM costs GROUP BY episode_id
-                ORDER BY MAX(called_at) DESC
-                LIMIT 5
-            """).fetchall()
+            tok_row = conn.execute(
+                "SELECT COALESCE(SUM(tokens_or_credits), 0) AS t FROM costs"
+            ).fetchone()
+            recent_ids = [
+                r["episode_id"] for r in conn.execute(
+                    "SELECT episode_id FROM costs WHERE episode_id IS NOT NULL "
+                    "GROUP BY episode_id ORDER BY MAX(called_at) DESC LIMIT 5"
+                ).fetchall()
+            ]
         finally:
             conn.close()
 
-        episodes = summary_row["episodes"] if summary_row else 0
-        total    = round(float(summary_row["total_cost"] or 0.0), 6) if summary_row else 0.0
-        tokens   = float(summary_row["total_tokens"] or 0.0) if summary_row else 0.0
+        episodes = len(by_episode)
+        total    = round(bd.get("total", 0.0), 6)
+        tokens   = float(tok_row["t"] or 0.0) if tok_row else 0.0
         avg      = round(total / episodes, 6) if episodes > 0 else None
 
         return {
             "total_episodes_costed": episodes,
             "total_cost_usd":        total,
             "avg_cost_per_episode":  avg,
-            "by_provider":           {r["provider"]: round(float(r["total"] or 0), 6)
-                                      for r in provider_rows},
-            "by_model":              {r["model"]: round(float(r["total"] or 0), 6)
-                                      for r in model_rows if r["model"]},
-            "recent_episodes":       [dict(r) for r in recent_rows],
+            "by_provider":           bd.get("by_provider", {}),
+            "by_model":              bd.get("by_model", {}),
+            "recent_episodes":       [
+                {"episode_id": e, "total": by_episode.get(e, 0.0)}
+                for e in recent_ids if e in by_episode
+            ],
             "total_tokens":          tokens,
             "has_data":              episodes > 0,
         }

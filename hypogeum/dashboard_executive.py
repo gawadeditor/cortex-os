@@ -463,10 +463,22 @@ def _load_current_episode_title(conn, result: dict) -> None:
 
 
 def _load_failed_run_id(conn) -> Optional[str]:
-    """Return the run_id of the most recent failed run, or None."""
+    """The most recent failed run that still needs an operator — no later
+    success for its episode, episode not superseded, topic not abandoned.
+    None when the last failure was already recovered or superseded."""
     try:
         row = conn.execute(
-            "SELECT run_id FROM runs WHERE status = 'failed' ORDER BY started_at DESC LIMIT 1"
+            """
+            SELECT r.run_id FROM runs r
+            WHERE r.status = 'failed'
+              AND EXISTS (SELECT 1 FROM episodes e WHERE e.episode_id = r.episode_id
+                          AND COALESCE(e.status,'') != 'superseded')
+              AND NOT EXISTS (SELECT 1 FROM runs r2 WHERE r2.episode_id = r.episode_id
+                              AND r2.status IN ('complete','completed') AND r2.started_at >= r.started_at)
+              AND NOT EXISTS (SELECT 1 FROM episode_topics t WHERE t.episode_id = r.episode_id
+                              AND t.status IN ('cancelled','skipped'))
+            ORDER BY r.started_at DESC LIMIT 1
+            """
         ).fetchone()
         return row["run_id"] if row else None
     except Exception:
@@ -474,13 +486,22 @@ def _load_failed_run_id(conn) -> Optional[str]:
 
 
 def _load_failed_run_count(conn) -> int:
-    """Return the count of failed runs in the last 48 hours."""
+    """Failed runs in the last 48h that still need an operator: no later
+    success for the episode, episode not superseded, topic not abandoned.
+    Matches the /failures page — a raw 'failed' count is mostly archaeology
+    (orphans, superseded, recovered)."""
     try:
         row = conn.execute(
             """
-            SELECT COUNT(*) AS cnt FROM runs
-            WHERE status = 'failed'
-              AND started_at >= datetime('now', '-48 hours')
+            SELECT COUNT(*) AS cnt FROM runs r
+            WHERE r.status = 'failed'
+              AND r.started_at >= datetime('now', '-48 hours')
+              AND EXISTS (SELECT 1 FROM episodes e WHERE e.episode_id = r.episode_id
+                          AND COALESCE(e.status,'') != 'superseded')
+              AND NOT EXISTS (SELECT 1 FROM runs r2 WHERE r2.episode_id = r.episode_id
+                              AND r2.status IN ('complete','completed') AND r2.started_at >= r.started_at)
+              AND NOT EXISTS (SELECT 1 FROM episode_topics t WHERE t.episode_id = r.episode_id
+                              AND t.status IN ('cancelled','skipped'))
             """
         ).fetchone()
         return int(row["cnt"]) if row and row["cnt"] else 0

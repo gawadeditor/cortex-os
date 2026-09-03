@@ -120,6 +120,10 @@ class RunHealthSummary:
     awaiting_review_count:           int = 0
     awaiting_publish_approval_count: int = 0
     publishing_count:                int = 0
+    # last 14 days — what an operator actually cares about (the all-time
+    # counts carry every superseded / orphaned run since the project began)
+    recent_total:                    int = 0
+    recent_success_rate:             float = 0.0
 
 
 @dataclass
@@ -507,6 +511,18 @@ def get_run_health(db_path: Optional[Path] = None) -> RunHealthSummary:
         complete = row["complete"] or 0
         failed   = row["failed"]   or 0
         running  = row["running"]  or 0
+
+        try:
+            rc = conn.execute("""
+                SELECT SUM(CASE WHEN status IN ('complete','completed') THEN 1 ELSE 0 END) AS c,
+                       SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS f
+                FROM runs WHERE started_at >= datetime('now','-14 days')
+            """).fetchone()
+            r_c = (rc["c"] or 0) if rc else 0
+            r_f = (rc["f"] or 0) if rc else 0
+        except Exception:  # noqa: BLE001
+            r_c = r_f = 0
+
         return RunHealthSummary(
             total_runs                    = row["total"],
             complete_count                = complete,
@@ -519,6 +535,8 @@ def get_run_health(db_path: Optional[Path] = None) -> RunHealthSummary:
             awaiting_review_count         = row["awaiting_review"]           or 0,
             awaiting_publish_approval_count = row["awaiting_publish_approval"] or 0,
             publishing_count              = row["publishing"]                or 0,
+            recent_total                  = r_c + r_f,
+            recent_success_rate           = _safe_rate(r_c, r_c + r_f),
         )
     except Exception:
         return _empty

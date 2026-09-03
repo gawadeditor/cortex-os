@@ -203,6 +203,27 @@
     .ep-row-meta { font-size: 11px; color: var(--muted); margin-top: 1px; }
     .ep-tn { width: 48px; height: 27px; object-fit: cover; border-radius: 3px;
               border: 1px solid var(--border); flex-shrink: 0; background: var(--bg); }
+
+    /* ── per-channel metric cards (home) ── */
+    .ch-metric-grid { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+    .ch-metric { display: block; padding: 16px 18px; transition: border-color var(--dur) var(--ease),
+                 transform var(--dur) var(--ease); }
+    .ch-metric:hover { border-color: var(--accent-line); transform: translateY(-2px); }
+    .ch-metric-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+    .ch-metric-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+    .ch-metric-dot.is-live { background: var(--accent); box-shadow: 0 0 8px var(--accent-line);
+                             animation: chpulse 2s ease-in-out infinite; }
+    @keyframes chpulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
+    @media (prefers-reduced-motion: reduce) { .ch-metric-dot.is-live { animation: none; } }
+    .ch-metric-name { font-weight: 600; font-size: 13.5px; color: var(--text); }
+    .ch-metric-badge { margin-left: auto; font-size: 10px; color: var(--accent);
+                       background: var(--accent-bg); padding: 2px 8px; border-radius: 999px; }
+    .ch-metric-primary { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
+    .ch-metric-num { font-family: var(--font-display); font-size: 30px; font-weight: 800;
+                     line-height: 1; color: var(--text); font-variant-numeric: tabular-nums; }
+    .ch-metric-cap { font-size: 11.5px; color: var(--muted); margin-top: 5px; }
+    .ch-metric-spark { flex-shrink: 0; opacity: .9; }
+    .ch-metric-budget { margin-top: 14px; }
   </style>
 </head>
 <body>
@@ -239,10 +260,11 @@
     <div class="t1-lbl">Queued</div>
     <div class="t1-sub">{% if (fh0.queued_count or 0) > 0 %}<a href="/create">production queue →</a>{% else %}nothing waiting{% endif %}</div>
   </div>
-  <div class="t1-card {{ 'is-critical' if (fh0.failed_count or 0) > 0 else 'is-good' }}">
-    <div class="t1-val" data-countup="{{ fh0.failed_count or 0 }}">{{ fh0.failed_count or 0 }}</div>
-    <div class="t1-lbl">Failed runs</div>
-    <div class="t1-sub">{% if (fh0.failed_count or 0) > 0 %}<a href="/failures" class="err">review →</a>{% elif _srate is not none %}{{ (_srate * 100) | round | int }}% success rate{% else %}none{% endif %}</div>
+  {% set _af = fh0.failed_count or 0 %}
+  <div class="t1-card {{ 'is-critical' if _af > 0 else 'is-good' }}">
+    <div class="t1-val" data-countup="{{ _af }}">{{ _af }}</div>
+    <div class="t1-lbl">{{ 'Needs a look' if _af > 0 else 'All clear' }}</div>
+    <div class="t1-sub">{% if _af > 0 %}<a href="/failures" class="err">review →</a>{% elif _srate is not none %}{{ (_srate * 100) | round | int }}% of runs finish clean{% else %}no failed runs{% endif %}</div>
   </div>
 </div>
 </div><!-- /.home-hero -->
@@ -284,16 +306,36 @@
 </div>
 
 {% if rollup.by_channel %}
-<div class="grid-auto" style="margin-bottom:var(--gap);">
+{% from '_charts.html' import sparkline, hbar %}
+<div class="grid-auto ch-metric-grid" style="margin-bottom:var(--gap);">
   {% for ch in rollup.by_channel %}
-  <a class="card" href="/channel/{{ ch.channel_id }}?scope={{ ch.channel_id }}" style="display:block;">
-    <div class="card-title" style="margin-bottom:8px;">{{ ch.name }}</div>
-    <div style="display:flex; gap:18px; flex-wrap:wrap; font-size:12.5px;">
-      <span><strong style="font-size:15px;">{{ big(ch.views) }}</strong><br><span style="color:var(--faint)">views</span></span>
-      <span><strong style="font-size:15px;">{{ ch.episodes_published }}</strong><br><span style="color:var(--faint)">published</span></span>
-      <span><strong style="font-size:15px;">{% if ch.spend_all_usd is not none %}${{ big(ch.spend_all_usd) }}{% else %}—{% endif %}</strong><br><span style="color:var(--faint)">spend</span></span>
-      {% if ch.active_runs %}<span style="color:var(--accent)">● {{ ch.active_runs }} running</span>{% endif %}
+  {% set wb = ch.weekly_budget or {} %}
+  <a class="card ch-metric" href="/channel/{{ ch.channel_id }}?scope={{ ch.channel_id }}">
+    <div class="ch-metric-head">
+      <span class="ch-metric-dot {{ 'is-live' if ch.active_runs else '' }}"></span>
+      <span class="ch-metric-name">{{ ch.name }}</span>
+      {% if ch.active_runs %}<span class="ch-metric-badge">making an episode</span>{% endif %}
     </div>
+    <div class="ch-metric-primary">
+      <div>
+        <div class="ch-metric-num">{{ big(ch.views) }}</div>
+        <div class="ch-metric-cap">views · {{ ch.episodes_published }} published</div>
+      </div>
+      {% if ch.views_series and ch.views_series | length >= 2 %}
+      <div class="ch-metric-spark">{{ sparkline(ch.views_series, width=120, height=34) }}</div>
+      {% endif %}
+    </div>
+    {% if wb.ceiling %}
+    <div class="ch-metric-budget">
+      <div class="spread" style="font-size:11px; color:var(--muted); margin-bottom:3px;">
+        <span>This week</span>
+        <span>${{ '%.0f'|format(wb.used) }} / ${{ '%.0f'|format(wb.ceiling) }}</span>
+      </div>
+      {{ hbar(wb.used, wb.ceiling, tone=('critical' if wb.pct >= 90 else ('warn' if wb.pct >= 70 else 'accent'))) }}
+    </div>
+    {% else %}
+    <div class="ch-metric-budget"><span class="muted" style="font-size:11px;">${{ big(ch.spend_all_usd) }} spent all-time</span></div>
+    {% endif %}
   </a>
   {% endfor %}
 </div>
@@ -511,14 +553,15 @@
         <div class="kpi-lbl">Queued</div>
       </div>
       <div class="kpi-card">
-        {% if state.run_health and state.run_health.total_runs > 0 %}
-        <div class="kpi-val">{{ (state.run_health.success_rate * 100) | round | int }}%</div>
-        {% else %}<div class="kpi-val dash-val">—</div>{% endif %}
-        <div class="kpi-lbl">Run Health</div>
+        {% set _rt = (state.run_health.recent_total or 0) if state.run_health else 0 %}
+        {% if _rt > 0 %}
+        <div class="kpi-val">{{ (state.run_health.recent_success_rate * 100) | round | int }}%</div>
+        <div class="kpi-lbl">Finish clean · 14 days</div>
+        {% else %}<div class="kpi-val dash-val">—</div><div class="kpi-lbl">Finish clean</div>{% endif %}
       </div>
       <div class="kpi-card">
-        <div class="kpi-val">{{ state.run_health.total_runs if state.run_health else 0 }}</div>
-        <div class="kpi-lbl">Total Runs</div>
+        <div class="kpi-val">{{ _rt }}</div>
+        <div class="kpi-lbl">Runs · 14 days</div>
       </div>
     </div>
   </div>

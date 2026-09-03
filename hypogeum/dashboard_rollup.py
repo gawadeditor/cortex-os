@@ -164,6 +164,41 @@ def _active_runs(conn, channel_id: Optional[str]) -> int:
         return 0
 
 
+def _channel_view_series(conn, episode_ids: Optional[set]) -> list:
+    """Per-episode total real views, oldest→newest, for a channel sparkline.
+    Up to 12 points. Never raises."""
+    if not episode_ids:
+        return []
+    try:
+        ph = ",".join("?" * len(episode_ids))
+        rows = conn.execute(
+            f"""SELECT pa.episode_id, COALESCE(SUM(pa.views),0) AS v
+                FROM platform_analytics pa
+                WHERE pa.source='api' AND pa.episode_id IN ({ph})
+                GROUP BY pa.episode_id
+                ORDER BY MAX(pa.snapshot_date) ASC LIMIT 12""",
+            list(episode_ids),
+        ).fetchall()
+        return [int(r["v"] or 0) for r in rows]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _channel_weekly_budget(channel_id: str, db_path) -> dict:
+    """{used, ceiling, pct} for the channel's current-week video budget.
+    Never raises."""
+    try:
+        from hypogeum.channel_runtime_status import get_channel_runtime_status
+        b = (get_channel_runtime_status(channel_id, db_path=db_path) or {}).get("weekly_budget", {})
+        if b.get("configured"):
+            return {"used": round(b.get("reserved_committed_usd") or 0, 2),
+                    "ceiling": round(b.get("ceiling_usd") or 0, 2),
+                    "pct": round(b.get("pct_used") or 0, 1)}
+    except Exception:  # noqa: BLE001
+        pass
+    return {}
+
+
 def _pending_approvals(conn) -> int:
     for sql in ("SELECT COUNT(*) FROM approvals WHERE status='pending'",
                 "SELECT COUNT(*) FROM finance_approvals WHERE status='pending'"):
@@ -227,6 +262,8 @@ def get_factory_rollup(db_path: Optional[Path] = None) -> dict:
                 "episodes_published": _published_count(conn, cid, ep_chan),
                 "spend_all_usd": csp_all, "spend_30d_usd": csp_30,
                 "active_runs": _active_runs(conn, cid),
+                "views_series": _channel_view_series(conn, my_eps),
+                "weekly_budget": _channel_weekly_budget(cid, db_path),
             })
     finally:
         conn.close()

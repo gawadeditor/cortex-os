@@ -64,6 +64,9 @@ _REQUIRED_PROVIDERS = frozenset({"openrouter", "muapi", "elevenlabs"})
 # Score deductions
 _BLOCKING_DEDUCTION = 15
 _WARNING_DEDUCTION  = 5
+# recent informational signals (stuck_run etc.) up to this many aren't a
+# "degraded" factory — only a genuine pile-up or day-old ignored ones are.
+_SIGNAL_BACKLOG_LIMIT = 8
 
 # Thresholds
 _ZOMBIE_RUN_HOURS        = 4
@@ -389,17 +392,27 @@ def _assess_ois(db_path: Path) -> DomainHealth:
 
         active = get_active_signals(db_path=db_path)
         non_blocking = [s for s in active if not s.blocking]
-        if non_blocking:
+        # Informational signals (stuck_run, run_failed) are emitted by the
+        # health sweep every cycle and are not, on their own, a degraded
+        # factory. Only flag a backlog that is genuinely piling up
+        # (>_SIGNAL_BACKLOG_LIMIT) or has been sitting ignored for a day.
+        from datetime import datetime, timedelta, timezone
+        _day_ago = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        stale = [s for s in non_blocking
+                 if str(getattr(s, "ingested_at", "") or "") < _day_ago]
+        if len(non_blocking) > _SIGNAL_BACKLOG_LIMIT or stale:
             checks.append(_fail(
-                "open_signal_backlog", "No open non-blocking signal backlog",
+                "open_signal_backlog", "Non-blocking signal backlog under control",
                 False,
-                f"{len(non_blocking)} open non-blocking signal(s) — review and resolve",
+                (f"{len(non_blocking)} open non-blocking signal(s)"
+                 + (f", {len(stale)} older than a day" if stale else "")
+                 + " — review and resolve"),
                 "from hypogeum.ois import get_active_signals; get_active_signals()",
             ))
         else:
             checks.append(_ok(
-                "open_signal_backlog", "No open non-blocking signal backlog", False,
-                "No non-blocking signals in backlog",
+                "open_signal_backlog", "Non-blocking signal backlog under control", False,
+                f"{len(non_blocking)} recent informational signal(s), none stale",
             ))
 
     except Exception as exc:

@@ -981,6 +981,40 @@ def run_assembly_agent(
                 f"rendered without its burned-in captions. Never silently proceed."
             )
 
+    # Short-native burned-in captions (2026-09-03): when a SHORT_NATIVE
+    # channel opts in (PublishingProfile.auto_captions), the single vertical
+    # deliverable's own .srt is burned into the pixels using that channel's
+    # caption_style. Default off — twinkle keeps the no-captions look, hypogeum
+    # opts in. A 16:9 main episode is never captioned in-pixel.
+    _short_native = getattr(config, "SHORT_NATIVE_MODE", False) is True
+    _main_srt_path = None
+    _caption_style = None
+    if _short_native:
+        try:
+            from hypogeum.caption_style import burn_enabled, resolve_caption_style
+            if burn_enabled(channel_id):
+                _main_srt_id = _find_caption_asset_id(_captions, "main_episode")
+                _p = assets_root / f"{_main_srt_id}.srt" if _main_srt_id else None
+                _ffmpeg = config.FFMPEG_BINARY if isinstance(getattr(config, "FFMPEG_BINARY", None), str) else "ffmpeg"
+                from hypogeum.agents.video_renderer import _probe_subtitle_filter_available
+                if _p is None or not _p.exists():
+                    log.warn("caption_burn_requested_no_srt", episode_id=episode_id,
+                             channel_id=channel_id, srt_asset_id=_main_srt_id)
+                elif not _probe_subtitle_filter_available(_ffmpeg):
+                    # This is an opt-in enhancement, not a Shorts-style hard
+                    # requirement: ship without burn rather than fail the
+                    # episode. The render host needs an ffmpeg built with
+                    # libass (--enable-libass) for burn to activate.
+                    log.warn("caption_burn_skipped_no_libass", episode_id=episode_id,
+                             channel_id=channel_id, ffmpeg=_ffmpeg)
+                else:
+                    _main_srt_path = _p
+                    _caption_style = resolve_caption_style(channel_id)
+                    log.info("caption_burn_enabled", episode_id=episode_id,
+                             channel_id=channel_id, style=_caption_style.summary())
+        except Exception as exc:  # noqa: BLE001 - never block the render
+            log.warn("caption_burn_resolve_failed", episode_id=episode_id, error=str(exc))
+
     render_manifest = render_episode(
         timeline_plan=timeline_plan,
         main_narration_path=main_narration_path,
@@ -998,7 +1032,9 @@ def run_assembly_agent(
         music_segments=music_segments,
         short_srt_paths=short_srt_paths,
         ffmpeg_binary=config.FFMPEG_BINARY if isinstance(getattr(config, "FFMPEG_BINARY", None), str) else "ffmpeg",
-        main_vertical=(getattr(config, "SHORT_NATIVE_MODE", False) is True),
+        main_vertical=_short_native,
+        main_srt_path=_main_srt_path,
+        caption_style=_caption_style,
     )
     render_status = render_manifest["render_status"]
 
@@ -1408,6 +1444,7 @@ def run_assembly_agent(
                 s["file_exists"] for s in _manifest_shorts
             ),
             "captions_included": bool(main_caption_asset_id),
+            "captions_burned_in": bool(_main_srt_path is not None),
             "thumbnails_included": bool(thumbnail_references),
             "music_complete": len(sections_without_music) == 0,
             "production_ready": production_ready,
@@ -1867,6 +1904,7 @@ def _build_failed_package(
             "scenes_rendered": 0,
             "shorts_complete": False,
             "captions_included": bool(main_caption_asset_id),
+            "captions_burned_in": False,  # failed package: never burned
             "thumbnails_included": bool(
                 _collect_thumbnail_references(thumbnail_package)
             ),
@@ -2019,6 +2057,7 @@ def _build_additional_coverage_required_package(
             "scenes_rendered": 0,
             "shorts_complete": False,
             "captions_included": bool(main_caption_asset_id),
+            "captions_burned_in": False,  # failed package: never burned
             "thumbnails_included": bool(
                 _collect_thumbnail_references(thumbnail_package)
             ),

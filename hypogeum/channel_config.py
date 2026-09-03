@@ -210,7 +210,8 @@ class PublishingProfile:
     default_tags:          list[str]  = field(default_factory=list)
     ai_disclosure_required: bool      = True
     auto_thumbnail:        bool       = True
-    auto_captions:         bool       = True
+    auto_captions:         bool       = True   # burn captions into the short-native video
+    caption_style:         dict       = field(default_factory=dict)  # see hypogeum.caption_style
     # ADR-013 Decision 7, item 3: logical provider preference owned by the
     # Channel Package. {platform: provider_id} -- e.g.
     # {"youtube": "youtube_direct"} or a future registered provider_id.
@@ -591,6 +592,9 @@ _PUBLISHING_PROFILE_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("publishing_provider_by_platform_json", "TEXT NOT NULL DEFAULT '{}'"),
     ("analytics_provider_by_platform_json",  "TEXT NOT NULL DEFAULT '{}'"),
     ("provider_alias_by_platform_json",      "TEXT NOT NULL DEFAULT '{}'"),
+    # burned-in caption appearance for the short-native deliverable; empty
+    # object = use hypogeum.caption_style.SHORT_NATIVE_DEFAULT.
+    ("caption_style_json",                   "TEXT NOT NULL DEFAULT '{}'"),
 ]
 
 
@@ -712,6 +716,10 @@ def _row_to_publishing(row) -> PublishingProfile:
         provider_alias_by_platform = (
             _uj(row["provider_alias_by_platform_json"], {})
             if "provider_alias_by_platform_json" in keys else {}
+        ),
+        caption_style = (
+            _uj(row["caption_style_json"], {})
+            if "caption_style_json" in keys else {}
         ),
         created_at             = row["created_at"],
         metadata_version       = row["metadata_version"],
@@ -1054,6 +1062,7 @@ def update_publishing_profile(
         "ai_disclosure_required":("ai_disclosure_required",  int),
         "auto_thumbnail":        ("auto_thumbnail",          int),
         "auto_captions":         ("auto_captions",           int),
+        "caption_style":         ("caption_style_json",      _j),
         "publishing_provider_by_platform": ("publishing_provider_by_platform_json", _j),
         "analytics_provider_by_platform":  ("analytics_provider_by_platform_json",  _j),
         "provider_alias_by_platform":      ("provider_alias_by_platform_json",      _j),

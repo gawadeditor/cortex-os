@@ -230,6 +230,8 @@ def render_episode(
     short_srt_paths: Optional[Dict[str, Optional[Path]]] = None,
     ffmpeg_binary: str = "ffmpeg",
     main_vertical: bool = False,
+    main_srt_path: Optional[Path] = None,
+    caption_style=None,
 ) -> dict:
     """
     Execute all ffmpeg renders for one episode and return a render_output_manifest.
@@ -337,6 +339,9 @@ def render_episode(
             ffmpeg_binary=ffmpeg_binary,
             resolution=main_resolution,
             vertical=main_vertical,
+            srt_path=(main_srt_path if (main_vertical and main_srt_path
+                      and Path(main_srt_path).exists()) else None),
+            caption_style=caption_style,
         )
     _end_page_seconds_added = 0.0
     if not main_timeline:
@@ -492,9 +497,16 @@ def _render_main_episode(
     ffmpeg_binary: str = "ffmpeg",
     resolution: str = MAIN_RESOLUTION,
     vertical: bool = False,
+    srt_path: Optional[Path] = None,
+    caption_style=None,
 ) -> bool:
     """
     Render the main episode using ffmpeg. Default 16:9 (MAIN_RESOLUTION);
+
+    srt_path / caption_style: when a real srt_path is supplied its captions
+    are burned into the video pixels using caption_style (see
+    hypogeum.caption_style). Only the SHORT_NATIVE vertical deliverable
+    passes these — a 16:9 main episode is never captioned in-pixel.
     when vertical=True (SHORT_NATIVE mode) the single deliverable is
     rendered 9:16 with scale-to-fill/crop, exactly like a Short.
     Returns True on success, False on failure.
@@ -555,6 +567,8 @@ def _render_main_episode(
         music_segments=music_segments,
         ffmpeg_binary=ffmpeg_binary,
         is_short=vertical,
+        srt_path=srt_path if vertical else None,
+        caption_style=caption_style if vertical else None,
     )
     ok = _run_ffmpeg(
         cmd=cmd,
@@ -1083,7 +1097,8 @@ def _parse_srt_cues(srt_text: str) -> List[Tuple[str, str, str]]:
     return cues
 
 
-def _build_caption_ass(srt_path: Path, resolution: str, dest_path: Path) -> bool:
+def _build_caption_ass(srt_path: Path, resolution: str, dest_path: Path,
+                       caption_style=None) -> bool:
     """
     Convert srt_path into a minimal ASS file at dest_path with explicit
     PlayResX/PlayResY matching `resolution` (WxH) and the burned-in
@@ -1091,6 +1106,12 @@ def _build_caption_ass(srt_path: Path, resolution: str, dest_path: Path) -> bool
     with at least one cue), False on any failure (missing/empty/
     unparseable source) — callers must treat False as "no captions to
     burn", never as a hard error.
+
+    caption_style: optional hypogeum.caption_style.CaptionStyle. When None,
+    the historical Arial / bottom-center / MarginV=280 look is used (kept
+    for the Shorts path, which never passed a style). When supplied, the
+    font / size / weight / colour / position / safe-area margins come from
+    hypogeum.caption_style.build_ass_style().
     """
     try:
         srt_text = srt_path.read_text(encoding="utf-8")
@@ -1102,19 +1123,32 @@ def _build_caption_ass(srt_path: Path, resolution: str, dest_path: Path) -> bool
         return False
 
     width, height = resolution.split("x")
-    style = (
-        f"Style: Default,Arial,{_CAPTION_FONT_SIZE},"
-        "&H00FFFFFF,"   # PrimaryColour: white fill, opaque
-        "&H000000FF,"   # SecondaryColour (karaoke, unused)
-        "&H00000000,"   # OutlineColour: black, opaque
-        "&H00000000,"   # BackColour (unused, BorderStyle=1 has no box)
-        "1,0,0,0,"       # Bold,Italic,Underline,StrikeOut
-        "100,100,0,0,"   # ScaleX,ScaleY,Spacing,Angle
-        "1,"             # BorderStyle: outline + shadow, not an opaque box
-        f"{_CAPTION_OUTLINE_PX},0,"  # Outline,Shadow
-        "2,"             # Alignment: bottom-center
-        f"40,40,{_CAPTION_MARGIN_V},1"  # MarginL,MarginR,MarginV,Encoding
-    )
+
+    if caption_style is not None:
+        try:
+            from hypogeum.caption_style import build_ass_style
+            spec = build_ass_style(caption_style, int(width), int(height))
+            style = spec["style_line"]
+            uppercase = spec["uppercase"]
+        except Exception:  # noqa: BLE001 - fall back to the legacy look
+            caption_style = None
+
+    if caption_style is None:
+        uppercase = False
+        style = (
+            f"Style: Default,Arial,{_CAPTION_FONT_SIZE},"
+            "&H00FFFFFF,"   # PrimaryColour: white fill, opaque
+            "&H000000FF,"   # SecondaryColour (karaoke, unused)
+            "&H00000000,"   # OutlineColour: black, opaque
+            "&H00000000,"   # BackColour (unused, BorderStyle=1 has no box)
+            "1,0,0,0,"       # Bold,Italic,Underline,StrikeOut
+            "100,100,0,0,"   # ScaleX,ScaleY,Spacing,Angle
+            "1,"             # BorderStyle: outline + shadow, not an opaque box
+            f"{_CAPTION_OUTLINE_PX},0,"  # Outline,Shadow
+            "2,"             # Alignment: bottom-center
+            f"40,40,{_CAPTION_MARGIN_V},1"  # MarginL,MarginR,MarginV,Encoding
+        )
+
     lines = [
         "[Script Info]",
         "ScriptType: v4.00+",
@@ -1134,6 +1168,8 @@ def _build_caption_ass(srt_path: Path, resolution: str, dest_path: Path) -> bool
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
     ]
     for start, end, text in cues:
+        if uppercase:
+            text = text.upper()
         lines.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}")
 
     dest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1174,6 +1210,7 @@ def _build_ffmpeg_concat_command(
     music_segments: Optional[List[dict]] = None,
     srt_path: Optional[Path] = None,
     ffmpeg_binary: str = "ffmpeg",
+    caption_style=None,
 ) -> List[str]:
     """
     Build an ffmpeg command list for concatenating scenes with audio.
@@ -1394,7 +1431,7 @@ def _build_ffmpeg_concat_command(
         # successfully with zero burned-in captions and no error anywhere).
         assert_subtitle_filter_available(ffmpeg_binary)
         ass_path = srt_path.with_suffix(".ass")
-        if not _build_caption_ass(srt_path, resolution, ass_path):
+        if not _build_caption_ass(srt_path, resolution, ass_path, caption_style=caption_style):
             raise CaptionBurnInError(
                 f"srt_path={srt_path} was supplied but _build_caption_ass() failed to "
                 f"produce a valid .ass file at {ass_path} -- captions were required, "

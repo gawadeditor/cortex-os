@@ -257,14 +257,14 @@ def get_episode_detail(
     try:
         conn = get_connection(path)
         try:
-            return _build_detail(conn, episode_id)
+            return _build_detail(conn, episode_id, db_path=path)
         finally:
             conn.close()
     except Exception:
         return None
 
 
-def _build_detail(conn, episode_id: str) -> Optional[dict]:
+def _build_detail(conn, episode_id: str, db_path: Optional[Path] = None) -> Optional[dict]:
     # ── Episode record ────────────────────────────────────────────────────
     ep_row = conn.execute(
         "SELECT * FROM episodes WHERE episode_id = ?", [episode_id]
@@ -344,6 +344,17 @@ def _build_detail(conn, episode_id: str) -> Optional[dict]:
         costs = [_row(r) for r in rows]
         total_cost_usd = round(sum(c.get("cost_usd") or 0.0 for c in costs), 6)
 
+    # The `costs` rows above are the per-LLM-call breakdown only; they carry
+    # no MUAPI (video/upscale) spend. Use the complete grant-ledger figure
+    # for the headline number.
+    try:
+        from hypogeum.model_effective_pricing import episode_billed_spend
+        _billed = episode_billed_spend(db_path=db_path, episode_ids=[episode_id])
+        if episode_id in _billed:
+            total_cost_usd = _billed[episode_id]
+    except Exception:
+        pass
+
     # ── Publishing outcomes ──────────────────────────────────────────────
     pub_rows = conn.execute(
         """
@@ -393,7 +404,7 @@ def _build_detail(conn, episode_id: str) -> Optional[dict]:
     analytics_data = _build_analytics_data(conn, episode_id)
 
     # ── Revenue tab data ─────────────────────────────────────────────────
-    revenue_data = _build_revenue_data(conn, episode_id, run_id)
+    revenue_data = _build_revenue_data(conn, episode_id, run_id, db_path=db_path)
 
     # ── Learning tab data ────────────────────────────────────────────────
     learning_data = _build_learning_data(conn, episode_id, run_id)
@@ -1031,7 +1042,8 @@ def _build_titles_data(conn, episode_id: str, *, short_native: bool = False,
 # Revenue tab data
 # ---------------------------------------------------------------------------
 
-def _build_revenue_data(conn, episode_id: str, run_id: Optional[str]) -> dict:
+def _build_revenue_data(conn, episode_id: str, run_id: Optional[str],
+                        db_path: Optional[Path] = None) -> dict:
     """
     Build Revenue tab data for one episode.
 
@@ -1105,6 +1117,16 @@ def _build_revenue_data(conn, episode_id: str, run_id: Optional[str]) -> dict:
                     "created_at": d.get("called_at"),
                 })
             total_cost_usd = round(cost_total, 6)
+    except Exception:
+        pass
+
+    # costs rows are LLM-only — the ROI math needs the full bill (MUAPI too).
+    try:
+        from hypogeum.model_effective_pricing import episode_billed_spend
+        _billed = episode_billed_spend(db_path=db_path, episode_ids=[episode_id])
+        if episode_id in _billed:
+            total_cost_usd = _billed[episode_id]
+            has_cost_data = True
     except Exception:
         pass
 

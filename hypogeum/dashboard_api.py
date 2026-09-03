@@ -1151,38 +1151,25 @@ def get_learning_summary(db_path: Optional[Path] = None) -> LearningSummary:
 
 def get_cost_summary(db_path: Optional[Path] = None) -> CostSummary:
     """
-    Cost breakdown by provider, model, and episode from the costs table.
+    Complete factory spend, split by provider / model / episode.
+
+    Reads the grant-consumption ledger (MUAPI video/upscale included) and
+    falls back to the costs table only for pre-authorization episodes — see
+    hypogeum.model_effective_pricing.spend_breakdown(). The costs table
+    alone omits ~70% of the real bill (every MUAPI charge).
 
     Non-blocking: returns zeroed summary on any error.
     """
     _empty = CostSummary(0.0, {}, {}, {}, 0, 0)
     try:
+        from hypogeum.model_effective_pricing import spend_breakdown
+        bd = spend_breakdown(db_path=_resolve_db_path(db_path))
+
         conn = get_connection(_resolve_db_path(db_path))
         try:
-            total_row = conn.execute(
-                "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM costs"
-            ).fetchone()
-
-            provider_rows = conn.execute("""
-                SELECT provider, SUM(cost_usd) AS total
-                FROM costs GROUP BY provider ORDER BY total DESC
-            """).fetchall()
-
-            model_rows = conn.execute("""
-                SELECT model, SUM(cost_usd) AS total
-                FROM costs WHERE model IS NOT NULL
-                GROUP BY model ORDER BY total DESC
-            """).fetchall()
-
-            episode_rows = conn.execute("""
-                SELECT episode_id, SUM(cost_usd) AS total
-                FROM costs GROUP BY episode_id ORDER BY total DESC
-            """).fetchall()
-
             run_count = conn.execute(
                 "SELECT COUNT(*) AS cnt FROM runs"
             ).fetchone()["cnt"]
-
             episode_count = conn.execute(
                 "SELECT COUNT(*) AS cnt FROM episodes"
             ).fetchone()["cnt"]
@@ -1190,10 +1177,10 @@ def get_cost_summary(db_path: Optional[Path] = None) -> CostSummary:
             conn.close()
 
         return CostSummary(
-            total_usd     = round(total_row["total"] or 0.0, 6),
-            by_provider   = {r["provider"]: round(r["total"] or 0.0, 6) for r in provider_rows},
-            by_model      = {r["model"]: round(r["total"] or 0.0, 6) for r in model_rows if r["model"]},
-            by_episode    = {r["episode_id"]: round(r["total"] or 0.0, 6) for r in episode_rows},
+            total_usd     = round(bd["total"], 6),
+            by_provider   = bd["by_provider"],
+            by_model      = bd["by_model"],
+            by_episode    = bd["by_episode"],
             run_count     = run_count     or 0,
             episode_count = episode_count or 0,
         )

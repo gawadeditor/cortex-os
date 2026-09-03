@@ -100,6 +100,19 @@ def get_active_runs(db_path: Optional[Path] = None) -> list[dict]:
                 ).fetchone()
                 d["stages_done"] = done["n"] if done else 0
 
+                # costs.cost_usd (per run) omits all MUAPI spend — show the
+                # full episode bill-to-date instead.
+                try:
+                    from hypogeum.model_effective_pricing import episode_billed_spend
+                    _b = episode_billed_spend(
+                        db_path=_db(db_path),
+                        episode_ids=[d["episode_id"]] if d.get("episode_id") else [],
+                    )
+                    if d.get("episode_id") in _b:
+                        d["cost_so_far"] = _b[d["episode_id"]]
+                except Exception:
+                    pass
+
                 result.append(d)
         finally:
             conn.close()
@@ -249,11 +262,18 @@ def get_live_metrics(db_path: Optional[Path] = None) -> dict:
                 "SELECT COUNT(*) AS n FROM run_queue WHERE status='queued'"
             ).fetchone()["n"]
 
+            # costs.cost_usd holds no MUAPI (video/upscale) spend — ~70% of
+            # the real daily bill. Pull the complete figure from the
+            # grant-consumption ledger; keep the costs tokens column.
             cost_row = conn.execute("""
-                SELECT COALESCE(SUM(cost_usd),0) AS cost,
-                       COALESCE(SUM(tokens_or_credits),0) AS tokens
+                SELECT COALESCE(SUM(tokens_or_credits),0) AS tokens
                 FROM costs WHERE called_at >= ?
             """, [today]).fetchone()
+            try:
+                from hypogeum.model_effective_pricing import spend_since
+                cost_today = spend_since(today, db_path=_db(db_path))
+            except Exception:
+                cost_today = 0.0
 
             failed_24h = conn.execute("""
                 SELECT COUNT(*) AS n FROM runs
@@ -271,7 +291,7 @@ def get_live_metrics(db_path: Optional[Path] = None) -> dict:
         return {
             "active_runs":    active,
             "queue_depth":    queue_depth,
-            "cost_today_usd": round(cost_row["cost"]   or 0.0, 4) if cost_row else 0.0,
+            "cost_today_usd": round(cost_today or 0.0, 4),
             "tokens_today":   int(cost_row["tokens"]   or 0)      if cost_row else 0,
             "failed_24h":     failed_24h,
             "completed_24h":  completed_24h,

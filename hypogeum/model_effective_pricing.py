@@ -162,15 +162,18 @@ def episode_billed_spend(
         try:
             want = set(episode_ids) if episode_ids else None
             state_filter = ",".join("?" for _ in _NON_SPEND_STATES)
-            grant_rows = conn.execute(
-                f"""
-                SELECT idempotency_key, charged_amount, reserved_amount
-                FROM run_authorization_grant_consumption
-                WHERE idempotency_key LIKE 'ep\\_%' ESCAPE '\\'
-                  AND COALESCE(state, '') NOT IN ({state_filter})
-                """,
-                _NON_SPEND_STATES,
-            ).fetchall()
+            try:
+                grant_rows = conn.execute(
+                    f"""
+                    SELECT idempotency_key, charged_amount, reserved_amount
+                    FROM run_authorization_grant_consumption
+                    WHERE idempotency_key LIKE 'ep\\_%' ESCAPE '\\'
+                      AND COALESCE(state, '') NOT IN ({state_filter})
+                    """,
+                    _NON_SPEND_STATES,
+                ).fetchall()
+            except Exception:  # noqa: BLE001 - table absent in a bare schema
+                grant_rows = []
             has_grant: set[str] = set()
             for r in grant_rows:
                 ep = str(r["idempotency_key"]).split(":", 1)[0]
@@ -206,6 +209,87 @@ def _num(x) -> float:  # noqa: ANN001
         return float(x)
     except (TypeError, ValueError):
         return 0.0
+
+
+def spend_breakdown(*, db_path: Optional[Path] = None,
+                    since: Optional[str] = None) -> dict:
+    """Complete factory spend, split by provider / model / episode, plus a
+    grand total — from the same two-ledger logic as episode_billed_spend():
+    run_authorization_grant_consumption is authoritative for every episode
+    that has grant rows (all current episodes; MUAPI video included), and
+    the costs table is added only for older episodes with no grant rows, so
+    the shared LLM+audio rows are never double-counted.
+
+    `since` (ISO ts) filters both ledgers by their own time column. Returns
+    {"total", "by_provider": {p: usd}, "by_model": {m: usd},
+     "by_episode": {ep: usd}, "basis"}. Never raises."""
+    by_provider: dict[str, float] = {}
+    by_model: dict[str, float] = {}
+    by_episode: dict[str, float] = {}
+    grant_eps: set[str] = set()
+    try:
+        from hypogeum.db import get_connection
+        conn = get_connection(Path(db_path) if db_path else None)
+        try:
+            state_ph = ",".join("?" for _ in _NON_SPEND_STATES)
+            gq = (f"SELECT idempotency_key, provider, model, charged_amount, "
+                  f"reserved_amount FROM run_authorization_grant_consumption "
+                  f"WHERE idempotency_key LIKE 'ep\\_%' ESCAPE '\\' "
+                  f"AND COALESCE(state,'') NOT IN ({state_ph})")
+            gp = list(_NON_SPEND_STATES)
+            if since:
+                gq += " AND created_at >= ?"
+                gp.append(since)
+            try:
+                grant_rows = conn.execute(gq, gp).fetchall()
+            except Exception:  # noqa: BLE001 - table absent in a bare schema
+                grant_rows = []
+            for r in grant_rows:
+                ep = str(r["idempotency_key"]).split(":", 1)[0]
+                amt = _num(r["charged_amount"]) or _num(r["reserved_amount"])
+                amt = max(amt, 0.0)
+                grant_eps.add(ep)
+                by_episode[ep] = by_episode.get(ep, 0.0) + amt
+                if r["provider"]:
+                    by_provider[r["provider"]] = by_provider.get(r["provider"], 0.0) + amt
+                if r["model"]:
+                    by_model[r["model"]] = by_model.get(r["model"], 0.0) + amt
+
+            cq = ("SELECT episode_id, provider, model, cost_usd FROM costs "
+                  "WHERE cost_usd IS NOT NULL AND cost_usd > 0")
+            cp: list = []
+            if since:
+                cq += " AND called_at >= ?"
+                cp.append(since)
+            for r in conn.execute(cq, cp):
+                ep = r["episode_id"]
+                if ep and ep in grant_eps:
+                    continue  # grant ledger already covers this episode
+                amt = max(_num(r["cost_usd"]), 0.0)
+                if ep:
+                    by_episode[ep] = by_episode.get(ep, 0.0) + amt
+                if r["provider"]:
+                    by_provider[r["provider"]] = by_provider.get(r["provider"], 0.0) + amt
+                if r["model"]:
+                    by_model[r["model"]] = by_model.get(r["model"], 0.0) + amt
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001
+        log.warn("spend_breakdown_failed", error=str(exc))
+
+    rnd = lambda d: {k: round(v, 4) for k, v in sorted(d.items(), key=lambda kv: -kv[1])}
+    return {
+        "total": round(sum(by_episode.values()), 4),
+        "by_provider": rnd(by_provider),
+        "by_model": rnd(by_model),
+        "by_episode": rnd(by_episode),
+        "basis": "billed",
+    }
+
+
+def spend_since(since: str, *, db_path: Optional[Path] = None) -> float:
+    """Total billed spend since an ISO timestamp. Never raises."""
+    return spend_breakdown(db_path=db_path, since=since).get("total", 0.0)
 
 
 def effective_price(model_id: str, *, db_path: Optional[Path] = None) -> Optional[float]:

@@ -157,3 +157,41 @@ def test_episode_billed_filters_by_requested_ids(billed_db):
 
 def test_episode_billed_never_raises(tmp_path):
     assert mep.episode_billed_spend(db_path=tmp_path / "nope.db") == {}
+
+
+def test_episode_billed_costs_only_when_grant_table_absent(tmp_path):
+    """A bare schema has no run_authorization_grant_consumption table — the
+    costs fallback must still work, not blow up the whole call."""
+    p = tmp_path / "bare.db"
+    initialize_schema(p)
+    conn = get_connection(p)
+    conn.execute("INSERT INTO episodes (episode_id, created_at) VALUES ('ep_c', '2026-09-03')")
+    conn.execute("INSERT INTO runs (run_id, episode_id, started_at) VALUES ('r', 'ep_c', '2026-09-03')")
+    conn.execute(
+        "INSERT INTO costs (cost_id, run_id, episode_id, provider, model, call_type, "
+        "tokens_or_credits, cost_usd, called_at, metadata_version) VALUES "
+        "('c1', 'r', 'ep_c', 'openrouter', 'x', 'text', 1, 3.5, '2026-09-03T00:00:00', 'v1')",
+    )
+    conn.commit()
+    conn.close()
+    assert mep.episode_billed_spend(db_path=p) == {"ep_c": 3.5}
+
+
+# --- spend_breakdown -----------------------------------------------------
+
+def test_spend_breakdown_merges_ledgers_without_double_count(billed_db):
+    bd = mep.spend_breakdown(db_path=billed_db)
+    assert bd["by_episode"]["ep_new"] == pytest.approx(9.75)  # grant only
+    assert bd["by_episode"]["ep_old"] == pytest.approx(7.27)  # costs fallback
+    assert bd["total"] == pytest.approx(17.02)
+    assert bd["by_provider"]["muapi"] == pytest.approx(9.75)
+
+
+def test_spend_since_filters(billed_db):
+    # ep_old's cost row is dated 2026-08-20; ep_new's grant rows 2026-09-03
+    assert mep.spend_since("2026-09-01", db_path=billed_db) == pytest.approx(9.75)
+
+
+def test_spend_breakdown_never_raises(tmp_path):
+    bd = mep.spend_breakdown(db_path=tmp_path / "nope.db")
+    assert bd["total"] == 0 and bd["by_provider"] == {}

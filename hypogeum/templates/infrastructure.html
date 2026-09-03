@@ -14,7 +14,7 @@
                   border-radius: var(--radius); padding: 18px 20px;
                   text-decoration: none; display: block;
                   transition: border-color .15s, box-shadow .15s; }
-    .infra-card:hover { border-color: var(--blue); box-shadow: 0 2px 12px rgba(0,0,0,.35);
+    .infra-card:hover { border-color: var(--accent-line); box-shadow: 0 2px 12px rgba(0,0,0,.35);
                         text-decoration: none; }
 
     .ic-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
@@ -32,7 +32,7 @@
 
     .ic-arrow  { font-size: 12px; color: var(--muted); margin-top: 12px;
                  display: flex; justify-content: flex-end; }
-    .infra-card:hover .ic-arrow { color: var(--blue); }
+    .infra-card:hover .ic-arrow { color: var(--accent); }
   </style>
 </head>
 <body>
@@ -43,11 +43,9 @@
 
 {% include '_infrastructure_subnav.html' %}
 
-<div class="page-header">
-  <h1>Infrastructure</h1>
-  <span class="page-meta">Operational visibility for workers, providers, connections, and configuration</span>
-  <span class="badge badge-unknown" style="margin-left:auto; font-size:11px;">Read-only monitoring</span>
-</div>
+{% from '_hero.html' import hero %}
+{{ hero(eyebrow='Factory', title='System health',
+   lede='A quick read on the parts that keep the factory running — the production engine, the creative tools, the platform accounts and the setup. Nothing here changes anything; it just shows the state.') }}
 
 {% if not ok %}
 <div class="card" style="border-color:var(--red); padding:12px 16px; margin-bottom:var(--gap);">
@@ -66,7 +64,7 @@
   <a href="/infrastructure/workers" class="infra-card">
     <div class="ic-header">
       <span class="ic-icon">{{ icon("settings") }}</span>
-      <span class="ic-title">Workers</span>
+      <span class="ic-title">Production engine</span>
       {% if w.error > 0 %}
         <span class="badge badge-blocked" style="font-size:10px; margin-left:auto;">{{ w.error }} error</span>
       {% elif w.running > 0 %}
@@ -77,11 +75,11 @@
         <span class="badge badge-unknown" style="font-size:10px; margin-left:auto;">unknown</span>
       {% endif %}
     </div>
-    <p class="ic-desc">Background worker state, last run times, and outcome summaries.</p>
+    <p class="ic-desc">Is Cortex actively producing? Recent runs and how they turned out.</p>
     <div class="ic-stats">
       <div class="ic-stat">
         <span class="ic-stat-val">{{ w.total }}</span>
-        <span class="ic-stat-lbl">Workers</span>
+        <span class="ic-stat-lbl">Total</span>
       </div>
       <div class="ic-stat">
         <span class="ic-stat-val {% if w.idle > 0 %}ok{% else %}muted{% endif %}">{{ w.idle }}</span>
@@ -93,17 +91,17 @@
       </div>
       <div class="ic-stat">
         <span class="ic-stat-val {% if w.error > 0 %}err{% else %}muted{% endif %}">{{ w.error }}</span>
-        <span class="ic-stat-lbl">Error</span>
+        <span class="ic-stat-lbl">Errored</span>
       </div>
     </div>
-    <div class="ic-arrow">Workers →</div>
+    <div class="ic-arrow">Details →</div>
   </a>
 
   {# ── Providers ── #}
   <a href="/infrastructure/providers" class="infra-card">
     <div class="ic-header">
       <span class="ic-icon">{{ icon("robot") }}</span>
-      <span class="ic-title">Providers</span>
+      <span class="ic-title">Creative tools</span>
       {% if p.degraded > 0 %}
         <span class="badge badge-degraded" style="font-size:10px; margin-left:auto;">{{ p.degraded }} degraded</span>
       {% elif p.connected > 0 %}
@@ -112,7 +110,7 @@
         <span class="badge badge-unknown" style="font-size:10px; margin-left:auto;">unknown</span>
       {% endif %}
     </div>
-    <p class="ic-desc">External AI and media service health — credential status and operational readiness.</p>
+    <p class="ic-desc">The AI services that write, voice and generate video — are they reachable and paid up.</p>
     <div class="ic-stats">
       <div class="ic-stat">
         <span class="ic-stat-val">{{ p.total }}</span>
@@ -131,14 +129,14 @@
         <span class="ic-stat-lbl">Disconnected</span>
       </div>
     </div>
-    <div class="ic-arrow">Providers →</div>
+    <div class="ic-arrow">Details →</div>
   </a>
 
   {# ── Connections ── #}
   <a href="/infrastructure/connections" class="infra-card">
     <div class="ic-header">
       <span class="ic-icon">{{ icon("link") }}</span>
-      <span class="ic-title">Connections</span>
+      <span class="ic-title">Platform accounts</span>
       {% if c.expired > 0 %}
         <span class="badge badge-blocked" style="font-size:10px; margin-left:auto;">{{ c.expired }} expired</span>
       {% elif c.degraded > 0 %}
@@ -149,7 +147,7 @@
         <span class="badge badge-unknown" style="font-size:10px; margin-left:auto;">unknown</span>
       {% endif %}
     </div>
-    <p class="ic-desc">Platform OAuth health, token expiry, sync state, and publishing outcomes.</p>
+    <p class="ic-desc">The social accounts each channel publishes to, via Zernio.</p>
     <div class="ic-stats">
       <div class="ic-stat">
         <span class="ic-stat-val">{{ c.total }}</span>
@@ -170,14 +168,14 @@
         <span class="ic-stat-lbl">Disconnected</span>
       </div>
     </div>
-    <div class="ic-arrow">Connections →</div>
+    <div class="ic-arrow">Details →</div>
   </a>
 
   {# ── Config ── #}
   <a href="/infrastructure/config" class="infra-card">
     <div class="ic-header">
       <span class="ic-icon">{{ icon("wrench") }}</span>
-      <span class="ic-title">Config</span>
+      <span class="ic-title">Setup</span>
       {% if k.blocker_count > 0 %}
         <span class="badge badge-blocked" style="font-size:10px; margin-left:auto;">{{ k.blocker_count }} blocker{% if k.blocker_count != 1 %}s{% endif %}</span>
       {% elif k.env_ready %}
@@ -186,7 +184,7 @@
         <span class="badge badge-unknown" style="font-size:10px; margin-left:auto;">unknown</span>
       {% endif %}
     </div>
-    <p class="ic-desc">Factory configuration state — channels, schedules, model defaults, and environment health.</p>
+    <p class="ic-desc">Channels, schedules and the underlying environment.</p>
     <div class="ic-stats">
       <div class="ic-stat">
         <span class="ic-stat-val {% if k.channel_count > 0 %}ok{% else %}muted{% endif %}">{{ k.channel_count }}</span>
@@ -198,20 +196,17 @@
       </div>
       <div class="ic-stat">
         <span class="ic-stat-val {% if k.blocker_count > 0 %}err{% elif k.env_ready %}ok{% else %}muted{% endif %}">
-          {% if k.env_ready %}✓{% else %}{{ k.blocker_count }}{% endif %}
+          {% if k.env_ready %}OK{% else %}{{ k.blocker_count }}{% endif %}
         </span>
-        <span class="ic-stat-lbl">Env health</span>
+        <span class="ic-stat-lbl">Environment</span>
       </div>
     </div>
-    <div class="ic-arrow">Config →</div>
+    <div class="ic-arrow">Details →</div>
   </a>
 
 </div>
 
-<div style="margin-top:calc(var(--gap)*2); font-size:11px; color:var(--muted);">
-  <a href="/api/infrastructure/summary" style="color:var(--muted);">/api/infrastructure/summary</a>
-  &ensp;·&ensp; All pages are read-only monitoring. No configuration changes are made here.
-</div>
+
 
 </div><!-- /.container -->
 </body>

@@ -2,108 +2,146 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Factory Overview — Cortex</title>
+  <title>All channels — Cortex</title>
   {% include '_base_style.html' %}
+  {% from '_icons.html' import icon %}
+  {% from '_hero.html' import hero %}
+  {% from '_charts.html' import hbar %}
+  <style>
+    .fo-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+                gap: 14px 22px; }
+    .fo-k { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--faint); }
+    .fo-v { font-size: 15px; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }
+    .fo-sub { font-size: 11px; color: var(--muted); margin-top: 2px; max-width: 260px; }
+    .fo-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .fo-table th { text-align: left; padding: 8px 10px; font-size: 10px; text-transform: uppercase;
+                   letter-spacing: .06em; color: var(--faint); border-bottom: 1px solid var(--border-strong); }
+    .fo-table td { padding: 10px; border-bottom: 1px solid var(--hairline); vertical-align: top; }
+    .fo-chan a { color: var(--text); font-weight: 600; }
+  </style>
 </head>
 <body>
 {% include '_nav.html' %}
 
 <div class="container">
 
-
-<div class="page-header">
-  <h1>Factory Overview</h1>
-  <span class="page-meta">every channel, one view</span>
-</div>
-
 {% set agg = overview.get('aggregate', {}) %}
-{% set fc = overview.get('factory_clearance', {}) %}
-{% set wk = overview.get('worker', {}) %}
-{% set lr = overview.get('learning', {}) %}
+{% set fc  = overview.get('factory_clearance', {}) %}
+{% set wk  = overview.get('worker', {}) %}
+{% set lr  = overview.get('learning', {}) %}
+{% set chans = overview.get('channels', []) %}
 
-<div class="card" style="display:flex; gap:24px; flex-wrap:wrap;">
-  <div>
-    <div style="font-size:11px; color:var(--muted);">Factory clearance</div>
-    <div style="font-weight:700; color:{{ 'var(--good)' if fc.get('cleared') else 'var(--critical)' }};">
-      {{ 'CLEARED' if fc.get('cleared') else 'BLOCKED' }}
+{% call hero(
+     eyebrow='Factory',
+     title='All channels, one view',
+     lede='Every channel Cortex is running — where each one is in its week, what it has spent, and anything holding it up.',
+     figure=chans|length,
+     figure_label='channel' ~ ('' if chans|length == 1 else 's'),
+     pill=('Running' if fc.get('cleared') else 'Paused'),
+     pill_class='is-good' if fc.get('cleared') else 'is-warn') %}
+  <a href="/channels" class="btn">{{ icon('grid') }} Channel details</a>
+{% endcall %}
+
+<div class="card">
+  <div class="fo-strip">
+    <div>
+      <div class="fo-k">Factory</div>
+      <div class="fo-v" style="color:{{ 'var(--good)' if fc.get('cleared') else 'var(--critical)' }};">
+        {{ 'Running' if fc.get('cleared') else 'Paused' }}
+      </div>
+      {% if not fc.get('cleared') and fc.get('reason') %}
+      <div class="fo-sub">{{ fc.get('reason') | plain_channel_blocker }}</div>
+      {% endif %}
     </div>
-    {% if not fc.get('cleared') and fc.get('reason') %}
-    <div style="font-size:11px; color:var(--muted); max-width:280px;">{{ fc.get('reason') }}</div>
-    {% endif %}
-  </div>
-  <div>
-    <div style="font-size:11px; color:var(--muted);">Worker</div>
-    <div style="font-weight:600;">
-      {{ wk.get('status') or 'never started' }}{% if wk.get('stale') %} <span style="color:var(--warn);">(stale)</span>{% endif %}
+    <div>
+      <div class="fo-k">Production worker</div>
+      <div class="fo-v">
+        {% if wk.get('stale') %}<span style="color:var(--warn);">Not running</span>
+        {% elif not wk.get('ever_started') %}Never started
+        {% elif wk.get('status') == 'running' %}Making an episode
+        {% else %}Ready — waiting for the next slot{% endif %}
+      </div>
+      {% if wk.get('last_heartbeat_at') %}<div class="fo-sub">Last checked in {{ wk.get('last_heartbeat_at') | rel_time }}</div>{% endif %}
     </div>
-  </div>
-  <div>
-    <div style="font-size:11px; color:var(--muted);">Channels</div>
-    <div style="font-weight:600;">{{ agg.get('channels_autonomous_ready', 0) }} ready / {{ agg.get('channels_total', 0) }} total</div>
-  </div>
-  <div>
-    <div style="font-size:11px; color:var(--muted);">Weekly budget (all channels)</div>
-    <div style="font-weight:600;">
-      ${{ '%.2f' | format(agg.get('weekly_reserved_committed_usd', 0)) }} / ${{ '%.2f' | format(agg.get('weekly_ceiling_usd', 0)) }}
-      {% if agg.get('weekly_pct_used') is not none %}<span style="color:var(--muted);">({{ agg.get('weekly_pct_used') }}%)</span>{% endif %}
+    <div>
+      <div class="fo-k">Channels ready</div>
+      <div class="fo-v">{{ agg.get('channels_autonomous_ready', 0) }} <span style="color:var(--faint);font-weight:400">of {{ agg.get('channels_total', 0) }}</span></div>
+      <div class="fo-sub">running without anyone in the loop</div>
     </div>
-  </div>
-  <div>
-    <div style="font-size:11px; color:var(--muted);">Learning</div>
-    <div style="font-weight:600;">
-      {{ lr.get('total_insights', 0) }} insights · {{ lr.get('pending_actions', 0) }} pending action{{ '' if lr.get('pending_actions', 0) == 1 else 's' }}
+    <div>
+      <div class="fo-k">This week's spend</div>
+      <div class="fo-v">{{ agg.get('weekly_reserved_committed_usd', 0) | friendly_money }} <span style="color:var(--faint);font-weight:400">of {{ agg.get('weekly_ceiling_usd', 0) | friendly_money }}</span></div>
+      {% if agg.get('weekly_ceiling_usd', 0) %}
+      {{ hbar(agg.get('weekly_reserved_committed_usd', 0), agg.get('weekly_ceiling_usd', 0),
+              tone=('critical' if (agg.get('weekly_pct_used') or 0) >= 90 else ('warn' if (agg.get('weekly_pct_used') or 0) >= 70 else 'accent'))) }}
+      {% endif %}
     </div>
-    {% if lr.get('top_recommendation') %}
-    <div style="font-size:11px; color:var(--muted); max-width:280px;">Top: {{ lr.get('top_recommendation') }}</div>
-    {% endif %}
+    <div>
+      <div class="fo-k">What Cortex has learned</div>
+      <div class="fo-v">{{ lr.get('total_insights', 0) }} <span style="color:var(--faint);font-weight:400">insight{{ '' if lr.get('total_insights', 0) == 1 else 's' }}</span></div>
+      <div class="fo-sub">
+        {{ lr.get('pending_actions', 0) }} suggestion{{ '' if lr.get('pending_actions', 0) == 1 else 's' }} waiting for you
+        {%- if lr.get('top_recommendation') %} · <a href="/intelligence/learning">see what to change →</a>{% endif %}
+      </div>
+    </div>
   </div>
 </div>
 
 <div class="card" style="margin-top:16px; overflow-x:auto;">
-  <table style="width:100%; border-collapse:collapse; font-size:13px;">
+  <div class="card-title">Channel by channel</div>
+  <table class="fo-table">
     <thead>
-      <tr style="text-align:left; color:var(--muted); border-bottom:1px solid var(--border);">
-        <th style="padding:6px 10px;">Channel</th>
-        <th style="padding:6px 10px;">Autonomous</th>
-        <th style="padding:6px 10px;">Weekly $</th>
-        <th style="padding:6px 10px;">Queue</th>
-        <th style="padding:6px 10px;">Latest run</th>
-        <th style="padding:6px 10px;">Next slot</th>
-        <th style="padding:6px 10px;">Blockers</th>
+      <tr>
+        <th>Channel</th>
+        <th>Status</th>
+        <th>This week</th>
+        <th>Waiting to make</th>
+        <th>Last episode</th>
+        <th>Next start</th>
+        <th>Holding it up</th>
       </tr>
     </thead>
     <tbody>
-    {% for c in overview.get('channels', []) %}
+    {% for c in chans %}
       {% set wb = c.get('weekly_budget', {}) %}
-      <tr style="border-bottom:1px solid var(--border);">
-        <td style="padding:6px 10px;">
-          <a href="/channel/{{ c.channel_id }}" style="color:var(--text);">{{ c.name or c.channel_id }}</a>
-          <div style="font-size:11px; color:var(--muted);">{{ c.channel_id }}</div>
+      {% set q  = c.get('queue', {}) %}
+      <tr>
+        <td class="fo-chan">
+          <a href="/channel/{{ c.channel_id }}">{{ c.name or (c.channel_id | channel_name) }}</a>
         </td>
-        <td style="padding:6px 10px; color:{{ 'var(--good)' if c.get('autonomous_ready') else 'var(--warn)' }}; font-weight:700;">
-          {{ 'READY' if c.get('autonomous_ready') else (c.get('blockers') | length ~ ' blocked') }}
+        <td>
+          {% if c.get('autonomous_ready') %}
+            <span class="badge badge-active">Running on its own</span>
+          {% else %}
+            <span class="badge badge-queued">{{ c.get('blockers') | length }} thing{{ '' if c.get('blockers') | length == 1 else 's' }} to fix</span>
+          {% endif %}
         </td>
-        <td style="padding:6px 10px;">
+        <td>
           {% if wb.get('configured') %}
-            ${{ '%.2f' | format(wb.get('reserved_committed_usd') or 0) }} / ${{ '%.2f' | format(wb.get('ceiling_usd') or 0) }}
-          {% else %}<span style="color:var(--muted);">—</span>{% endif %}
+            {{ (wb.get('reserved_committed_usd') or 0) | friendly_money }} <span style="color:var(--faint);">of {{ (wb.get('ceiling_usd') or 0) | friendly_money }}</span>
+            {% set _p = wb.get('pct_used') or 0 %}
+            {{ hbar(wb.get('reserved_committed_usd') or 0, wb.get('ceiling_usd') or 1,
+                    tone=('critical' if _p >= 90 else ('warn' if _p >= 70 else 'accent'))) }}
+          {% else %}<span style="color:var(--muted);">Not set</span>{% endif %}
         </td>
-        <td style="padding:6px 10px;">{{ c.get('queue', {}).get('queued_topics', 0) }}q / {{ c.get('queue', {}).get('claimed_topics', 0) }}c</td>
-        <td style="padding:6px 10px;">{{ c.get('latest_run') or '—' }}</td>
-        <td style="padding:6px 10px;">{{ c.get('next_scheduled_slot') or '—' }}</td>
-        <td style="padding:6px 10px; font-size:11px; color:var(--muted); max-width:320px;">
-          {{ c.get('blockers', []) | join('; ') or '—' }}
+        <td>{{ q.get('queued_topics', 0) }} topic{{ '' if q.get('queued_topics', 0) == 1 else 's' }}</td>
+        <td>{{ (c.get('latest_run') | plain_status) if c.get('latest_run') else '—' }}</td>
+        <td>{{ (c.get('next_scheduled_slot') | friendly_dt) if c.get('next_scheduled_slot') else '—' }}</td>
+        <td style="font-size:12px; color:var(--muted); max-width:320px;">
+          {% if c.get('blockers') %}
+            {% for b in c.get('blockers') %}{{ b | plain_channel_blocker }}{% if not loop.last %}<br>{% endif %}{% endfor %}
+          {% else %}<span style="color:var(--good);">Nothing</span>{% endif %}
         </td>
       </tr>
     {% else %}
-      <tr><td colspan="7" style="padding:20px; text-align:center; color:var(--muted);">No channels configured.</td></tr>
+      <tr><td colspan="7" style="padding:20px; text-align:center; color:var(--muted);">No channels yet.</td></tr>
     {% endfor %}
     </tbody>
   </table>
 </div>
 
 <div style="margin-top:10px; font-size:11px; color:var(--muted);">
-  Generated {{ overview.get('generated_at', '') }} · <a href="/api/factory/overview">JSON</a>
+  Updated {{ overview.get('generated_at', '') | rel_time }}
 </div>
 </div><!-- /.container -->
 </body>

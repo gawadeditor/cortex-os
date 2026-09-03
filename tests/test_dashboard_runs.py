@@ -563,7 +563,7 @@ class TestFlaskRunRoutes:
         client, ids = flask_client
         r = client.get(f"/run/{ids['run_ok']}")
         text = r.get_data(as_text=True)
-        assert "Cost Breakdown" in text
+        assert "Text &amp; voice calls" in text or "Text & voice calls" in text
 
     def test_run_detail_shows_gates(self, flask_client):
         client, ids = flask_client

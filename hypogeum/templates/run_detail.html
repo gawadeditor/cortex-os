@@ -85,27 +85,19 @@
    own pipeline-level status below. WorkerAttempt is keyed by episode_id,
    not run_id, so this is "the latest attempt for this episode," which may
    be newer than the run being viewed if a later retry was gate-refused. #}
-{% if d.worker_attempt %}
-<div class="card" style="margin-bottom:var(--gap); border-color:
-  {% if d.worker_attempt.blocked_reason %}var(--red){% else %}var(--border){% endif %};">
-  <div class="card-title" style="display:flex; align-items:center; gap:8px;">
-    Latest Gate Attempt
-    <span style="font-size:11px; color:var(--muted); font-weight:400;">
-      ({{ d.worker_attempt.invocation_mode }}, this episode)
-    </span>
-  </div>
-  {% if d.worker_attempt.blocked_reason %}
-  <div style="font-size:13px;">
-    <span style="color:var(--red); font-weight:600;">Blocked:</span> {{ d.worker_attempt.blocked_reason }}
-  </div>
-  {% elif d.worker_attempt.success %}
-  <div style="font-size:13px; color:var(--green);">✓ Passed all gates and ran</div>
-  {% else %}
-  <div style="font-size:13px; color:var(--muted);">Not yet resolved</div>
-  {% endif %}
+{# A finished/complete run already told its story above — a stale
+   "latest gate attempt was blocked" (a later re-admission that was
+   correctly refused because the episode was already done) only confuses.
+   Show this box only when it adds something: this run isn't finished and
+   the attempt was actually blocked. #}
+{% if d.worker_attempt and d.worker_attempt.blocked_reason
+      and d.run.status not in ('complete','completed','published') %}
+<div class="card" style="margin-bottom:var(--gap); border-color:var(--red);">
+  <div class="card-title">Why the next attempt didn't start</div>
+  <div style="font-size:13px;">{{ d.worker_attempt.blocked_reason | plain_tech }}</div>
   {% if d.worker_attempt.finished_at %}
   <div style="font-size:11px; color:var(--muted); margin-top:4px;">
-    as of {{ d.worker_attempt.finished_at[:19] | replace('T',' ') }}
+    {{ d.worker_attempt.finished_at | rel_time }}
   </div>
   {% endif %}
 </div>
@@ -473,7 +465,7 @@ function submitRaiseCeiling(btn) {
 {% set _maxdur = (_timed | map(attribute='duration_ms') | max) %}
 {% set _maxcost = (d.stages | map(attribute='cost_usd') | map('default', 0) | map('float') | max) or 0 %}
 <div class="card">
-  <div class="card-title">Where the time and money went — {{ d.stage_count }} steps · {{ d.total_cost_usd | friendly_money }} total</div>
+  <div class="card-title">Where the time went — {{ d.stage_count }} steps{% if d.total_cost_usd %} · {{ d.total_cost_usd | friendly_money }} in text steps{% endif %}</div>
   <div class="table-wrap" style="border:none;">
   <table>
     <thead><tr><th>Step</th><th style="width:34%;">Time</th><th style="width:26%;">Cost</th></tr></thead>
@@ -656,21 +648,23 @@ function submitRaiseCeiling(btn) {
 {# ── Costs ── #}
 {% if d.costs %}
 <div class="card">
-  <div class="card-title">Cost Breakdown (${{ "%.4f"|format(d.total_cost_usd) }} total)</div>
-  <table>
-    <thead><tr><th>Provider</th><th>Model</th><th>Type</th><th>Cost</th><th>Time</th></tr></thead>
+  <div class="card-title">Text &amp; voice calls
+    <span class="muted" style="font-weight:400; font-size:12px;">· {{ d.total_cost_usd | friendly_money }}{% if d.episode_billed_usd and d.episode_billed_usd > d.total_cost_usd %} · video billed separately (episode total {{ d.episode_billed_usd | friendly_money }}){% endif %}</span>
+  </div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Provider</th><th>Model</th><th>Type</th><th style="text-align:right;">Cost</th><th>Time</th></tr></thead>
     <tbody>
       {% for c in d.costs %}
       <tr>
-        <td>{{ c.provider }}</td>
-        <td class="muted" style="font-size:12px; word-break:break-all;">{{ c.model or '—' }}</td>
-        <td class="muted">{{ c.call_type }}</td>
-        <td style="text-align:right; font-variant-numeric:tabular-nums;">${{ "%.5f"|format(c.cost_usd or 0) }}</td>
+        <td>{{ c.provider | friendly_provider }}</td>
+        <td class="muted" style="font-size:12px;">{{ c.model | friendly_model }}</td>
+        <td class="muted">{{ (c.call_type or '') | replace('_',' ') }}</td>
+        <td style="text-align:right; font-variant-numeric:tabular-nums;">{{ (c.cost_usd or 0) | friendly_money }}</td>
         <td class="muted" style="font-size:12px;">{{ c.called_at[11:19] if c.called_at else '—' }}</td>
       </tr>
       {% endfor %}
     </tbody>
-  </table>
+  </table></div>
 </div>
 {% endif %}
 

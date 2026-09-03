@@ -3,63 +3,31 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Production plan — {{ channel_id }} — Cortex</title>
+  <title>Production plan — Cortex</title>
   {% include '_base_style.html' %}
   <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body { background: var(--bg); color: var(--text);
-           font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-           font-size: 14px; line-height: 1.5; padding: var(--gap); max-width: 660px; }
-    a { color: var(--blue); text-decoration: none; }
-    .page-header { display: flex; align-items: baseline; gap: 12px; margin-bottom: var(--gap); flex-wrap: wrap; }
-    .page-header h1 { font-size: 20px; font-weight: 600; }
-    .card { background: var(--surface); border: 1px solid var(--border);
-            border-radius: var(--radius); padding: 20px; margin-bottom: var(--gap); }
-    .card h2 { font-size: 12px; font-weight: 600; text-transform: uppercase;
-               letter-spacing: .05em; color: var(--muted); margin-bottom: 12px; }
-    .field { margin-bottom: 14px; }
-    .row { display: flex; gap: 12px; flex-wrap: wrap; }
-    .row .field { flex: 1; min-width: 140px; }
-    label { display: block; font-size: 12px; color: var(--muted); text-transform: uppercase;
-            letter-spacing: .05em; margin-bottom: 4px; }
-    input[type=text], input[type=number] {
-      width: 100%; background: var(--bg); border: 1px solid var(--border);
-      border-radius: var(--radius); color: var(--text); font-size: 14px;
-      font-family: inherit; padding: 6px 10px;
-    }
-    input:focus { outline: none; border-color: var(--blue); }
-    .hint { font-size: 11px; color: var(--muted); margin-top: 3px; }
-    .checks label { display: flex; align-items: center; gap: 8px; text-transform: none;
-                    letter-spacing: normal; font-size: 13px; color: var(--text); margin-bottom: 8px; }
-    .checks input { width: auto; }
-    .actions { display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
-    .btn { display: inline-flex; align-items: center; padding: 6px 16px;
-           border: 1px solid var(--border); border-radius: var(--radius);
-           background: transparent; color: var(--text); font-size: 13px;
-           font-family: inherit; cursor: pointer; text-decoration: none; }
-    .btn-save { background: var(--good-bg); border-color: var(--good); color: var(--green); }
-    .btn-save:hover { background: var(--good-bg); }
-    .btn:hover { border-color: var(--blue); color: var(--blue); }
-    .errors { background: var(--critical-bg); border: 1px solid var(--red); border-radius: var(--radius);
-              padding: 12px 14px; margin-bottom: var(--gap); }
-    .errors li { margin-left: 18px; color: var(--critical); }
+    .ops-form { max-width: 680px; }
+    .checks label { display: flex; align-items: flex-start; gap: 10px; text-transform: none;
+                    letter-spacing: normal; font-size: 13.5px; color: var(--text); margin-bottom: 12px; font-weight: 500; }
+    .checks input { width: auto; margin-top: 3px; }
+    .checks .sub { display: block; font-size: 12px; color: var(--muted); font-weight: 400; margin-top: 2px; }
   </style>
 </head>
 <body>
 {% include "_nav.html" %}
+{% from '_hero.html' import hero %}
 
 <div class="container">
 
-
-<div class="page-header">
-  <h1>Production plan — {{ channel_id }}</h1>
-  <a href="/channel/{{ channel_id|e }}" class="btn">← Back</a>
-</div>
+{{ hero(
+   eyebrow=(channel_id | channel_name),
+   title='Production plan',
+   lede='How often this channel makes episodes, what it may spend, when it publishes, and how much it does on its own.') }}
 
 {% if errors %}
-<div class="errors">
+<div class="flash flash-err">
   <strong>Not saved:</strong>
-  <ul>{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
+  <ul style="margin:6px 0 0 18px;">{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
 </div>
 {% endif %}
 
@@ -67,40 +35,38 @@
 {{ form.get(name) if form and form.get(name) is not none else fallback }}
 {%- endmacro %}
 
-<form method="POST" action="/channel/{{ channel_id|e }}/operations">
+<form method="POST" action="/channel/{{ channel_id|e }}/operations" class="ops-form">
 
   <div class="card">
-    <h2>Cadence — how much this channel produces per week</h2>
+    <div class="card-title">How much this channel makes</div>
     <div class="row">
       <div class="field">
-        <label for="shorts_per_week">Shorts / week</label>
+        <label for="shorts_per_week">Short videos a week</label>
         <input type="number" min="0" id="shorts_per_week" name="shorts_per_week"
                value="{{ val('shorts_per_week', (prof.production_cadence or {}).get('shorts_per_week', 0)) }}">
       </div>
       <div class="field">
-        <label for="videos_per_week">Long videos / week</label>
+        <label for="videos_per_week">Long videos a week</label>
         <input type="number" min="0" id="videos_per_week" name="videos_per_week"
                value="{{ val('videos_per_week', (prof.production_cadence or {}).get('videos_per_week', 0)) }}">
       </div>
     </div>
     <div class="hint">
-      Set long videos to 0 for a shorts-only channel — the daily schedule and the
-      <code>short</code> deliverable buffer are rebuilt automatically on save.
-      A mixed channel keeps its existing weekly bundle cycle.
+      Set long videos to 0 for a shorts-only channel. The daily schedule rebuilds itself when you save.
     </div>
   </div>
 
   <div class="card">
-    <h2>Budget</h2>
+    <div class="card-title">Budget</div>
     <div class="row">
       <div class="field">
-        <label for="weekly_video_budget_usd">Weekly video budget (USD)</label>
+        <label for="weekly_video_budget_usd">Weekly budget ($)</label>
         <input type="number" step="1" min="1" id="weekly_video_budget_usd" name="weekly_video_budget_usd"
                value="{{ val('weekly_video_budget_usd', prof.weekly_video_budget_usd or 135) }}">
-        <div class="hint">Changing this makes the Channel Operating Grant's ceiling stale — you'll be told to re-sign it.</div>
+        <div class="hint">Changing this means you'll need to re-sign the channel's payment authorization.</div>
       </div>
       <div class="field">
-        <label for="cost_ceiling_usd_per_episode">Per-episode ceiling (USD, blank = inherit)</label>
+        <label for="cost_ceiling_usd_per_episode">Cap per episode ($, blank = use the default)</label>
         <input type="text" id="cost_ceiling_usd_per_episode" name="cost_ceiling_usd_per_episode"
                value="{{ val('cost_ceiling_usd_per_episode', prof.cost_ceiling_usd_per_episode if prof.cost_ceiling_usd_per_episode is not none else '') }}">
       </div>
@@ -108,14 +74,15 @@
   </div>
 
   <div class="card">
-    <h2>Schedule</h2>
+    <div class="card-title">When it publishes</div>
     <div class="row">
       <div class="field">
-        <label for="timezone">Timezone (IANA)</label>
+        <label for="timezone">Channel timezone</label>
         <input type="text" id="timezone" name="timezone" value="{{ val('timezone', prof.timezone or 'UTC') }}">
+        <div class="hint">e.g. UTC, Asia/Dubai, America/New_York</div>
       </div>
       <div class="field">
-        <label for="publish_day">Publish day</label>
+        <label for="publish_day">Publish day <span style="text-transform:none;">(long-form only)</span></label>
         <input type="text" id="publish_day" name="publish_day"
                value="{{ val('publish_day', (prof.publishing_schedule or {}).get('day_of_week', 'thursday')) }}">
       </div>
@@ -128,25 +95,25 @@
   </div>
 
   <div class="card checks">
-    <h2>Autonomous operation</h2>
+    <div class="card-title">What this channel does on its own</div>
     {% set flags = [
-      ('operator_enabled', 'Operator enabled (channel may run at all)', prof.operator_enabled),
-      ('unattended_operation_enabled', 'Unattended — run without a human present', prof.unattended_operation_enabled),
-      ('discovery_enabled', 'Discovery — find new topics automatically', prof.discovery_enabled),
-      ('production_enabled', 'Production — run the pipeline', prof.production_enabled),
-      ('publishing_enabled', 'Publishing — release finished deliverables', prof.publishing_enabled),
-      ('analytics_sync_enabled', 'Analytics sync — pull performance data', prof.analytics_sync_enabled),
+      ('operator_enabled', 'This channel is switched on', 'Turn this off to pause the whole channel.', prof.operator_enabled),
+      ('unattended_operation_enabled', 'Run without anyone watching', 'Produce and publish overnight, no approval needed.', prof.unattended_operation_enabled),
+      ('discovery_enabled', 'Find new topics automatically', 'Cortex looks for episode ideas on its own.', prof.discovery_enabled),
+      ('production_enabled', 'Make episodes', 'Run the full production pipeline.', prof.production_enabled),
+      ('publishing_enabled', 'Publish finished episodes', 'Release to the connected platforms via Zernio.', prof.publishing_enabled),
+      ('analytics_sync_enabled', 'Pull in performance data', 'Views, watch-time and click rate from each platform.', prof.analytics_sync_enabled),
     ] %}
-    {% for name, text, current in flags %}
+    {% for name, text, sub, current in flags %}
     <label>
       <input type="checkbox" name="{{ name }}"
              {% if (form.get(name) if form and (name in form) else current) %}checked{% endif %}>
-      {{ text }}
+      <span>{{ text }}<span class="sub">{{ sub }}</span></span>
     </label>
     {% endfor %}
   </div>
 
-  <div class="actions">
+  <div class="btn-row">
     <button type="submit" class="btn btn-save">Save production plan</button>
     <a href="/channel/{{ channel_id|e }}" class="btn">Cancel</a>
   </div>

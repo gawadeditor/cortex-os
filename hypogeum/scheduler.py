@@ -63,6 +63,55 @@ from hypogeum.db import (
 # very next tick regardless of how late it is.
 _MISSED_SCHEDULE_GRACE_SECONDS = 300
 
+# Produce-ahead buffer ceiling. A daily-cadence channel keeps roughly this
+# many episodes finished (or in flight) ahead of what has published, so a
+# failed production day never risks the publish schedule. tick() skips
+# creating a scheduled_run for a channel already at/above this depth and
+# advances its next_run_at to the next period — the buffer covers that day.
+# Override with env PRODUCTION_BUFFER_TARGET; 0 disables the guard entirely
+# (every due schedule fires, pre-guard behavior).
+import os as _os
+try:
+    _PRODUCTION_BUFFER_TARGET = max(0, int(_os.environ.get("PRODUCTION_BUFFER_TARGET", "2")))
+except ValueError:
+    _PRODUCTION_BUFFER_TARGET = 2
+
+
+def channel_buffer_depth(channel_id: str, conn) -> int:
+    """How many episodes for `channel_id` are already produced-but-unpublished
+    or in flight toward a publish slot: non-terminal run_queue items +
+    pending scheduled_runs + finished runs with no succeeded publication and
+    not superseded. Best-effort — returns 0 on any query error so the guard
+    fails OPEN (never blocks production because of a counting bug)."""
+    try:
+        q = int(conn.execute(
+            "SELECT COUNT(*) FROM run_queue WHERE channel_id = ? "
+            "AND status IN ('queued','claimed')", (channel_id,),
+        ).fetchone()[0] or 0)
+        try:
+            sr = int(conn.execute(
+                "SELECT COUNT(*) FROM scheduled_runs WHERE channel_id = ? "
+                "AND status = 'pending'", (channel_id,),
+            ).fetchone()[0] or 0)
+        except Exception:  # noqa: BLE001
+            sr = 0
+        try:
+            done_unpub = int(conn.execute(
+                "SELECT COUNT(DISTINCT r.episode_id) FROM runs r "
+                "WHERE r.channel_id = ? AND r.status IN ('complete','completed') "
+                "AND r.episode_id IS NOT NULL "
+                "AND NOT EXISTS (SELECT 1 FROM publication_intents pi "
+                "  WHERE pi.episode_id = r.episode_id AND pi.status = 'succeeded') "
+                "AND NOT EXISTS (SELECT 1 FROM episodes e "
+                "  WHERE e.episode_id = r.episode_id AND e.status = 'superseded')",
+                (channel_id,),
+            ).fetchone()[0] or 0)
+        except Exception:  # noqa: BLE001
+            done_unpub = 0
+        return q + sr + done_unpub
+    except Exception:  # noqa: BLE001
+        return 0
+
 _WEEKDAY_NAMES = {
     "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
     "friday": 4, "saturday": 5, "sunday": 6,
@@ -375,9 +424,33 @@ def tick(
         due = get_due_schedules(conn, as_of=now_iso)
 
         for row in due:
-            scheduled_run_id = _new_id()
             cadence = row["cadence"]
             next_dt = compute_next_run(cadence, now)
+
+            # Produce-ahead buffer guard: if this channel already has enough
+            # finished / in-flight episodes ahead of what has published, skip
+            # producing today — just roll next_run_at forward. The buffer
+            # covers this slot. (0 disables; a channel with no channel_id or
+            # a non-recurring cadence is never guarded.)
+            channel_id_g = row["channel_id"] if "channel_id" in row.keys() else None
+            if _PRODUCTION_BUFFER_TARGET and channel_id_g and next_dt is not None:
+                depth = channel_buffer_depth(channel_id_g, conn)
+                if depth >= _PRODUCTION_BUFFER_TARGET:
+                    from hypogeum.logger import get_logger
+                    get_logger(agent="scheduler").info(
+                        "scheduled_tick_skipped_buffer_full",
+                        schedule_id=row["schedule_id"], channel_id=channel_id_g,
+                        buffer_depth=depth, buffer_target=_PRODUCTION_BUFFER_TARGET,
+                        next_run_at=_iso(next_dt),
+                    )
+                    update_schedule_next_run(
+                        conn, schedule_id=row["schedule_id"],
+                        next_run_at=_iso(next_dt), last_run_at=now_iso,
+                        updated_at=now_iso,
+                    )
+                    continue
+
+            scheduled_run_id = _new_id()
 
             due_at = row["next_run_at"]
             if due_at:

@@ -955,3 +955,56 @@ class TestSchemaMigration:
         sr = _sched_run_row(p, sr_ids[0])
         assert sr["schedule_id"] == sid
         assert sr["status"] == "pending"
+
+
+class TestProduceAheadBufferGuard:
+    """tick() skips producing for a channel already at the buffer ceiling."""
+
+    def _seed_run_queue(self, db_path, channel_id, n, status="queued"):
+        from hypogeum.queue import enqueue
+        for _ in range(n):
+            enqueue(channel_id=channel_id, priority=0, source="manual", db_path=db_path)
+
+    def test_guard_skips_when_buffer_full_but_advances_next_run(self, db_path, monkeypatch):
+        import hypogeum.scheduler as sch
+        monkeypatch.setattr(sch, "_PRODUCTION_BUFFER_TARGET", 2)
+        past = _now() - timedelta(minutes=1)
+        sid = create_schedule(db_path=db_path, scope="channel", channel_id="ch_buf",
+                              cadence="daily", next_run_at=past)
+        self._seed_run_queue(db_path, "ch_buf", 2)          # depth 2 == target
+        now = _now()
+        result = tick(db_path=db_path, now=now)
+        assert result == []                                  # nothing produced
+        row = _schedule_row(db_path, sid)
+        next_dt = datetime.fromisoformat(row["next_run_at"])
+        assert abs((next_dt - (now + timedelta(days=1))).total_seconds()) < 5  # rolled forward
+
+    def test_guard_lets_it_through_when_buffer_has_room(self, db_path, monkeypatch):
+        import hypogeum.scheduler as sch
+        monkeypatch.setattr(sch, "_PRODUCTION_BUFFER_TARGET", 2)
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, scope="channel", channel_id="ch_room",
+                        cadence="daily", next_run_at=past)
+        self._seed_run_queue(db_path, "ch_room", 1)          # depth 1 < target
+        result = tick(db_path=db_path, now=_now())
+        assert len(result) == 1
+
+    def test_guard_disabled_with_target_zero(self, db_path, monkeypatch):
+        import hypogeum.scheduler as sch
+        monkeypatch.setattr(sch, "_PRODUCTION_BUFFER_TARGET", 0)
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, scope="channel", channel_id="ch_off",
+                        cadence="daily", next_run_at=past)
+        self._seed_run_queue(db_path, "ch_off", 5)
+        result = tick(db_path=db_path, now=_now())
+        assert len(result) == 1                               # fires regardless
+
+    def test_guard_ignores_other_channels(self, db_path, monkeypatch):
+        import hypogeum.scheduler as sch
+        monkeypatch.setattr(sch, "_PRODUCTION_BUFFER_TARGET", 2)
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, scope="channel", channel_id="ch_a",
+                        cadence="daily", next_run_at=past)
+        self._seed_run_queue(db_path, "ch_b", 5)              # buffer on a DIFFERENT channel
+        result = tick(db_path=db_path, now=_now())
+        assert len(result) == 1

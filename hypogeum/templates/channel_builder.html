@@ -105,7 +105,7 @@
   <div class="cb-hero">
     <span class="eyebrow">New channel</span>
     <h1>Build a channel</h1>
-    <p class="lede">Start from a rough idea. The studio proposes a monetisable niche,
+    <p class="lede">Start from a rough idea. Cortex proposes a monetisable niche,
       names and handles, then a full identity — you steer every step, and the channel
       the factory can run on its own comes out the other end.</p>
   </div>
@@ -189,7 +189,7 @@ function renderSpec(){
     ["Tone", S.brand.tone],
     ["Platforms", S.platforms.join(", ")],
     ["Weekly budget", S.weekly_video_budget_usd ? "$"+S.weekly_video_budget_usd : ""],
-    ["Per-episode ceiling", S.cost_ceiling_usd_per_episode ? "$"+S.cost_ceiling_usd_per_episode : "inherit"],
+    ["Cap per episode", S.cost_ceiling_usd_per_episode ? "$"+S.cost_ceiling_usd_per_episode : "inherit"],
   ];
   $("#cb-spec").innerHTML = rows.map(([k,v])=>
     `<div class="cb-spec-row"><span class="cb-spec-k">${k}</span><span class="cb-spec-v ${v?'':'is-empty'}">${esc(v)||'—'}</span></div>`
@@ -209,7 +209,7 @@ function panel(){
       <textarea id="f-concept" placeholder="e.g. Short, calm explainer videos about how everyday technology works, aimed at curious adults.">${esc(S.concept)}</textarea></div>
     <div class="cb-two">
       <div class="field"><label>Language</label><input id="f-lang" value="${esc(S.language)}"></div>
-      <div class="field"><label>Timezone (IANA)</label><input id="f-tz" value="${esc(S.timezone)}" placeholder="Asia/Dubai"></div>
+      <div class="field"><label>Timezone</label><input id="f-tz" value="${esc(S.timezone)}" placeholder="Asia/Dubai"></div>
     </div>`;
 
   case 1: {
@@ -275,7 +275,7 @@ function panel(){
 
   case 3: return `
     <div class="cb-step-head"><span class="eyebrow">Step 4</span><h2>Visual &amp; brand identity</h2></div>
-    <p class="cb-step-sub">Let the studio propose a distinctive identity from your concept and niche, then edit anything.</p>
+    <p class="cb-step-sub">Let Cortex propose a distinctive identity from your concept and niche, then edit anything.</p>
     <button class="btn btn-primary" id="f-suggest">✨ Suggest identity</button> <span class="cb-suggesting" id="f-sugstat"></span>
     <div class="cb-two">
       <div class="field"><label>Persona</label><input id="b-persona" value="${esc(S.brand.persona_name)}" placeholder="The Archivist"></div>
@@ -342,7 +342,7 @@ function panel(){
         `<span class="cb-pill ${S.platforms.includes(p)?'sel':''}" data-p="${p}">${p}</span>`).join("")}</div></div>
     <div class="cb-two">
       <div class="field"><label>Weekly budget (USD)</label><input id="p-budget" type="number" min="0" value="${S.weekly_video_budget_usd}"></div>
-      <div class="field"><label>Per-episode ceiling (USD)</label><input id="p-ceiling" type="number" min="0" value="${S.cost_ceiling_usd_per_episode||''}" placeholder="${rec}">
+      <div class="field"><label>Cap per episode ($)</label><input id="p-ceiling" type="number" min="0" value="${S.cost_ceiling_usd_per_episode||''}" placeholder="${rec}">
         <div class="hint">A ${S.format==='shorts'?'~60s short':'long episode'} costs ≈ $${S.format==='shorts'?'9–11':'40–60'}. The admission hold reserves this whole amount — set it near the real cost so a tight weekly budget doesn't deny a run. Recommended ≈ $${rec}.</div></div>
     </div>`;
   }

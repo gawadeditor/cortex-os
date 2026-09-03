@@ -643,7 +643,7 @@ class TestFlaskRunRoutes:
         r = client.get("/preflight")
         assert r.status_code == 200
         text = r.get_data(as_text=True)
-        assert "Preflight" in text
+        assert "Every check" in text or "Ready to make episodes" in text or "to fix first" in text
 
 
 # ===========================================================================

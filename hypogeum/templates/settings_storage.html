@@ -30,11 +30,9 @@
 
 <div class="container">
 
-  <div class="page-header">
-    <span class="eyebrow">Settings</span>
-    <h1>Storage &amp; archive</h1>
-    <span class="page-meta">Where published episode assets are kept for reuse</span>
-  </div>
+  {% from '_hero.html' import hero %}
+  {{ hero(eyebrow='Settings', title='Storage',
+     lede='Where the finished files for published episodes are kept. Once an episode goes live, its clips, images and audio move here to free up working space.') }}
 
   {% if saved %}<div class="flash flash-ok">Archive root updated.</div>{% endif %}
   {% if err %}<div class="flash flash-err">{{ err }}</div>{% endif %}
@@ -47,8 +45,7 @@
     <p class="st-note">
       When an episode is published and catalogued, its whole asset tree is moved
       out of the working area to this location and the catalog is repointed.
-      Set this to a durable path on the server — it can be changed here at any
-      time; the offline signing key is never involved.
+      Set this to a permanent folder on the server. You can change it here any time.
     </p>
     <div class="st-grid">
       <div>
@@ -56,23 +53,23 @@
         <div class="st-v st-path">{{ archive.resolved_root }}</div>
       </div>
       <div>
-        <div class="st-k">Source</div>
-        <div class="st-v"><span class="st-src {{ 'is-default' if archive.is_default }}">{{ archive.source }}</span></div>
+        <div class="st-k">Set by</div>
+        <div class="st-v"><span class="st-src {{ 'is-default' if archive.is_default }}">{{ "Cortex default" if archive.is_default else "you" }}</span></div>
       </div>
       {% if archive.disk_free_bytes is not none %}
       <div>
-        <div class="st-k">Disk free</div>
+        <div class="st-k">Space free</div>
         <div class="st-v">{{ '%.1f'|format(archive.disk_free_bytes / 1e9) }} GB
           <span style="color:var(--faint);font-weight:400">/ {{ '%.0f'|format(archive.disk_total_bytes / 1e9) }} GB</span></div>
         <div class="bar"><span style="width: {{ (100 * archive.disk_used_bytes / archive.disk_total_bytes)|round(1) }}%"></span></div>
       </div>
       {% endif %}
       <div>
-        <div class="st-k">Catalogued assets</div>
+        <div class="st-k">Saved files</div>
         <div class="st-v">{{ archive.cataloged_assets }}</div>
       </div>
       <div>
-        <div class="st-k">Archived / local</div>
+        <div class="st-k">Moved to storage / still local</div>
         <div class="st-v">{{ archive.assets_archived }} <span style="color:var(--faint);font-weight:400">/ {{ archive.assets_local }}</span></div>
       </div>
     </div>
@@ -96,8 +93,7 @@
   <div class="card">
     <div class="card-title">Published episodes</div>
     <p class="st-note">
-      Assets relocate here automatically at the end of the pipeline, or on the
-      next worker sweep once a scheduled release is confirmed.
+      Files move to storage automatically once an episode is confirmed live.
     </p>
     <table style="width:100%; border-collapse:collapse; font-size:13px; margin-top:6px;">
       <thead><tr>
@@ -110,18 +106,18 @@
         <tr>
           <td style="padding:8px; border-bottom:1px solid var(--hairline);">
             <a href="/archive?episode_id={{ e.episode_id }}" style="font-weight:600; color:var(--text);">{{ e.title }}</a>
-            <div class="st-path" style="color:var(--faint); font-size:11px;">{{ e.episode_id }}</div>
+            
           </td>
-          <td style="padding:8px; border-bottom:1px solid var(--hairline); color:var(--muted);">{{ (e.published_at or '')[:10] }}</td>
+          <td style="padding:8px; border-bottom:1px solid var(--hairline); color:var(--muted);">{{ e.published_at | friendly_date if e.published_at else "—" }}</td>
           <td style="padding:8px; border-bottom:1px solid var(--hairline);">
             {% if e.state == 'archived' %}
-              <span class="st-src" style="background:var(--accent-bg); color:var(--accent);">archived</span>
+              <span class="st-src" style="background:var(--good-bg); color:var(--good);">in storage</span>
               <span style="color:var(--faint); font-size:11px;">{{ e.total }} assets · {{ e.location }}</span>
             {% elif e.state == 'partial' %}
-              <span class="st-src" style="background:var(--warn-bg, var(--raised)); color:var(--warn, var(--muted));">{{ e.moved }}/{{ e.total }} moved</span>
+              <span class="st-src" style="background:var(--warn-bg); color:var(--warn);">{{ e.moved }} of {{ e.total }} moved</span>
             {% elif e.state == 'local' %}
-              <span class="st-src">local ({{ e.total }})</span>
-              <span style="color:var(--faint); font-size:11px;">will move on the next sweep</span>
+              <span class="st-src">on this machine ({{ e.total }})</span>
+              <span style="color:var(--faint); font-size:11px;">moves soon</span>
             {% else %}
               <span class="st-src">no assets</span>
             {% endif %}
@@ -134,12 +130,9 @@
   {% endif %}
 
   <div class="card">
-    <div class="card-title">Asset archive</div>
+    <div class="card-title">Browse everything</div>
     <p class="st-note">
-      Every generated scene, thumbnail and music track is catalogued with its
-      prompt, provider, cost, which episode(s) used it, and when it was
-      published — browse and search it in the
-      <a href="/archive">archive</a>.
+      Every clip, thumbnail and music track is searchable by what it shows in the <a href="/archive">archive</a>.
     </p>
     <a href="/archive" class="btn">{{ icon('grid') }} Open archive</a>
   </div>

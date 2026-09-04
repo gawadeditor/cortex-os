@@ -4636,15 +4636,73 @@ def api_preflight():
 # Phase C — Runs & Episode Operations (HTML)
 # ===========================================================================
 
+def _runs_overview(all_runs: list) -> dict:
+    """At-a-glance production health for the /runs stat strip. Computed from
+    the full (unfiltered) run list so the numbers are stable regardless of
+    which filter tab is active."""
+    from datetime import datetime, timedelta, timezone
+
+    def _cost(r):
+        # billed spend only — total_cost_usd is the stale pre-ADR-016 sum and
+        # over-counts badly (LLM retries etc.), see the spend audit.
+        try:
+            return float(r.get("episode_billed_usd") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _started(r):
+        return str(r.get("started_at") or "")
+
+    live = [r for r in all_runs if not r.get("superseded")]
+    finished = [r for r in live if (r.get("status") or "").lower() in ("complete", "completed", "published")]
+    stopped = [r for r in live if (r.get("status") or "").lower() in ("failed", "error")]
+    decided = len(finished) + len(stopped)
+
+    now = datetime.now(timezone.utc)
+    wk = (now - timedelta(days=7)).isoformat()
+    prev = (now - timedelta(days=14)).isoformat()
+
+    this_wk = [r for r in live if _started(r) >= wk]
+    last_wk = [r for r in live if prev <= _started(r) < wk]
+
+    # Spend is PER EPISODE, not per run — a retried episode has several run
+    # rows all carrying the same episode total. Dedupe by episode, newest run.
+    def _episode_costs(rows):
+        seen: dict = {}
+        for r in sorted(rows, key=_started):  # oldest→newest, last wins
+            ep = r.get("episode_id")
+            if ep:
+                seen[ep] = _cost(r)
+        return seen
+
+    fin_ep = _episode_costs(finished)
+    wk_ep = _episode_costs(this_wk)
+    fin_cost_total = sum(fin_ep.values())
+    fin_costs = [round(c, 2) for c in fin_ep.values() if c > 0][-18:]
+
+    return {
+        "finish_rate_pct": round(len(finished) / decided * 100) if decided else None,
+        "finished_n": len(finished),
+        "stopped_n": len(stopped),
+        "this_week_n": len(this_wk),
+        "last_week_n": len(last_wk),
+        "avg_cost": round(fin_cost_total / len(fin_ep), 2) if fin_ep else None,
+        "week_spend": round(sum(wk_ep.values()), 2),
+        "cost_series": fin_costs,
+    }
+
+
 @app.route("/runs")
 def runs_page():
     _reconcile_stale_runs()
     status = request.args.get("status")
     ch     = request.args.get("channel_id") or _scope_channel()
-    runs   = list_runs(db_path=_db_path(), status=status or None, channel_id=ch or None)
+    db     = _db_path()
+    runs   = list_runs(db_path=db, status=status or None, channel_id=ch or None)
+    all_runs = runs if not status else list_runs(db_path=db, channel_id=ch or None)
     return render_template("runs.html",
                            runs=runs, status_filter=status, fmt_duration=fmt_duration,
-                           channel_filter=ch)
+                           channel_filter=ch, overview=_runs_overview(all_runs))
 
 
 def _classify_run_recovery(detail: dict) -> dict:

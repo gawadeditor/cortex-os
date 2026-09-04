@@ -10,6 +10,7 @@
 {% include '_nav.html' %}
 {% from '_icons.html' import icon %}
 {% from '_hero.html' import hero %}
+{% from '_charts.html' import radial, sparkline, delta %}
 
 {% from '_subnav.html' import subnav %}
 {{ subnav('production') }}
@@ -24,6 +25,60 @@
    figure_label='run' ~ ('' if runs|length == 1 else 's'),
    pill=(_running ~ ' in production now') if _running else 'nothing running',
    pill_class='is-warn' if _running else 'is-good') }}
+
+{% if overview and (overview.finished_n or overview.stopped_n) %}
+<div class="runs-strip">
+  <div class="rs-card">
+    {% set _fr = overview.finish_rate_pct %}
+    {{ radial(_fr or 0, size=76, tone=('good' if (_fr or 0) >= 80 else ('warn' if (_fr or 0) >= 50 else 'critical'))) }}
+    <div>
+      <div class="rs-k">Finish clean</div>
+      <div class="rs-sub">{{ overview.finished_n }} finished · {{ overview.stopped_n }} stopped</div>
+    </div>
+  </div>
+  <div class="rs-card">
+    <div>
+      <div class="rs-v">{{ overview.this_week_n }}
+        {% if overview.last_week_n %}{{ delta(overview.this_week_n, overview.last_week_n) }}{% endif %}
+      </div>
+      <div class="rs-k">Runs in the last 7 days</div>
+      {% if overview.last_week_n %}<div class="rs-sub">{{ overview.last_week_n }} the 7 days before</div>{% endif %}
+    </div>
+  </div>
+  <div class="rs-card">
+    <div>
+      <div class="rs-v">{{ (overview.avg_cost or 0) | friendly_money }}</div>
+      <div class="rs-k">Average per episode</div>
+      {% if overview.cost_series | length >= 2 %}
+      <div style="margin-top:6px;">{{ sparkline(overview.cost_series, width=140, height=26) }}</div>
+      {% endif %}
+    </div>
+  </div>
+  <div class="rs-card">
+    <div>
+      <div class="rs-v">{{ (overview.week_spend or 0) | friendly_money }}</div>
+      <div class="rs-k">Spent in the last 7 days</div>
+      <div class="rs-sub">{% if channel_filter %}this channel{% else %}across every channel{% endif %}</div>
+    </div>
+  </div>
+</div>
+<style>
+  .runs-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+                gap: 12px; margin-bottom: var(--gap); }
+  .rs-card { display: flex; align-items: center; gap: 14px; background: linear-gradient(180deg, var(--raised), var(--surface));
+             border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; box-shadow: var(--shadow-1); }
+  .rs-v { font-family: var(--font-display); font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums;
+          line-height: 1.1; letter-spacing: -.02em; display: flex; align-items: baseline; gap: 8px; }
+  .rs-k { font-size: 10.5px; color: var(--faint); text-transform: uppercase; letter-spacing: .09em; font-weight: 600; margin-top: 4px; }
+  .rs-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+</style>
+{% endif %}
+<style>
+  .cost-bar { display: block; height: 3px; border-radius: 999px; background: var(--hairline);
+              margin: 4px 0 0 auto; max-width: 72px; overflow: hidden; }
+  .cost-bar > i { display: block; height: 100%; background: var(--accent-line);
+                  border-radius: 999px; min-width: 2px; }
+</style>
 
 <div class="filters">
   <a href="/runs"                    class="filter-link {% if not status_filter %}active{% endif %}">All</a>
@@ -43,6 +98,8 @@
 {% endif %}
 
 {% if runs %}
+{% set _costs = runs | map(attribute='episode_billed_usd') | select('number') | list %}
+{% set _maxcost = (_costs | max) if _costs else 0 %}
 <div class="card" style="padding:0;">
   <div class="table-wrap" style="border:none;">
   <table>
@@ -70,9 +127,14 @@
         </td>
         <td class="muted" style="white-space:nowrap;">{{ r.started_at | rel_time if r.started_at else '—' }}</td>
         <td class="muted" style="text-align:right;">{{ r.stage_count or 0 }}</td>
-        <td style="text-align:right; font-variant-numeric:tabular-nums;">
+        <td style="text-align:right; font-variant-numeric:tabular-nums; min-width:96px;">
           {% set _c = r.episode_billed_usd if r.episode_billed_usd is not none else r.total_cost_usd %}
-          {% if _c and _c > 0 %}{{ _c | friendly_money }}{% else %}<span class="muted">—</span>{% endif %}
+          {% if _c and _c > 0 %}
+            {{ _c | friendly_money }}
+            {% if _maxcost and _maxcost > 0 %}
+            <span class="cost-bar"><i style="width:{{ (_c / _maxcost * 100) | round(0) }}%"></i></span>
+            {% endif %}
+          {% else %}<span class="muted">—</span>{% endif %}
         </td>
       </tr>
       {% endfor %}

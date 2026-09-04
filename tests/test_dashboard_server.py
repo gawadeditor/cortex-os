@@ -229,29 +229,29 @@ class TestSections:
     def test_run_health_section(self, html):
         assert "Production Overview" in html
 
-    def test_director_section(self, html):
-        assert "Factory Director" in html
+    def test_more_tools_section(self, html):
+        assert "More tools" in html
 
-    def test_ois_signals_section(self, html):
-        assert "Active OIS Signals" in html
+    def test_alert_history_link(self, html):
+        assert "Alert history" in html
 
-    def test_pending_approvals_section(self, html):
-        assert "Pending Approvals" in html
+    def test_approvals_link(self, html):
+        assert 'href="/approvals"' in html
 
     def test_channels_section(self, html):
         assert "Channels" in html
 
-    def test_schedules_section(self, html):
-        assert "Schedules" in html
+    def test_production_queue_link(self, html):
+        assert "Production queue" in html
 
     def test_costs_section(self, html):
         assert "Costs" in html
 
-    def test_audit_section(self, html):
-        assert "Acceptance Audit" in html
+    def test_readiness_check_link(self, html):
+        assert "Readiness check" in html
 
-    def test_director_domains_section(self, html):
-        assert "Director" in html and "Domain" in html
+    def test_learning_link(self, html):
+        assert 'href="/intelligence/learning"' in html
 
     def test_no_api_debug_link_in_footer(self, html):
         # /api/* debug links were removed from the client-facing Overview

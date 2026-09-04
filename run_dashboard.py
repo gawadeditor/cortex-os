@@ -6995,6 +6995,11 @@ def episodes_page():
             }
             status = infer_episode_status(qa_pkg, bga_pkgs, artifacts, thumbnail_pkg=thumbnail_pkg)
             title  = dep.get("title") or episode_title_from_disk(ep_dir, ep_id)
+            # Don't surface a disk-only episode that never produced a video
+            # AND has no title — that's an abandoned run's leftovers, not an
+            # episode a client wants to scroll past.
+            if not dep.get("has_render") and not title and not show_test:
+                continue
             episodes.append({
                 "episode_id":    ep_id,
                 "title":         title,
@@ -7018,6 +7023,24 @@ def episodes_page():
     test_count   = sum(1 for ep in episodes if ep["_is_test"])
     if not show_test:
         episodes = [ep for ep in episodes if not ep["_is_test"]]
+
+    # A superseded episode was remade and published — the retry archaeology
+    # isn't something a client should scroll past. Also drop abandoned
+    # ghosts: no video produced AND no name we can resolve. Hide unless asked.
+    if not show_test:
+        _kept = []
+        for ep in episodes:
+            if str(ep.get("status") or "").lower() == "superseded":
+                continue
+            _has_video = ep.get("has_render") or str(ep.get("run_status") or "").lower() in ("complete", "completed")
+            _named = bool(ep.get("title") or ep.get("topic")) or \
+                _hz.looks_like_episode_id(ep["episode_id"]) is False or \
+                _hz.episode_display_name(ep["episode_id"], db_path=_db_path(),
+                                         fallback="") != ""
+            if not _has_video and not _named:
+                continue
+            _kept.append(ep)
+        episodes = _kept
 
     # Production queue: queued + claimed, ordered by priority then date
     queue_topics  = list_episode_topics(

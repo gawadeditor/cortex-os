@@ -1310,6 +1310,171 @@ def _submit_scene_via_gate(
     }, None
 
 
+# ---------------------------------------------------------------------------
+# Stuck-authorization reconciliation (2026-09-05)
+# ---------------------------------------------------------------------------
+
+def reconcile_stuck_scene_authorization(
+    *,
+    episode_id: str,
+    scene_id: str,
+    short_id: Optional[str],
+    is_fallback: bool,
+    output_dir: Path,
+    config: Config,
+    log,
+) -> str:
+    """
+    Attempt to release a scene's authorization if it is stuck in
+    UNKNOWN_ACCEPTANCE_REQUIRES_RECONCILIATION -- the state a poll
+    timeout after a successful submission leaves behind (see
+    hypogeum.providers.muapi_video_adapter.MuapiVideoAdapter's own "never
+    silently release budget/grant capacity for a call whose provider-side
+    outcome is genuinely unknown" comment). Without this, the SAME
+    idempotency_key can never be resubmitted -- every future clip_repair
+    attempt for this exact scene fails closed forever with
+    "authorization state is 'submitting', not 'authorized'", observed
+    live 2026-09-04/05 on two consecutive hypogeum episodes
+    (ep_edaa9625, ep_14a830cc), both losing an otherwise-complete episode
+    to one stuck scene.
+
+    This is the reconciliation the architecture always intended
+    ("an explicit reconciliation event resolves it" --
+    hypogeum.submission_gate.submit()'s own comment) but that was never
+    actually wired up anywhere -- hypogeum.provider_receipt already had
+    the full state model and one safe writer
+    (reconcile_unknown_acceptance_as_not_submitted), just no caller and
+    no way to determine WHICH resolution applies. This function is that
+    caller: it re-polls the SAME provider_job_id already durably
+    recorded (a read-only status check, never a new paid submission) to
+    find out.
+
+    Deliberately narrow in scope -- only ever releases, never silently
+    recovers a secretly-completed job:
+      - No provider_job_id was ever durably recorded at all (the
+        provider boundary was never reached) -> safe to release.
+      - The provider now reports job_status_failed/cancelled for that
+        exact job_id -> definitively no output was ever produced ->
+        safe to release.
+      - Any other outcome (still pending, timeout again, an unexpected
+        HTTP status, or -- notably -- the job actually completing on
+        this re-poll) -> left untouched and reported "still_unresolved".
+        A job that turns out to have actually completed is NOT
+        auto-recovered here: that would require committing real spend
+        and reconstructing the asset manifest entry correctly, which
+        this narrow fix deliberately does not attempt -- it is logged
+        loudly instead so an operator can recover it by hand, rather
+        than either silently discarding a paid-for result or risking an
+        incorrect financial write.
+
+    Returns:
+        "not_applicable"  — no attempt was ever recorded, or the
+                             recorded state isn't the stuck one at all
+                             (nothing for this function to do).
+        "released"        — the stuck authorization was released;
+                             a fresh submission for this scene can now
+                             proceed normally.
+        "still_unresolved" — genuinely still ambiguous (or a completed
+                             job needing manual recovery); left alone.
+
+    Never raises -- a caller (clip_repair_agent) should treat any
+    outcome other than "released" exactly as it already does today
+    (scene stays missing), so this is purely additive.
+    """
+    from hypogeum.provider_receipt import (  # noqa: PLC0415
+        AlreadyReconciledWithDifferentResolutionError,
+        RecoveryState,
+        WriteAheadReceiptStore,
+        reconcile_unknown_acceptance_as_not_submitted,
+    )
+
+    idempotency_key = f"{episode_id}:{scene_id}:{'fallback' if is_fallback else 'primary'}"
+    try:
+        receipt_store = WriteAheadReceiptStore(output_dir)
+        events = receipt_store.read_events(episode_id, idempotency_key)
+        if not events:
+            return "not_applicable"
+        if receipt_store.classify_recovery_state(episode_id, idempotency_key) != (
+            RecoveryState.UNKNOWN_ACCEPTANCE_REQUIRES_RECONCILIATION
+        ):
+            return "not_applicable"
+
+        last = events[-1]
+        ack_event = next(
+            (
+                e for e in reversed(events)
+                if e.event_type.value in ("provider_acknowledged", "unknown_acceptance")
+                and e.evidence.get("provider_job_id")
+            ),
+            None,
+        )
+        provider_job_id = ack_event.evidence.get("provider_job_id") if ack_event else None
+
+        if provider_job_id is None:
+            proof = (
+                "no provider_job_id was ever durably recorded for this attempt -- "
+                "the provider boundary was never reached"
+            )
+        else:
+            result, poll_reason = _poll_until_complete(provider_job_id, config, scene_id, log)
+            if result is not None:
+                log.warn(
+                    "reconcile_scene_authorization_recoverable_but_unhandled",
+                    episode_id=episode_id, scene_id=scene_id, provider_job_id=provider_job_id,
+                )
+                return "still_unresolved"
+            if poll_reason not in ("job_status_failed", "job_status_cancelled"):
+                return "still_unresolved"
+            proof = (
+                f"MUAPI confirmed this job will never deliver a result on reconciliation "
+                f"re-poll (request_id={provider_job_id}): {poll_reason}"
+            )
+
+        from types import SimpleNamespace  # noqa: PLC0415
+
+        import hypogeum.db as db  # noqa: PLC0415
+
+        envelope_stub = SimpleNamespace(
+            envelope_id=last.envelope_id, envelope_version=last.envelope_version,
+            authorization_id=last.authorization_id, authorization_version=last.authorization_version,
+            provider=last.provider, model=last.model, provider_operation=last.provider_operation,
+            operation_payload_sha256=last.provider_bound_content_sha256,
+            max_cost_per_call=last.max_cost_per_call, currency=last.currency,
+        )
+
+        budget_conn = db.get_connection()
+        try:
+            reservation_rows = budget_conn.execute(
+                "SELECT reservation_id FROM budget_reservations "
+                "WHERE idempotency_key = ? AND status = 'reserved'",
+                (idempotency_key,),
+            ).fetchall()
+            reservation_ids = [r[0] for r in reservation_rows]
+            try:
+                reconcile_unknown_acceptance_as_not_submitted(
+                    receipt_store, budget_conn, execution_id=episode_id, envelope=envelope_stub,
+                    idempotency_key=idempotency_key, reservation_ids=reservation_ids,
+                    proof=proof, at=datetime.now(timezone.utc).isoformat(),
+                )
+            except AlreadyReconciledWithDifferentResolutionError:
+                return "still_unresolved"
+        finally:
+            budget_conn.close()
+
+        log.info(
+            "reconcile_scene_authorization_released",
+            episode_id=episode_id, scene_id=scene_id, idempotency_key=idempotency_key,
+            reservation_count=len(reservation_ids),
+        )
+        return "released"
+    except Exception as exc:  # noqa: BLE001 -- reconciliation is best-effort, never fatal
+        log.warn(
+            "reconcile_scene_authorization_error",
+            episode_id=episode_id, scene_id=scene_id, error=str(exc),
+        )
+        return "still_unresolved"
+
+
 def submit_scene(
     scene_spec: dict,
     config: Config,

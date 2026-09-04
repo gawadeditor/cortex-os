@@ -233,6 +233,27 @@ def run_clip_repair(
                     {"channel_id": channel_id, "allow_i2v_to_t2v_repair_fallback": True}
                     if channel_id is not None else {}
                 )
+
+                # Reconciliation (2026-09-05): the ORIGINAL attempt at this
+                # exact scene may have timed out post-submission, leaving
+                # its authorization permanently stuck at UNKNOWN_ACCEPTANCE_
+                # REQUIRES_RECONCILIATION -- a fresh submit_scene() call
+                # below would otherwise hard-fail every time with
+                # "authorization state is 'submitting', not 'authorized'"
+                # (observed live 2026-09-04/05, ep_edaa9625/ep_14a830cc,
+                # both losing an otherwise-complete episode to exactly one
+                # scene). Best-effort, read-only-unless-safe-to-release; see
+                # hypogeum.muapi.reconcile_stuck_scene_authorization()'s own
+                # docstring for the full safety contract. A no-op for any
+                # scene that was never stuck in the first place.
+                if channel_id is not None:
+                    from hypogeum.muapi import reconcile_stuck_scene_authorization  # noqa: PLC0415
+                    reconcile_stuck_scene_authorization(
+                        episode_id=episode_id, scene_id=missing_sid,
+                        short_id=missing_scene.get("short_id"), is_fallback=False,
+                        output_dir=output_dir, config=config, log=log,
+                    )
+
                 asset_result = submit_scene(
                     scene_spec=submit_spec,
                     config=config,

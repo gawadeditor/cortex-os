@@ -76,6 +76,18 @@ try:
 except ValueError:
     _PRODUCTION_BUFFER_TARGET = 2
 
+# When a channel has fallen BEHIND its produce-ahead target (a failed
+# production day, a stalled run), one scheduled_run per daily tick takes
+# `target` days to rebuild the lead — leaving the publish schedule exposed the
+# whole time. Set PRODUCTION_CATCHUP_MAX > 1 and a behind channel enqueues
+# enough runs to close the gap in one tick, capped at this many so a long
+# outage doesn't stampede the queue. Default 1 = one episode per tick
+# (unchanged behavior); the factory opts in via .env.
+try:
+    _PRODUCTION_CATCHUP_MAX = max(1, int(_os.environ.get("PRODUCTION_CATCHUP_MAX", "1")))
+except ValueError:
+    _PRODUCTION_CATCHUP_MAX = 1
+
 
 def channel_buffer_depth(channel_id: str, conn) -> int:
     """How many episodes for `channel_id` are already produced-but-unpublished
@@ -433,6 +445,13 @@ def tick(
             # covers this slot. (0 disables; a channel with no channel_id or
             # a non-recurring cadence is never guarded.)
             channel_id_g = row["channel_id"] if "channel_id" in row.keys() else None
+
+            # How many production runs to create this tick. Default 1 (one
+            # episode per due schedule). When the buffer guard is active and
+            # this channel has fallen BEHIND its target, produce enough to
+            # close the gap in one go (capped) so the publish schedule is
+            # never left exposed for days.
+            n_runs = 1
             if _PRODUCTION_BUFFER_TARGET and channel_id_g and next_dt is not None:
                 depth = channel_buffer_depth(channel_id_g, conn)
                 if depth >= _PRODUCTION_BUFFER_TARGET:
@@ -449,8 +468,16 @@ def tick(
                         updated_at=now_iso,
                     )
                     continue
-
-            scheduled_run_id = _new_id()
+                gap = _PRODUCTION_BUFFER_TARGET - depth
+                n_runs = min(max(1, gap), _PRODUCTION_CATCHUP_MAX)
+                if n_runs > 1:
+                    from hypogeum.logger import get_logger
+                    get_logger(agent="scheduler").info(
+                        "scheduled_tick_catchup",
+                        schedule_id=row["schedule_id"], channel_id=channel_id_g,
+                        buffer_depth=depth, buffer_target=_PRODUCTION_BUFFER_TARGET,
+                        runs_created=n_runs,
+                    )
 
             due_at = row["next_run_at"]
             if due_at:
@@ -460,23 +487,25 @@ def tick(
                     get_logger(agent="scheduler").warn(
                         "scheduled_tick_missed_window",
                         schedule_id=row["schedule_id"],
-                        scheduled_run_id=scheduled_run_id,
                         channel_id=row["channel_id"],
                         due_at=due_at,
                         fired_at=now_iso,
                         delay_seconds=int(delay_seconds),
                     )
 
-            insert_scheduled_run(
-                conn,
-                scheduled_run_id=scheduled_run_id,
-                schedule_id=row["schedule_id"],
-                channel_id=row["channel_id"],
-                episode_id=None,
-                scheduled_for=now_iso,
-                status="pending",
-                created_at=now_iso,
-            )
+            for _ in range(n_runs):
+                scheduled_run_id = _new_id()
+                insert_scheduled_run(
+                    conn,
+                    scheduled_run_id=scheduled_run_id,
+                    schedule_id=row["schedule_id"],
+                    channel_id=row["channel_id"],
+                    episode_id=None,
+                    scheduled_for=now_iso,
+                    status="pending",
+                    created_at=now_iso,
+                )
+                created_ids.append(scheduled_run_id)
 
             update_schedule_next_run(
                 conn,
@@ -485,8 +514,6 @@ def tick(
                 last_run_at=now_iso,
                 updated_at=now_iso,
             )
-
-            created_ids.append(scheduled_run_id)
 
         conn.commit()
     finally:

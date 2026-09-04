@@ -989,6 +989,33 @@ class TestProduceAheadBufferGuard:
         result = tick(db_path=db_path, now=_now())
         assert len(result) == 1
 
+    def test_catchup_produces_multiple_when_behind(self, db_path, monkeypatch):
+        """With PRODUCTION_CATCHUP_MAX > 1, a channel behind its target
+        produces enough runs in one tick to close the gap."""
+        import hypogeum.scheduler as sch
+        monkeypatch.setattr(sch, "_PRODUCTION_BUFFER_TARGET", 2)
+        monkeypatch.setattr(sch, "_PRODUCTION_CATCHUP_MAX", 2)
+        past = _now() - timedelta(minutes=1)
+        sid = create_schedule(db_path=db_path, scope="channel", channel_id="ch_behind",
+                              cadence="daily", next_run_at=past)
+        # depth 0 → gap 2 → 2 runs
+        result = tick(db_path=db_path, now=_now())
+        assert len(result) == 2
+        assert {_sched_run_row(db_path, r)["channel_id"] for r in result} == {"ch_behind"}
+        # schedule still advanced exactly once
+        row = _schedule_row(db_path, sid)
+        assert row["next_run_at"] is not None
+
+    def test_catchup_capped_at_max(self, db_path, monkeypatch):
+        import hypogeum.scheduler as sch
+        monkeypatch.setattr(sch, "_PRODUCTION_BUFFER_TARGET", 5)
+        monkeypatch.setattr(sch, "_PRODUCTION_CATCHUP_MAX", 2)
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, scope="channel", channel_id="ch_way_behind",
+                        cadence="daily", next_run_at=past)
+        result = tick(db_path=db_path, now=_now())   # gap 5, capped at 2
+        assert len(result) == 2
+
     def test_guard_disabled_with_target_zero(self, db_path, monkeypatch):
         import hypogeum.scheduler as sch
         monkeypatch.setattr(sch, "_PRODUCTION_BUFFER_TARGET", 0)

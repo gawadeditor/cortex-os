@@ -218,14 +218,24 @@ def resolve_complete_item_ids_for_channel(
     initialize_schema(db_path)
     conn = get_connection(db_path)
     try:
+        # Attribute a complete episode to its channel via EITHER its
+        # episode_topics row OR a runs row — an episode produced by
+        # run_pipeline directly (no queued topic, e.g. a manual catch-up)
+        # only has the runs.channel_id link, and without this it would be
+        # invisible to the publisher forever while still counting toward the
+        # scheduler's produce-ahead buffer (channel stalls).
         rows = conn.execute(
             """
             SELECT DISTINCT e.episode_id
             FROM episodes e
-            JOIN episode_topics t ON t.episode_id = e.episode_id
-            WHERE t.channel_id = ? AND e.status = 'complete'
+            WHERE e.status = 'complete' AND (
+                EXISTS (SELECT 1 FROM episode_topics t
+                        WHERE t.episode_id = e.episode_id AND t.channel_id = ?)
+                OR EXISTS (SELECT 1 FROM runs r
+                        WHERE r.episode_id = e.episode_id AND r.channel_id = ?)
+            )
             """,
-            (channel_id,),
+            (channel_id, channel_id),
         ).fetchall()
         return [r["episode_id"] for r in rows]
     finally:

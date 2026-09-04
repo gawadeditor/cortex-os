@@ -192,13 +192,21 @@
       <div class="res-stat"><span>Latency</span><span class="v">{{ r.latency_s if r.latency_s is not none else '—' }}s</span></div>
       <div class="res-stat"><span>Duration</span><span class="v">{{ r.duration_s if r.duration_s is not none else '—' }}s</span></div>
       <div class="res-stat"><span>Motion</span><span class="v">{{ r.motion_score if r.motion_score is not none else '—' }}</span></div>
+      <div class="res-stat"><span>Resolution</span><span class="v"
+           style="{% if r.qualifies is false %}color:var(--critical);{% elif r.qualifies %}color:var(--good);{% endif %}">
+        {% if r.width and r.height %}{{ r.width }}×{{ r.height }}{% else %}—{% endif %}</span></div>
+      {% if r.ok and r.qualifies is false %}
+      <div style="font-size:10px; color:var(--critical); margin:4px 0 2px; line-height:1.35;">
+        Below spec for {{ deliverable_res }} — {{ r.qualify_reason }}
+      </div>
+      {% endif %}
       {% if r.ok %}
       <form method="POST" action="/providers/video-test/adopt" style="margin-top:8px;">
         <input type="hidden" name="channel" value="{{ run.channel_id }}">
         <input type="hidden" name="model" value="{{ r.model }}">
         <button class="btn" style="font-size:11px; width:100%;"
-                {% if r.model == current_model %}disabled{% endif %}>
-          {% if r.model == current_model %}✓ current model for {{ run.channel_id }}{% else %}Use this for {{ run.channel_id }}{% endif %}
+                {% if r.model == current_model or r.qualifies is false %}disabled{% endif %}>
+          {% if r.model == current_model %}✓ current model for {{ run.channel_id }}{% elif r.qualifies is false %}Can't adopt — below spec{% else %}Use this for {{ run.channel_id }}{% endif %}
         </button>
       </form>
       {% endif %}

@@ -2740,8 +2740,25 @@ def video_test_page():
 
     run = None
     run_id = request.args.get("run")
+    deliverable_res = None
     if run_id:
         run = _bo.get_bakeoff(run_id)
+    if run and sel:
+        # Annotate each result with whether its measured resolution can meet
+        # this channel's deliverable via one upscale pass — the same rule the
+        # adopt route enforces, surfaced so the operator sees it before
+        # clicking.
+        from hypogeum.production_preflight import channel_deliverable_resolution
+        from hypogeum.artifact_compatibility import qualifies_for_deliverable_after_upscale
+        _rw, _rh = channel_deliverable_resolution(sel, db_path=_db_path())
+        deliverable_res = f"{_rw}x{_rh}"
+        for _r in run.get("results", []):
+            _w, _h = _r.get("width"), _r.get("height")
+            if _r.get("ok") and _w and _h:
+                _ok, _why = qualifies_for_deliverable_after_upscale(_w, _h, _rw, _rh)
+                _r["qualifies"], _r["qualify_reason"] = _ok, _why
+            elif _r.get("ok"):
+                _r["qualifies"], _r["qualify_reason"] = None, "resolution not measured"
 
     # Overlay the effective (actually-billed) price on the catalogue list —
     # the catalogue price is a floor for dynamic-priced models.
@@ -2767,6 +2784,7 @@ def video_test_page():
         prompt_pack=prompt_pack,
         current_model=current_model,
         run=run,
+        deliverable_res=deliverable_res,
         history=_bo.list_bakeoffs(sel or None, limit=10),
         flash=request.args.get("flash"),
     )

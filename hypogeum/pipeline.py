@@ -3068,7 +3068,21 @@ def _run_zernio_publish(
         ))
 
     # Keep only entries for THIS episode (item_id is the episode identity).
-    mine = [r for r in ready if getattr(r, "item_id", None) == episode_id] or ready
+    # No "or ready" fallback: on a channel with other outstanding items in
+    # the release buffer (a chronically-blocked older episode, a different
+    # episode mid-release), `ready` legitimately contains ReadyBundles that
+    # belong to THOSE items, not this one. Falling back to the whole list
+    # silently mislabeled other episodes' real block reasons as this
+    # episode's own publishing_record (confirmed live 2026-09-05: ep_19c9fc5f's
+    # record showed 8 platform_results — 2 unrelated legacy episodes'
+    # blocked_metadata results, duplicated under this episode's own
+    # result_id/episode_id). An empty `mine` here means this episode wasn't
+    # yet recognized "ready" by resolve_complete_item_ids_for_channel at the
+    # moment this ran (a same-run ordering artifact) -- it falls through to
+    # the "no platform_results" branch below (a single honest, schema-valid
+    # "failed" entry for THIS episode), and gets picked up correctly on the
+    # worker's own next periodic release sweep instead.
+    mine = [r for r in ready if getattr(r, "item_id", None) == episode_id]
 
     from hypogeum.publishing.zernio_channel_release_trigger import _status_for_platform
     platform_results = []

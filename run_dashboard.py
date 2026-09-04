@@ -7702,6 +7702,33 @@ def channel_settings_page(channel_id):
     except Exception:  # noqa: BLE001
         pass
     keyword_research_status = _KEYWORD_RESEARCH_STATUS.get(channel_id, {})
+    # Self-heal a stuck "running" flag. The status lives in this process's
+    # memory only — a dashboard restart mid-run (or any path that returns
+    # without updating it) leaves it reading "running" forever even after
+    # the background thread finished and wrote real results. Two escapes:
+    #   1. the DB row is authoritative — if it was written after this run
+    #      started, the run finished; reflect that instead of trusting the
+    #      stale in-memory flag.
+    #   2. if there is no such row and the flag is simply old (>10 min),
+    #      the thread died silently — stop showing "running" forever.
+    if keyword_research_status.get("state") == "running":
+        started = keyword_research_status.get("started_at") or ""
+        researched_at = (keyword_research or {}).get("researched_at") or ""
+        if researched_at and researched_at > started:
+            keyword_research_status = {"state": "done"}
+            _KEYWORD_RESEARCH_STATUS[channel_id] = keyword_research_status
+        elif started:
+            try:
+                from datetime import datetime as _dt, timezone as _tz
+                age_s = (_dt.now(_tz.utc) - _dt.fromisoformat(started)).total_seconds()
+            except Exception:  # noqa: BLE001
+                age_s = 0
+            if age_s > 600:
+                keyword_research_status = {
+                    "state": "error",
+                    "error": "Timed out waiting for a response — try again.",
+                }
+                _KEYWORD_RESEARCH_STATUS[channel_id] = keyword_research_status
 
     return render_template("channel_settings.html",
                            channel=channel, brand=brand, model=model,

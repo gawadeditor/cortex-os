@@ -7212,6 +7212,13 @@ def run_live_page(run_id):
     data = get_run_live(run_id, db_path=_db_path())
     if data is None:
         return render_template("not_found.html", kind="Run", id=run_id), 404
+    # The live tail only makes sense while a run is in flight. Once it is
+    # finished, send the operator to the proper run detail page instead of
+    # a "polling every 3s / 22h elapsed" view over a static log.
+    _st = str((data.get("run") or {}).get("status") or data.get("status") or "").lower()
+    if _st in ("complete", "completed", "published", "failed", "error", "cancelled") \
+            and request.args.get("stay") != "1":
+        return redirect(f"/run/{run_id}")
     return render_template("run_live.html", d=data, run_id=run_id,
                            fmt_duration=fmt_duration)
 

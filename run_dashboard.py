@@ -10531,24 +10531,24 @@ _DEBUG_SURFACES = [
         "safety":  "Read-only. No prompt editing on this page.",
     },
     {
-        "name":    "Command Console",
+        "name":    "Control room",
         "route":   "/command",
-        "purpose": "Operator command-state overview: factory status, provider health, "
-                   "run state, and next required action. ",
+        "purpose": "One-screen operator overview: factory status, provider health, "
+                   "run state, and the next thing that needs a decision.",
         "safety":  "Read-only status display. No commands are executed from this page.",
     },
     {
-        "name":    "OIS Signals",
+        "name":    "Alert history",
         "route":   "/signals",
-        "purpose": "Signal history from the Operational Intelligence System — "
-                   "open and resolved alerts with severity and blocking status.",
+        "purpose": "Every alert the factory has raised — open and cleared, with "
+                   "severity and whether it held production.",
         "safety":  "Read-only history view.",
     },
     {
-        "name":    "Setup Checklist",
+        "name":    "Setup checklist",
         "route":   "/setup",
-        "purpose": "Step-by-step first-run setup guide covering API keys, budget, "
-                   "channel configuration, and provider verification.",
+        "purpose": "First-run setup status: API keys, budget, channel configuration, "
+                   "and provider verification.",
         "safety":  "Configuration guidance. Credential saves require explicit form submit.",
     },
 ]

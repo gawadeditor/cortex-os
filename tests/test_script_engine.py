@@ -956,13 +956,15 @@ _GOOD_STINGER = "And two thousand years later nobody can fully explain how it ha
 def _sn_pkg(first_line, *, paid=True, stinger=True, spine="why?", last_line=_GOOD_STINGER):
     return {
         "sections": [{"section_id": "s1", "title": "x",
-                      "narration_beats": [{"beat_id": "b1", "text": first_line},
-                                          {"beat_id": "b2", "text": last_line}]}],
+                      "narration_beats": [{"beat_id": "b1", "text": first_line, "beat_type": "hook"},
+                                          {"beat_id": "bt", "text": "And then the small worry melted away.", "beat_type": "reveal"},
+                                          {"beat_id": "b2", "text": last_line, "beat_type": "resolution"}]}],
         "shorts_scripts": [], "chapter_markers": [], "shorts_extraction_markers": [],
         "traceability_manifest": {},
         "script_integrity": {"cta_count": 0, "short_native": {
             "hook_opener_type": "contradiction", "spine_question": spine,
-            "spine_paid_off": paid, "has_stinger": stinger}},
+            "spine_paid_off": paid, "has_stinger": stinger,
+            "story_problem": "the room felt too big and dark", "story_turn": "a firefly showed the way"}},
         "episode_metadata": {},
     }
 

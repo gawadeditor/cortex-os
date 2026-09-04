@@ -1,4 +1,4 @@
-# PROMPT_VERSION: v5
+# PROMPT_VERSION: v6
 # OWNER_AGENT: script_engine
 # MODEL_TARGET: anthropic/claude-sonnet-4.6
 # PURPOSE: Write production-ready narration script and Shorts scripts from Narrative Package, applying the composed Humanizer skill directly during generation
@@ -318,19 +318,24 @@ If the input package contains "production_mode": "short_native", you are writing
               no question, no suspense, never "Once upon a time".
               beat_type = "hook".
     Beat 2  — STAKES. Investigative: what's unresolved / at risk — opens the ONE spine.
-              Gentle: the character's ONE small, low-stakes WANT.
+              Gentle: a NAMED character with one small concrete want or feeling not yet
+              met, AND a small gentle problem in the way of it. No problem = no story,
+              only images (the most common failure on a gentle channel — do not make it).
     Beats 3-5 — ESCALATION (investigative: each line tightens the spine, drops the
-              non-essential fact) or GENTLE JOURNEY (two or three unhurried sensory
-              scenes serving the want, and a REFRAIN — one short line or sound repeated
-              two or three times across the script that a child would ask to hear again).
-    Beat 6  — TURN. Investigative: the pivot or contradiction. Gentle: exactly one soft
-              turn — a small kindness or a tiny wonder, never a scare, obstacle, or
-              rescue. beat_type = "reveal".
+              non-essential fact) or GENTLE MIDDLE (the character sets out and makes two
+              or three soft attempts, usually meeting a friend or two who each help a
+              little; the obstacle is real but never scary — a dark path, a hiding
+              moon). Include a REFRAIN — one short line or sound repeated two or three
+              times across the script that a child would ask to hear again.
+    Beat 6  — TURN. Investigative: the pivot or contradiction. Gentle: the ONE moment
+              the problem eases — a kindness, a little patience, a small brave step, or
+              a friend's help. Without a real turn there is no story, only a slideshow.
+              beat_type = "reveal".
     Beats 7-8 — PAYOFF. Investigative: the spine's question is ANSWERED, or explicitly
-              named as a real unresolved unknown. Gentle: the want is met simply and
-              the character settles — these beats visibly wind the energy DOWN (motion
-              stops, light dims, the frame goes still). beat_type = "resolution".
-              NEVER hand the payoff to a CTA or leave it for the viewer to infer.
+              named as a real unresolved unknown. Gentle: the want is met, the problem
+              is fully gone, the character and any friends settle — these beats visibly
+              wind the energy DOWN (motion stops, light dims, the frame goes still).
+              beat_type = "resolution". NEVER hand the payoff to a CTA or leave it to infer.
     Final beat — STINGER (investigative) or RETURN LINE (gentle). beat_type = "resolution".
               INVESTIGATIVE STINGER: a COMPLETE sentence (8-16 words) that either
                 • reframes what the whole video was actually about ("This was never
@@ -341,9 +346,10 @@ If the input package contains "production_mode": "short_native", you are writing
               sentence fragment ("We can image his neurons."), a restating of a fact
               already given, a question with an obvious answer, anything caption-like.
               Under 8 words or not a full independent clause → rewrite it.
-              GENTLE RETURN LINE: a calm 6-14 word invitation to come back tomorrow
-              night, spoken to the child ("Sleep well, little one — I'll have another
-              story for you tomorrow."). Not a subscribe line, not energetic.
+              GENTLE RETURN LINE: a calm 6-14 word invitation that NAMES the character
+              and invites another story about them tomorrow night, spoken to the child
+              ("Sleep well — Pip will have another adventure for you tomorrow night.").
+              Not a subscribe line, not energetic.
   - The opening hook line must NOT contain a year, a full date, or a place-name-first
     clause on an investigative channel. If the strongest fact is tied to a year, lead
     with the fact and let the year arrive later.
@@ -355,11 +361,16 @@ If the input package contains "production_mode": "short_native", you are writing
     text_overlay a short-native script carries.
   - Fill script_integrity.short_native: hook_opener_type, spine_question,
     spine_paid_off (true only if a payoff beat actually closes spine_question),
-    has_stinger (true only if the final beat meets the STINGER rules above).
-    spine_paid_off = false or has_stinger = false is a self-declared failure —
-    rewrite before responding.
+    has_stinger (true only if the final beat meets the STINGER / RETURN LINE rules),
+    story_problem (one short phrase naming the small problem/obstacle — required on a
+    gentle channel; on an investigative channel it is the central question),
+    story_turn (one short phrase naming the beat where the problem eases / the
+    contradiction lands). A gentle script with an empty story_problem or story_turn is
+    a slideshow, not a story — rewrite it. Also set exactly one beat's beat_type to
+    "reveal" (the TURN). spine_paid_off = false, has_stinger = false, or a missing
+    story_problem/story_turn is a self-declared failure — rewrite before responding.
 Follow the "short_native_directive" object in the input package for any specifics it names.
 
 ════════════════════════════════════════════════════════════════════
 
-CRITICAL: Respond with valid JSON only. No prose, no markdown, no code fences. The entire response must be parseable as a single JSON object. shorts_scripts must contain exactly 3 entries UNLESS production_mode is "short_native" (then exactly 0). Every section must have section_id, title, and at least one narration beat. Every Short must have narration_beats and text_overlays. shorts_extraction_markers must contain exactly 3 entries matching the 3 Short IDs (0 entries in short_native mode). cta_count in script_integrity must equal 2 for a long-form episode and 0 in short_native mode. aggressive_cta_language must be false. In short_native mode: script_integrity.short_native must be present with hook_opener_type, spine_question, spine_paid_off (must be true), has_stinger (must be true); the single section carries exactly one text_overlay (the follow ask, on the final beat); and the final narration beat is the stinger, never a subscribe line.
+CRITICAL: Respond with valid JSON only. No prose, no markdown, no code fences. The entire response must be parseable as a single JSON object. shorts_scripts must contain exactly 3 entries UNLESS production_mode is "short_native" (then exactly 0). Every section must have section_id, title, and at least one narration beat. Every Short must have narration_beats and text_overlays. shorts_extraction_markers must contain exactly 3 entries matching the 3 Short IDs (0 entries in short_native mode). cta_count in script_integrity must equal 2 for a long-form episode and 0 in short_native mode. aggressive_cta_language must be false. In short_native mode: script_integrity.short_native must be present with hook_opener_type, spine_question, spine_paid_off (must be true), has_stinger (must be true), story_problem and story_turn (both non-empty); exactly one narration beat has beat_type "reveal" (the turn); the single section carries exactly one text_overlay (the follow ask, on the final beat); and the final narration beat is the stinger / return line, never a subscribe line.

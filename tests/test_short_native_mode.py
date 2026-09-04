@@ -202,7 +202,8 @@ class TestAgentInputInjection:
                     "traceability_manifest": {},
                     "script_integrity": {"short_native": {
                         "hook_opener_type": "contradiction", "spine_question": "why?",
-                        "spine_paid_off": True, "has_stinger": True}}}
+                        "spine_paid_off": True, "has_stinger": True,
+                        "story_problem": "the room felt too big", "story_turn": "a firefly showed the way"}}}
 
         monkeypatch.setattr(se, "run_agent", _fake_run_agent)
         cfg = SimpleNamespace(SHORT_NATIVE_MODE=True, SHORT_NATIVE_MAX_NARRATION_WORDS=150)

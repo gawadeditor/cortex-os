@@ -124,8 +124,16 @@ def _short_native_viral_findings(pkg: dict, *, investigative: bool) -> list[str]
             problems.append("has_stinger is not true: the script has no landing final line")
         if not str(sn.get("spine_question") or "").strip():
             problems.append("spine_question is empty: there is no single through-line")
+        # A real story has a problem and a turn — not just a want and pretty images.
+        if not str(sn.get("story_problem") or "").strip():
+            problems.append("story_problem is empty: no obstacle in the way = a slideshow, not a story")
+        if not str(sn.get("story_turn") or "").strip():
+            problems.append("story_turn is empty: nothing changes = a slideshow, not a story")
     secs = pkg.get("sections") or []
     beats = (secs[0].get("narration_beats") if secs else []) or []
+    beat_types = {str(b.get("beat_type") or "").lower() for b in beats}
+    if beats and "reveal" not in beat_types:
+        problems.append("no beat marked beat_type='reveal': the story has no turn / pivot beat")
     if investigative and beats:
         first = str((beats[0].get("text") or "")).strip()
         if first and _DATE_OPENER_RE.match(first):

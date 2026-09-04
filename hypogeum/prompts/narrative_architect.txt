@@ -1,4 +1,4 @@
-# PROMPT_VERSION: v5
+# PROMPT_VERSION: v6
 # OWNER_AGENT: narrative_architect
 # MODEL_TARGET: anthropic/claude-opus-4.6
 # PURPOSE: Construct episode narrative architecture, reveal structure, and Shorts plan from Research Package
@@ -361,22 +361,29 @@ If the input package contains "production_mode": "short_native", the deliverable
                   image with the character and place named, no question and no suspense,
                   never "Once upon a time".
       STAKES    — opens the ONE spine. Investigative: the single question/tension
-                  carried the whole way. Gentle: the character's ONE small, low-stakes
-                  WANT (to find the way home, to say goodnight to every star). Name it
-                  in narrative_purpose.
+                  carried the whole way. Gentle: a named character with ONE small,
+                  concrete want or feeling that is NOT yet met (the room feels too
+                  big, can't find the way to bed, misses the moon), AND a small
+                  gentle problem in the way of it. A gentle channel with no problem
+                  has no story — only images. Name the want and the problem in
+                  narrative_purpose.
       ESCALATION — investigative: the spine tightens, nothing that doesn't feed it.
-                  Gentle: two or three unhurried sensory scenes serving the want, plus
-                  a REFRAIN — one short line/sound the story returns to two or three
-                  times (what a child asks to hear again).
-      TURN      — investigative: the pivot or contradiction. Gentle: exactly one soft
-                  turn — a small kindness or a tiny wonder, never a scare, obstacle, or
-                  rescue.
+                  Gentle: the character sets out and makes two or three soft attempts,
+                  usually meeting a friend or two who each help a little; the small
+                  obstacle is real (dark path, hiding moon) but never scary or urgent.
+                  Include a REFRAIN — one short line/sound the story returns to two or
+                  three times (what a child asks to hear again).
+      TURN      — investigative: the pivot or contradiction. Gentle: the ONE moment
+                  the problem eases — a kindness, a little patience, a small brave
+                  step, or a friend's help. This is the heart of the story; without a
+                  real turn there is no story, only a slideshow.
       PAYOFF    — the spine's question is ANSWERED, or named as a genuine unresolved
-                  unknown (investigative) / the want is met simply and the character
-                  settles, energy visibly winding down — motion stops, light dims
-                  (gentle). Never withhold the payoff or defer it to a CTA.
+                  unknown (investigative) / the want is met, the problem is fully
+                  gone, the character and friends settle, energy visibly winding down
+                  — motion stops, light dims (gentle). Never withhold the payoff.
       STINGER   — investigative: a reframe or live implication that earns a comment.
-                  gentle: a calm return line inviting tomorrow night.
+                  gentle: a calm return line that NAMES the character and invites
+                  "another story about <name> tomorrow night".
     Record the spine in open_question_tracker (the question the hook opens) and confirm
     it is closed by the payoff move — an open loop opened in the hook and left open at
     the end is a structural failure, not a cliffhanger.

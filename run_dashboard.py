@@ -9976,6 +9976,15 @@ def _build_providers_context() -> dict:
                     or _OR_HEALTH.get(entry.operational_readiness,
                                       entry.operational_readiness or "Unknown"))
 
+        # Publishing goes through Zernio in this deployment — the direct
+        # TikTok/YouTube/Meta APIs aren't used, so their direct-auth check
+        # can't pass. Don't flag that as "degraded" (implies something
+        # broke): configured-via-Zernio reads "connected", otherwise
+        # "disconnected".
+        if "publishing" in (entry.capabilities or []) and status == "degraded":
+            status = "connected" if entry.is_configured else "disconnected"
+            health = "Published through Zernio — no direct key needed"
+
         # last_error: only set when there's a meaningful failure signal
         last_error = None
         if status in ("degraded", "disconnected") and entry.operational_note:

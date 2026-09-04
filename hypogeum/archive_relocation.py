@@ -171,12 +171,41 @@ def _update_db(
     published_at: Optional[str],
     db_path: Optional[Path],
 ) -> int:
-    """Repoint archive_index + assets rows for the episode. Returns rows touched."""
+    """Repoint archive_index + assets rows for the episode. Returns rows touched.
+
+    Retries on "database is locked": the file move to a network archive share
+    takes several seconds, and a busy pipeline / worker routinely holds the
+    single SQLite write lock past the default 5s busy_timeout. A failed
+    catalog update here used to leave the files moved but the catalog stale
+    forever (episode shows un-archived, asset paths dead)."""
+    from hypogeum.db import get_connection
+    import time as _t
+    last_exc: Optional[Exception] = None
+    for attempt in range(6):
+        try:
+            return _update_db_once(episode_id, src_root, dst_root, published_at, db_path)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if "locked" in str(exc).lower() and attempt < 5:
+                _t.sleep(2.0 * (attempt + 1))
+                continue
+            raise
+    raise last_exc  # pragma: no cover
+
+
+def _update_db_once(
+    episode_id: str,
+    src_root: Path,
+    dst_root: Path,
+    published_at: Optional[str],
+    db_path: Optional[Path],
+) -> int:
     from hypogeum.db import get_connection
     now = _now_iso()
     touched = 0
     conn = get_connection(db_path)
     try:
+        conn.execute("PRAGMA busy_timeout = 30000")
         rows = conn.execute(
             "SELECT archive_id, file_path, archive_location FROM archive_index "
             "WHERE episode_id = ?",
@@ -378,20 +407,43 @@ def relocate_episode_assets(
     already = _rows_already_relocated(episode_id, db_path)
     src_has_files = src.exists() and any(p.is_file() for p in src.rglob("*"))
 
+    root = resolve_archive_root(db_path)
+    dst = root / channel_id / episode_id
+    rec["dest_dir"] = str(dst)
+
     if not src_has_files:
         if already:
             rec["verdict"] = "SKIPPED"
             rec["relocated"] = True
             rec["warnings"].append("source already gone and catalog already relocated — no-op")
-        else:
-            rec["verdict"] = "WARNING"
-            rec["warnings"].append(f"no files under {src} to relocate")
+            log.info("archive_relocation_noop", episode_id=episode_id, verdict=rec["verdict"])
+            return rec
+        # Recovery: the files were physically moved on a previous sweep but the
+        # catalog update failed (database is locked) and the source was pruned.
+        # Repoint the catalog now — no move needed — so the episode stops
+        # showing as un-archived and its asset paths resolve again.
+        dst_has_files = dst.exists() and any(p.is_file() for p in dst.rglob("*"))
+        if dst_has_files:
+            try:
+                rec["archive_index_rows_updated"] = _update_db(
+                    episode_id, src, dst, rec["published_at"], db_path
+                )
+                _backfill_episode_title(episode_id, dst, db_path)
+                rec["jsonl_records_updated"] = _update_jsonl(
+                    episode_id, src, dst, rec["published_at"], catalog_dir
+                )
+                rec["relocated"] = True
+                rec["verdict"] = "RELOCATED"
+                rec["warnings"].append("catalog repointed to already-moved files (recovery)")
+            except Exception as exc:  # noqa: BLE001
+                rec["verdict"] = "FAILED"
+                rec["failures"].append(f"recovery catalog repoint failed: {exc}")
+            log.info("archive_relocation_recovery", episode_id=episode_id, verdict=rec["verdict"])
+            return rec
+        rec["verdict"] = "WARNING"
+        rec["warnings"].append(f"no files under {src} and none at {dst} to relocate")
         log.info("archive_relocation_noop", episode_id=episode_id, verdict=rec["verdict"])
         return rec
-
-    root = resolve_archive_root(db_path)
-    dst = root / channel_id / episode_id
-    rec["dest_dir"] = str(dst)
 
     if dry_run:
         files = [p for p in src.rglob("*") if p.is_file()]
@@ -408,11 +460,6 @@ def relocate_episode_assets(
         moved, total = _move_tree(src, dst)
         rec["files_moved"] = len(moved)
         rec["bytes_moved"] = total
-        # prune the now-empty source tree
-        try:
-            shutil.rmtree(src, ignore_errors=True)
-        except Exception:  # noqa: BLE001
-            pass
     except Exception as exc:  # noqa: BLE001
         _rollback(moved)
         rec["verdict"] = "FAILED"
@@ -420,13 +467,27 @@ def relocate_episode_assets(
         log.warn("archive_relocation_failed", episode_id=episode_id, error=str(exc))
         return rec
 
-    # ---- repoint the catalog -------------------------------------------
+    # ---- repoint the catalog ------------------------------------------
+    # _move_tree already removed the source files, so if this fails the files
+    # are at dst but the catalog is stale. That is now a FAILED verdict (not a
+    # swallowed warning) and the next sweep's recovery branch repoints the
+    # catalog from the already-moved files. _update_db itself retries on lock.
     try:
         rec["archive_index_rows_updated"] = _update_db(
             episode_id, src, dst, rec["published_at"], db_path
         )
     except Exception as exc:  # noqa: BLE001
-        rec["warnings"].append(f"DB repoint incomplete: {exc}")
+        rec["verdict"] = "FAILED"
+        rec["failures"].append(f"catalog repoint failed after move: {exc}")
+        log.warn("archive_relocation_catalog_failed", episode_id=episode_id, error=str(exc))
+        return rec
+
+    # prune the now-empty source dir tree
+    try:
+        shutil.rmtree(src, ignore_errors=True)
+    except Exception:  # noqa: BLE001
+        pass
+
     _backfill_episode_title(episode_id, dst, db_path)
     try:
         rec["jsonl_records_updated"] = _update_jsonl(

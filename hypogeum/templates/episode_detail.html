@@ -755,6 +755,45 @@
 {% endif %}
 
 {% if d.stage_groups %}
+{% set _durs = d.stage_groups | map(attribute='total_duration_ms') | select('number') | list %}
+{% set _maxdur = (_durs | max) if _durs else 0 %}
+{% set _totaldur = _durs | sum %}
+{% set _done_n = d.stage_groups | selectattr('status', 'equalto', 'completed') | list | length %}
+{% set _fail_n = d.stage_groups | selectattr('status', 'equalto', 'failed') | list | length %}
+<div class="prod-strip">
+  <div class="prod-stat">
+    <div class="prod-v">{{ (_totaldur / 60000) | round(1) }}<span class="prod-u">min</span></div>
+    <div class="prod-k">Total time to make</div>
+  </div>
+  <div class="prod-stat">
+    <div class="prod-v">{{ d.stage_groups | length }}</div>
+    <div class="prod-k">Steps{% if _fail_n %} · {{ _fail_n }} stopped{% endif %}</div>
+  </div>
+  <div class="prod-stat">
+    <div class="prod-v">{{ (d.total_cost_usd or 0) | friendly_money }}</div>
+    <div class="prod-k">Spent making it</div>
+  </div>
+  <div class="prod-stat">
+    <div class="prod-v" style="color:{{ 'var(--critical)' if _fail_n else 'var(--good)' }};">
+      {{ '✗' if _fail_n else '✓' }} {{ _done_n }}/{{ d.stage_groups | length }}
+    </div>
+    <div class="prod-k">{{ 'A step stopped' if _fail_n else 'All steps finished' }}</div>
+  </div>
+</div>
+<style>
+  .prod-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+                gap: 10px; margin-bottom: var(--gap); }
+  .prod-stat { background: linear-gradient(180deg, var(--raised), var(--surface));
+               border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; }
+  .prod-v { font-family: var(--font-display); font-size: 21px; font-weight: 700;
+            font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+  .prod-u { font-size: 12px; font-weight: 500; color: var(--muted); margin-left: 3px; }
+  .prod-k { font-size: 10px; color: var(--faint); text-transform: uppercase; letter-spacing: .08em; font-weight: 600; margin-top: 4px; }
+  .stage-bar { display: block; height: 3px; border-radius: 999px; background: var(--hairline);
+               margin-top: 8px; overflow: hidden; }
+  .stage-bar > i { display: block; height: 100%; background: var(--accent-line); border-radius: 999px; min-width: 2px; }
+  .stage-bar.is-slow > i { background: var(--warn); }
+</style>
 <div class="stage-list">
   {% for g in d.stage_groups %}
   {% set s = g.status %}
@@ -785,10 +824,14 @@
         {% endif %}
       </div>
     </div>
+    {% if _maxdur and g.total_duration_ms and g.total_duration_ms > 0 %}
+    {% set _frac = g.total_duration_ms / _maxdur %}
+    <span class="stage-bar {{ 'is-slow' if _frac >= 0.6 }}"><i style="width:{{ (_frac * 100) | round(0) }}%"></i></span>
+    {% endif %}
     {% if g.error_message %}
     <div class="stage-error">
       <div class="stage-error-label">Error</div>
-      {{ g.error_message }}
+      {{ g.error_message | plain_tech }}
     </div>
     {% endif %}
   </div>

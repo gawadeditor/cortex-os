@@ -274,6 +274,14 @@ class ModelProfile:
     video_i2v_model:   Optional[str]   = None
     video_i2v_model_price_usd: Optional[float] = None
     video_i2v_model_duration_seconds: Optional[float] = None
+    # The model's real native output resolution, probed from its bake-off
+    # clip at adoption time. Adoption refuses a model whose native
+    # resolution/orientation can't reach the channel's deliverable via one
+    # upscale pass (artifact_compatibility.qualifies_for_deliverable_after_
+    # upscale); production_preflight re-checks it before spend. None = no
+    # probe evidence → treated as unqualified.
+    video_model_native_width:  Optional[int] = None
+    video_model_native_height: Optional[int] = None
     created_at:        str            = ""
     metadata_version:  str            = METADATA_VERSION
 
@@ -647,6 +655,15 @@ _MODEL_PROFILE_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("video_i2v_model", "TEXT"),
     ("video_i2v_model_price_usd", "REAL"),
     ("video_i2v_model_duration_seconds", "REAL"),
+    # 2026-09-04: the model's real native output resolution, probed from its
+    # bake-off clip at adoption time. The adoption route refuses a model
+    # whose native resolution/orientation cannot reach the channel's
+    # deliverable requirement via one upscale pass, and the pipeline
+    # preflight (hypogeum.production_preflight) re-checks it before any
+    # spend. NULL = adopted before this column existed / no probe evidence
+    # (treated as unqualified — re-run the bake-off).
+    ("video_model_native_width", "INTEGER"),
+    ("video_model_native_height", "INTEGER"),
 ]
 
 
@@ -752,6 +769,12 @@ def _row_to_model(row) -> ModelProfile:
         video_i2v_model_duration_seconds = (
             row["video_i2v_model_duration_seconds"]
             if "video_i2v_model_duration_seconds" in row.keys() else None),
+        video_model_native_width = (
+            row["video_model_native_width"]
+            if "video_model_native_width" in row.keys() else None),
+        video_model_native_height = (
+            row["video_model_native_height"]
+            if "video_model_native_height" in row.keys() else None),
         created_at        = row["created_at"],
         metadata_version  = row["metadata_version"],
     )
@@ -1197,6 +1220,7 @@ def update_model_profile(
         "image_provider", "video_provider", "video_model", "video_model_price_usd",
         "video_model_duration_seconds",
         "video_i2v_model", "video_i2v_model_price_usd", "video_i2v_model_duration_seconds",
+        "video_model_native_width", "video_model_native_height",
     }
     try:
         assignments, params = [], []

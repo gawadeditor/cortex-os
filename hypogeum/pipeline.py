@@ -1012,6 +1012,27 @@ def run_pipeline(
     )
 
     # -----------------------------------------------------------------------
+    # -0.2. Pre-spend production preflight — before run registration, before
+    # any agent or spend. Fail-closed, no override (2026-09-04):
+    #   * the channel's adopted video model must be able to deliver the
+    #     deliverable's required source resolution (seedance @496x864 for a
+    #     1080x1920 Short produced two unpublishable twinkle episodes,
+    #     caught only at publish); and
+    #   * this exact topic must not already be produced for the channel (the
+    #     same "Little Hedgehog" topic was fed to two runs in one batch).
+    # Skipped only when channel_id is None (the bypass-channel contract).
+    # -----------------------------------------------------------------------
+    if channel_id is not None:
+        from hypogeum.production_preflight import (
+            assert_video_model_qualified,
+            assert_topic_not_already_produced,
+        )
+        assert_video_model_qualified(channel_id, db_path=db_path)
+        assert_topic_not_already_produced(
+            channel_id, topic_input, episode_id=episode_id, db_path=db_path
+        )
+
+    # -----------------------------------------------------------------------
     # 0. Run registration — must happen before any agent or spend
     # -----------------------------------------------------------------------
     # run_id is set inside the try so the except can always reference it safely.

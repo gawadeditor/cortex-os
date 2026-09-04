@@ -2815,6 +2815,22 @@ def video_bakeoff_adopt():
                if c.channel_id == channel_id), None)
     if not ch or not model:
         return redirect(f"/providers/video-test?channel={channel_id}&flash=adopt+failed")
+
+    # Hard resolution gate (2026-09-04, no override): a model whose native
+    # output can't reach the channel's deliverable resolution/orientation
+    # via one upscale pass is refused here — this is exactly how seedance
+    # @496x864 was adopted for twinkle and produced two unpublishable
+    # episodes. Evidence comes from the model's own bake-off clip.
+    from hypogeum.production_preflight import evaluate_candidate_video_model
+    _ok, _why, _res = evaluate_candidate_video_model(channel_id, model, db_path=_db_path())
+    if not _ok:
+        _audit_note(f"REFUSED adopting {model} for {channel_id}: {_why}")
+        from urllib.parse import quote as _q
+        return redirect(
+            f"/providers/video-test?channel={channel_id}"
+            f"&flash=rejected%3A%20{_q(_why)}"
+        )
+
     mp_id = ch.model_profile_id
     if not mp_id:
         mp = create_model_profile(f"{channel_id} models", db_path=_db_path())
@@ -2848,10 +2864,12 @@ def video_bakeoff_adopt():
     duration = _model_summary(model, db_path=_db_path()).get("avg_duration_s")
     update_model_profile(mp_id, db_path=_db_path(),
                          video_model=model, video_model_price_usd=price,
-                         video_model_duration_seconds=duration)
+                         video_model_duration_seconds=duration,
+                         video_model_native_width=_res.get("native_width"),
+                         video_model_native_height=_res.get("native_height"))
     _audit_note(
         f"video model for {channel_id} set to {model} (${price}, "
-        f"~{duration}s/clip) via bake-off"
+        f"~{duration}s/clip, native {_res.get('native_resolution')}) via bake-off"
     )
     return redirect(f"/providers/video-test?channel={channel_id}&flash=adopted+{model}")
 

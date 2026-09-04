@@ -304,7 +304,7 @@ def _generate_one(prompt: str, model: str, aspect_ratio: str, dest: Path,
     started = time.monotonic()
     base = {"model": model, "price_usd": price, "ok": False, "error": None,
             "clip_file": None, "latency_s": None, "duration_s": None,
-            "motion_score": None}
+            "motion_score": None, "width": None, "height": None}
 
     try:
         endpoint = f"{config.MUAPI_BASE_URL}/{model}"
@@ -346,12 +346,24 @@ def _generate_one(prompt: str, model: str, aspect_ratio: str, dest: Path,
                 return base
 
         dur = _probe_duration(dest)
+        # Real delivered pixel dimensions. The operator picks a model from
+        # this table, and a sub-resolution / wrong-orientation model that
+        # looks fine on price+motion alone is exactly how seedance @496x864
+        # got adopted for twinkle (2026-09-01). adopt refuses a model that
+        # fails artifact_compatibility.qualifies_for_deliverable_after_upscale.
+        try:
+            from hypogeum.artifact_compatibility import probe_resolution
+            _w, _h = probe_resolution(dest)
+        except Exception:  # noqa: BLE001
+            _w, _h = 0, 0
         base.update({
             "ok":           True,
             "clip_file":    dest.name,
             "latency_s":    round(time.monotonic() - started, 1),
             "duration_s":   dur,
             "motion_score": _motion_score(dest, dur or req_dur),
+            "width":        _w or None,
+            "height":       _h or None,
         })
         return base
     except Exception as exc:  # noqa: BLE001
@@ -515,3 +527,37 @@ def list_bakeoffs(channel_id: Optional[str] = None, limit: int = 20) -> list[dic
         })
     runs.sort(key=lambda r: r.get("created_at") or "", reverse=True)
     return runs[:limit]
+
+
+def latest_model_resolution(
+    model: str, channel_id: Optional[str] = None,
+) -> Optional[tuple[int, int]]:
+    """Most-recent real (non-dry) bake-off (width, height) measured for
+    `model` — optionally scoped to one channel. None when there is no
+    resolution evidence for it (never ran, only ran dry, or ran before
+    resolution was recorded and was not back-filled). Callers treat None
+    as "unqualified", never as "fine".
+
+    Manifests are scanned newest-first; `_generate_one` records width/height
+    on every successful clip and `scripts/backfill_bakeoff_resolution.py`
+    filled the pre-2026-09-04 runs from the clips still on disk.
+    """
+    if not _BAKEOFF_ROOT.exists():
+        return None
+    manifests = []
+    for d in _BAKEOFF_ROOT.iterdir():
+        m = get_bakeoff(d.name) if d.is_dir() else None
+        if not m or m.get("dry_run"):
+            continue
+        if channel_id and m.get("channel_id") != channel_id:
+            continue
+        manifests.append(m)
+    manifests.sort(key=lambda m: m.get("created_at") or "", reverse=True)
+    for m in manifests:
+        for r in m.get("results", []):
+            if r.get("model") != model or not r.get("ok"):
+                continue
+            w, h = r.get("width"), r.get("height")
+            if isinstance(w, int) and isinstance(h, int) and w > 0 and h > 0:
+                return w, h
+    return None

@@ -316,6 +316,69 @@ def is_resolution_compliant_clip(
     return width >= required_width and height >= required_height
 
 
+# The single source-enhancement upscale pass (hypogeum.source_enhancement.
+# qualify_asset enhances at most once per clip) can carry a native clip up
+# to roughly 2x on the short axis before AI-upscale artifacts become
+# visible. A model whose native output is below half the deliverable's
+# required resolution therefore CANNOT be brought into compliance by the
+# pipeline — every clip it produces will either fail the A_VIDEO gate at
+# publish or ship visibly soft. seedance-pro-t2v-fast (496x864 native vs a
+# 1080x1920 Shorts requirement = 0.46x) is the concrete case this guards:
+# it was adopted for twinkle on 2026-09-01 because the bake-off surfaced
+# price/latency/motion but not resolution, and produced two unpublishable
+# episodes (~$4) caught only at publish. wan2.7-text-to-video (720x1280 =
+# 0.67x) clears it.
+MIN_NATIVE_UPSCALE_FRACTION = 0.5
+
+
+def qualifies_for_deliverable_after_upscale(
+    native_width: int,
+    native_height: int,
+    required_width: int,
+    required_height: int,
+) -> Tuple[bool, str]:
+    """
+    Can a model that natively outputs (native_width x native_height) have
+    its clips brought to (required_width x required_height) by the pipeline's
+    single allowed source-enhancement upscale pass?
+
+    Returns (True, "") when it can, or (False, reason) when it cannot —
+    reason is a short operator-facing string. Unknown resolution (either
+    axis <= 0) is NOT qualified: the burden of proof is on the evidence.
+
+    Fail-closed rules, in order:
+      1. resolution unknown                       -> not qualified
+      2. orientation mismatch (portrait vs land.) -> not qualified
+      3. min(native/required) on either axis      -> not qualified
+         below MIN_NATIVE_UPSCALE_FRACTION
+    """
+    if native_width <= 0 or native_height <= 0:
+        return False, "native resolution unknown (no probe evidence)"
+    if required_width <= 0 or required_height <= 0:
+        return False, "required resolution unknown"
+
+    native_portrait = native_height > native_width
+    required_portrait = required_height > required_width
+    if native_portrait != required_portrait:
+        return False, (
+            f"orientation mismatch: model outputs "
+            f"{'portrait' if native_portrait else 'landscape'} "
+            f"{native_width}x{native_height}, deliverable needs "
+            f"{'portrait' if required_portrait else 'landscape'} "
+            f"{required_width}x{required_height}"
+        )
+
+    fraction = min(native_width / required_width, native_height / required_height)
+    if fraction < MIN_NATIVE_UPSCALE_FRACTION:
+        return False, (
+            f"native {native_width}x{native_height} is {fraction:.2f}x the "
+            f"required {required_width}x{required_height} — below the "
+            f"{MIN_NATIVE_UPSCALE_FRACTION:.2f}x a single upscale pass can "
+            f"cleanly recover"
+        )
+    return True, ""
+
+
 def _probe_duration_seconds(path: Path) -> float:
     try:
         result = subprocess.run(

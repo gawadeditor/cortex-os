@@ -1051,6 +1051,32 @@ def run_pipeline(
         set_run_context(run_id=run_id, episode_id=episode_id, db_path=db_path)
         log.info("pipeline_run_registered", run_id=run_id, channel_id=channel_id)
 
+        # Persist the topic on the episode row now. _sync_episode_row() at
+        # completion only fills topic from an episode_topics queue row — a
+        # run_pipeline.py --topic run has none, which is exactly how
+        # ep_twinkle_sep08/sep10 ended up with topic=NULL and therefore
+        # invisible to the duplicate-topic preflight. Best-effort, never
+        # affects the run.
+        if topic_input:
+            try:
+                _c = get_connection(db_path)
+                try:
+                    _now = datetime.now(timezone.utc).isoformat()
+                    _c.execute(
+                        "UPDATE episodes SET topic=? WHERE episode_id=? AND COALESCE(topic,'')=''",
+                        (topic_input, episode_id),
+                    )
+                    _c.execute(
+                        "INSERT OR IGNORE INTO episodes (episode_id, topic, status, created_at, run_id) "
+                        "VALUES (?,?,?,?,?)",
+                        (episode_id, topic_input, "in_progress", _now, run_id),
+                    )
+                    _c.commit()
+                finally:
+                    _c.close()
+            except Exception:  # noqa: BLE001
+                pass
+
         # -----------------------------------------------------------------------
         # 1. Startup verification — fail-fast before any agent is called
         # -----------------------------------------------------------------------

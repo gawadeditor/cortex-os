@@ -153,6 +153,24 @@ class TestLLMSuccess:
         assert "batch_id" in result
         assert result["batch_id"]
 
+    def test_channel_topic_learning_injected_into_llm_input(self, tmp_path):
+        batch = _make_batch()
+        seen = {}
+
+        def _capture(**kw):
+            seen["pkg"] = kw["input_package"]
+            return batch
+
+        with patch("hypogeum.discovery.topic_ideator.run_agent", side_effect=_capture), \
+             patch("hypogeum.discovery.topic_ideator._build_signal_context",
+                   return_value=_empty_signal_ctx()), \
+             patch("hypogeum.discovery.topic_ideator.get_connection"), \
+             patch("hypogeum.channel_learning.directive_texts",
+                   return_value=["Lean away from cryptid angles — weak engagement"]):
+            run_topic_ideator("ch_test", _make_config(), output_dir=tmp_path)
+        assert seen["pkg"]["channel_topic_learning"] == [
+            "Lean away from cryptid angles — weak engagement"]
+
 
 # ---------------------------------------------------------------------------
 # 2. Numeric field stripping

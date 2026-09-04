@@ -95,6 +95,23 @@ def run_executive_producer(
     from hypogeum.channel_creative_brief import build_creative_brief  # noqa: PLC0415
     channel_brief = build_creative_brief(channel_id) if channel_id else build_creative_brief("")
 
+    # Channel Learning: topic directives this channel has accrued from its own
+    # published-episode engagement analytics (hypogeum.channel_learning).
+    # Advisory to the model's ACCEPT / WARN / REJECT judgment — empty for a
+    # channel with no topic learning history.
+    topic_learning: list[str] = []
+    try:
+        from hypogeum.channel_learning import directive_texts  # noqa: PLC0415
+        if channel_id:
+            topic_learning = directive_texts(channel_id, "topic")
+    except Exception:  # noqa: BLE001
+        topic_learning = []
+
+    def _pkg(base: dict) -> dict:
+        if topic_learning:
+            base = {**base, "channel_topic_learning": topic_learning}
+        return base
+
     # -----------------------------------------------------------------------
     # Call 1: Validation Scorecard — always executed
     # -----------------------------------------------------------------------
@@ -102,8 +119,8 @@ def run_executive_producer(
         agent_name=_AGENT_NAME,
         model_slug=getattr(config, "EP_MODEL", _MODEL_SLUG),
         system_prompt=SYSTEM_PROMPT,
-        input_package={"task": "validate_topic", "topic": topic_input,
-                       "channel_brief": channel_brief},
+        input_package=_pkg({"task": "validate_topic", "topic": topic_input,
+                            "channel_brief": channel_brief}),
         output_schema="validation_scorecard",
         episode_id=episode_id,
         max_tokens=_MAX_TOKENS,
@@ -130,12 +147,12 @@ def run_executive_producer(
         agent_name=_AGENT_NAME,
         model_slug=getattr(config, "EP_MODEL", _MODEL_SLUG),
         system_prompt=SYSTEM_PROMPT,
-        input_package={
+        input_package=_pkg({
             "task": "create_topic_brief",
             "topic": topic_input,
             "scorecard": scorecard,
             "channel_brief": channel_brief,
-        },
+        }),
         output_schema="topic_brief",
         episode_id=episode_id,
         max_tokens=_MAX_TOKENS,

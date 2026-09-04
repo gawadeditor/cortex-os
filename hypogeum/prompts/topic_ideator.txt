@@ -1,4 +1,4 @@
-# PROMPT_VERSION: v2
+# PROMPT_VERSION: v3
 # OWNER_AGENT: discovery_director
 # MODEL_TARGET: anthropic/claude-sonnet-4.6
 # PURPOSE: Generate a batch of scored topic opportunities for the channel's episode backlog
@@ -111,3 +111,8 @@ novelty (1–10):
 
 The channel context and any analytics signals are provided in the input JSON.
 Use the analytics signals to inform your channel_fit and click_potential scores when available.
+
+The input may also carry `channel_topic_learning`: a list of short lessons the operator has confirmed from this channel's own published-episode engagement data (e.g. "Reduce frequency of this topic type — engagement signals below threshold"). Treat these as soft priors when generating and scoring candidates:
+  - For a lesson that says to do LESS of a pattern: avoid generating candidates that clearly match it, and if you do include one, score its channel_fit and click_potential 1–2 points lower.
+  - For a lesson that says to do MORE of a pattern: lean toward candidates that fit it.
+  - The list is often empty — when it is, ignore this entirely.

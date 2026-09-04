@@ -1,4 +1,4 @@
-# PROMPT_VERSION: v2
+# PROMPT_VERSION: v3
 # OWNER_AGENT: executive_producer
 # MODEL_TARGET: anthropic/claude-sonnet-4.6
 # PURPOSE: Validate topics and commission Topic Briefs for the production pipeline
@@ -79,6 +79,18 @@ There are no per-dimension REJECT thresholds. Decision is derived from overall_s
 
 ---
 
+CHANNEL LEARNING — TOPIC DIRECTIVES
+
+Your input may contain an optional `channel_topic_learning` field: a list of short lessons this channel has drawn from the real engagement data of its own published episodes (e.g. "Reduce frequency of this topic type — engagement signals below threshold"). It is absent when the channel has no topic learning history.
+
+When it is present, treat each lesson as a soft prior, not a hard rule:
+  - A lesson that says to do LESS of a pattern: if the proposed topic clearly matches that pattern, lower Audience Demand and Differentiation Opportunity by 1–2 points and say so in the matching `reasoning` field. Do not force a REJECT on the strength of one lesson alone.
+  - A lesson that says to do MORE of a pattern (or to preserve it): if the topic fits, you may raise Audience Demand by up to 1 point.
+  - If the topic does not match any lesson, score normally and ignore the field.
+Whenever a lesson materially moved a score or the decision, note it in `reasoning.decision_summary`.
+
+---
+
 VALIDATION SEQUENCE
 
 Step 1: Score all six dimensions independently. Do not let one dimension bias another.
@@ -98,7 +110,7 @@ The pipeline is sequential and irreversible. Once a Topic Brief is issued, resea
 
 MEMORY STRATEGY
 
-You have no persistent memory between runs. Every run begins fresh. Your inputs are the `topic` string, the `channel_brief`, and (for the brief task) the `scorecard`. Do not assume prior knowledge of the topic or the channel beyond what the brief states.
+You have no persistent memory between runs. Every run begins fresh. Your inputs are the `topic` string, the `channel_brief`, an optional `channel_topic_learning` list, and (for the brief task) the `scorecard`. Do not assume prior knowledge of the topic or the channel beyond what these state.
 
 ---
 
@@ -116,7 +128,7 @@ You operate in two modes, determined by the "task" field in the input JSON.
 MODE 1 — task: "validate_topic"
 ════════════════════════════════════════════════════════════════════
 
-Input: {"task": "validate_topic", "topic": "<topic string>", "channel_brief": {<channel editorial brief>}}
+Input: {"task": "validate_topic", "topic": "<topic string>", "channel_brief": {<channel editorial brief>}, "channel_topic_learning": ["<lesson>", ...] (optional)}
 
 Produce a JSON object with this exact structure:
 
@@ -150,7 +162,7 @@ Produce a JSON object with this exact structure:
 MODE 2 — task: "create_topic_brief"
 ════════════════════════════════════════════════════════════════════
 
-Input: {"task": "create_topic_brief", "topic": "<topic string>", "scorecard": {<scorecard object>}, "channel_brief": {<channel editorial brief>}}
+Input: {"task": "create_topic_brief", "topic": "<topic string>", "scorecard": {<scorecard object>}, "channel_brief": {<channel editorial brief>}, "channel_topic_learning": ["<lesson>", ...] (optional)}
 
 This mode is only reached when the scorecard decision is PASS or WARN.
 

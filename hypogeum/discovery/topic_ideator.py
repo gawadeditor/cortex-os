@@ -197,11 +197,21 @@ def run_topic_ideator(
     except Exception:  # noqa: BLE001
         _brief = {}
 
+    # Channel Learning: topic directives the operator has applied from this
+    # channel's own engagement analytics. Advisory to the ideator's scoring.
+    _topic_learning: list[str] = []
+    try:
+        from hypogeum.channel_learning import directive_texts
+        _topic_learning = directive_texts(channel_id, "topic", db_path=db_path)
+    except Exception:  # noqa: BLE001
+        _topic_learning = []
+
     input_package = {
         "channel_id": channel_id,
         "batch_id":   batch_id,
         "production_format": production_format,
         "channel_brief": _brief,
+        "channel_topic_learning": _topic_learning,
         "signal_context": {
             "has_real_analytics":     signal_ctx.get("has_real_analytics", False),
             "avg_ctr":                signal_ctx.get("avg_ctr"),

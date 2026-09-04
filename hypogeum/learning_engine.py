@@ -716,6 +716,20 @@ def _action_channel(action: dict, db_path: Optional[Path]) -> Optional[str]:
                 "LIMIT 1",
                 (ep, ep),
             ).fetchone()
+            if row is None:
+                # Prod analytics rows (and therefore insights/actions) are often
+                # keyed by episode TITLE, not id. Resolve the channel by matching
+                # the title on episodes / episode_topics.
+                row = conn.execute(
+                    "SELECT r.channel_id FROM episodes e "
+                    "  JOIN runs r ON r.episode_id = e.episode_id "
+                    "  WHERE e.title = ? AND r.channel_id IS NOT NULL "
+                    "UNION "
+                    "SELECT channel_id FROM episode_topics "
+                    "  WHERE topic_text = ? AND channel_id IS NOT NULL "
+                    "LIMIT 1",
+                    (ep, ep),
+                ).fetchone()
         finally:
             conn.close()
         return row[0] if row else None

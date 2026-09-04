@@ -25,16 +25,17 @@ from pathlib import Path
 from typing import Optional
 
 # ---------------------------------------------------------------------------
-# 9:16 safe area (fractions of frame height / width the platform UI covers)
+# 9:16 safe area — the ONE definition lives in hypogeum.vertical_master
+# (SAFE_AREA_PX / SAFE_BOX_PX), derived from the intersection of every
+# platform's UI overlay on a 1080x1920 canvas. This module only re-exports
+# the fractions the ASS caption model works in.
 # ---------------------------------------------------------------------------
-# Measured against TikTok / Instagram Reels / YouTube Shorts overlays on a
-# 1080x1920 canvas. The caption block is anchored inside the band between
-# SAFE_TOP and (1 - SAFE_BOTTOM); the right rail (like / comment / share
-# buttons) eats SAFE_RIGHT, so captions also get a right margin.
-SAFE_TOP_FRAC    = 0.10   # status bar + "Following / For You"
-SAFE_BOTTOM_FRAC = 0.18   # username, caption text, progress bar, nav
-SAFE_SIDE_FRAC   = 0.055  # left gutter
-SAFE_RIGHT_FRAC  = 0.16   # right action rail
+from hypogeum import vertical_master as _vm
+
+SAFE_TOP_FRAC    = _vm.SAFE_TOP_FRAC     # status bar + "Following / For You"  (~0.130)
+SAFE_BOTTOM_FRAC = _vm.SAFE_BOTTOM_FRAC  # username, caption, progress bar, nav, CTA  (~0.260)
+SAFE_SIDE_FRAC   = _vm.SAFE_LEFT_FRAC    # left gutter  (~0.074)
+SAFE_RIGHT_FRAC  = _vm.SAFE_RIGHT_FRAC   # right action rail  (~0.167)
 
 _POSITIONS = ("bottom", "lower-third", "center", "top")
 POSITIONS = _POSITIONS  # public alias for UI

@@ -78,6 +78,7 @@ from hypogeum.agents.timeline_builder import (
     sum_timeline_duration,
 )
 from hypogeum.agents.video_renderer import FRAME_RATE, MAIN_RESOLUTION, SHORT_RESOLUTION, render_episode
+from hypogeum import vertical_master
 from hypogeum.config import Config
 from hypogeum.elevenlabs import MusicTrackResult
 from hypogeum.logger import get_logger
@@ -1077,6 +1078,37 @@ def run_assembly_agent(
                 Path(render_manifest["main_render"]["file_path"]).stat().st_size
             )
             render_manifest["channel_outro_seconds"] = round(_outro_seconds, 3)
+
+    # ------------------------------------------------------------------
+    # E2. VERTICAL_MASTER conformance (2026-09-04). The finished vertical
+    # deliverable is uploaded verbatim to TikTok / IG Reels / FB Reels /
+    # YouTube Shorts — snap it (and each Short) onto hypogeum.vertical_master
+    # so one file clears all four. Runs after the outro append (the last
+    # thing that touches the pixels). Best-effort: a failed conform leaves
+    # the original and records the finding; the output gate then blocks it.
+    # ------------------------------------------------------------------
+    if _short_native:
+        from hypogeum.agents.video_renderer import conform_to_vertical_master  # noqa: PLC0415
+        _ffb = config.FFMPEG_BINARY if isinstance(getattr(config, "FFMPEG_BINARY", None), str) else "ffmpeg"
+        _vm_targets = []
+        if render_manifest.get("main_render", {}).get("file_exists"):
+            _vm_targets.append(("main", render_manifest["main_render"]["file_path"]))
+        for _sr in render_manifest.get("shorts_renders", []):
+            if _sr.get("file_exists") and _sr.get("file_path"):
+                _vm_targets.append((_sr.get("short_id") or "short", _sr["file_path"]))
+        render_manifest["vertical_master"] = {"spec": vertical_master.RESOLUTION, "results": []}
+        for _label, _fp in _vm_targets:
+            _ok, _findings = conform_to_vertical_master(
+                Path(_fp), ffmpeg_binary=_ffb, episode_id=episode_id,
+                timeout=ffmpeg_timeout, log=log,
+            )
+            render_manifest["vertical_master"]["results"].append(
+                {"target": _label, "conformant": _ok, "findings": _findings}
+            )
+            if _ok and Path(_fp).exists():
+                _key = "main_render" if _label == "main" else None
+                if _key:
+                    render_manifest[_key]["file_size_bytes"] = Path(_fp).stat().st_size
 
     # ------------------------------------------------------------------
     # F. Final Render Package generation

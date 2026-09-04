@@ -66,6 +66,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from hypogeum import vertical_master as vm
 from hypogeum.agents.coverage_check import MAX_EDITORIAL_SPEED_FACTOR, compute_beat_coverage
 from hypogeum.agents.timeline_builder import TimelineEntry, TimelinePlan, sum_timeline_duration
 
@@ -1980,3 +1981,98 @@ def _build_render_output_manifest(
         "short_resolution": SHORT_RESOLUTION,
         "frame_rate":       FRAME_RATE,
     }
+
+
+# ---------------------------------------------------------------------------
+# VERTICAL_MASTER conformance (2026-09-04)
+# ---------------------------------------------------------------------------
+# The final vertical deliverable is uploaded verbatim to TikTok / Reels /
+# Facebook Reels / YouTube Shorts. hypogeum.vertical_master defines the one
+# spec that clears all four. The multi-stage render/outro/caption pipeline
+# above can leave a file just outside it (48kHz audio passed through at the
+# provider's 96kHz, ~4.6 Mbps video, colour untagged). This is the single
+# deterministic pass that snaps the finished file onto the spec.
+
+def _ffprobe_binary(ffmpeg_binary: str) -> str:
+    """Best-effort sibling ffprobe next to a configured ffmpeg path."""
+    p = Path(ffmpeg_binary)
+    cand = p.with_name("ffprobe")
+    return str(cand) if cand.exists() else "ffprobe"
+
+
+def probe_media(path: Path, ffmpeg_binary: str = "ffmpeg") -> dict:
+    """One ffprobe call → the dict shape hypogeum.vertical_master.
+    conformance_findings() expects. Empty dict on any failure."""
+    import json as _json
+    try:
+        r = subprocess.run(
+            [_ffprobe_binary(ffmpeg_binary), "-v", "quiet", "-print_format", "json",
+             "-show_streams", "-show_format", str(path)],
+            capture_output=True, text=True, timeout=60,
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            return {}
+        data = _json.loads(r.stdout)
+    except Exception:  # noqa: BLE001
+        return {}
+    v = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), {})
+    a = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), {})
+    fmt = data.get("format", {})
+    return {
+        "width": v.get("width"), "height": v.get("height"),
+        "codec_name": v.get("codec_name"), "profile": v.get("profile"),
+        "pix_fmt": v.get("pix_fmt"), "r_frame_rate": v.get("r_frame_rate"),
+        "color_primaries": v.get("color_primaries"),
+        "color_transfer": v.get("color_transfer"), "color_space": v.get("color_space"),
+        "sample_rate": a.get("sample_rate"), "channels": a.get("channels"),
+        "duration_s": fmt.get("duration") or v.get("duration"),
+    }
+
+
+def conform_to_vertical_master(
+    path: Path, *, ffmpeg_binary: str = "ffmpeg", episode_id: str = "",
+    timeout: int = _DEFAULT_TIMEOUT, log=None,
+) -> Tuple[bool, list]:
+    """Bring `path` onto the VERTICAL_MASTER spec (re-encode only if it is
+    not already conformant). Returns (ok, findings) — findings is the list of
+    violations that remained AFTER the pass (empty = success). Never raises;
+    a failed pass leaves the original file untouched and returns (False, …)."""
+    if log is None:
+        from hypogeum.logger import get_logger  # noqa: PLC0415
+        log = get_logger(episode_id=episode_id, agent="video_renderer")
+    if not path.exists():
+        return False, ["file does not exist"]
+
+    before = vm.conformance_findings(probe_media(path, ffmpeg_binary))
+    if not before:
+        log.info("vertical_master_already_conformant", path=str(path))
+        return True, []
+    log.info("vertical_master_conforming", path=str(path), findings=before)
+
+    tmp = path.with_suffix(".vmaster_tmp.mp4")
+    cmd = [
+        ffmpeg_binary, "-y", "-i", str(path),
+        "-t", f"{vm.MAX_DURATION_SECONDS:.3f}",
+        "-map", "0:v:0", "-map", "0:a:0?",
+        "-vf", f"scale={vm.WIDTH}:{vm.HEIGHT}:force_original_aspect_ratio=decrease,"
+               f"pad={vm.WIDTH}:{vm.HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1",
+        *vm.ffmpeg_video_args(),
+        *vm.ffmpeg_audio_args(),
+        str(tmp),
+    ]
+    ok = _run_ffmpeg(cmd=cmd, output_path=tmp, component="vertical_master_conform",
+                     episode_id=episode_id, timeout=timeout, log=log)
+    if not ok or not tmp.exists():
+        tmp.unlink(missing_ok=True)
+        log.error("vertical_master_conform_failed", path=str(path))
+        return False, before
+
+    after = vm.conformance_findings(probe_media(tmp, ffmpeg_binary))
+    if after:
+        # Do not ship a still-nonconformant re-encode over the original.
+        tmp.unlink(missing_ok=True)
+        log.error("vertical_master_conform_incomplete", path=str(path), remaining=after)
+        return False, after
+    tmp.replace(path)
+    log.info("vertical_master_conformed", path=str(path), fixed=before)
+    return True, []

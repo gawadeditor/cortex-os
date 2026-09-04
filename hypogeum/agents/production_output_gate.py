@@ -178,6 +178,11 @@ def run_production_output_gate(
     checks.append(_check_artifact_compatibility(
         final_render_package, thumbnail_package, clip_evidence, short_native=short_native,
     ))
+    if short_native:
+        checks.append(_check_vertical_master(
+            final_render_package, episode_dir, episode_id,
+            config.FFMPEG_BINARY if isinstance(getattr(config, "FFMPEG_BINARY", None), str) else "ffmpeg",
+        ))
 
     result = ProductionOutputGateResult(
         passed=all(c.status == "pass" for c in checks),
@@ -369,6 +374,43 @@ def _resolve_end_page_window(
     narr_dur = final_render_package.get("episode_render", {}).get("duration_seconds", 0.0)
     body_end = narr_dur if narr_dur else max(0.0, video_dur - 20.0)
     return video_dur, body_end, True
+
+
+def _check_vertical_master(
+    final_render_package: dict, episode_dir: "Path", episode_id: str,
+    ffmpeg_binary: str = "ffmpeg",
+) -> GateCheckResult:
+    """H_VERTICAL_MASTER — the finished vertical file is uploaded verbatim to
+    TikTok / IG Reels / FB Reels / YouTube Shorts, so it must match
+    hypogeum.vertical_master exactly (1080x1920, H.264 High, 30fps, AAC
+    48kHz stereo, Rec.709 tagged, <= 58s). assembly's conform pass should
+    have snapped it; this fails closed if anything is still off."""
+    from hypogeum import vertical_master as vm  # noqa: PLC0415
+    from hypogeum.agents.video_renderer import probe_media  # noqa: PLC0415
+
+    video_asset_id = final_render_package.get("episode_render", {}).get("video_asset_id", "")
+    main_mp4 = episode_dir.parent.parent / f"{video_asset_id}.mp4" if video_asset_id else None
+    if main_mp4 is None or not main_mp4.exists():
+        main_mp4 = episode_dir / f"main_{episode_id}.mp4"
+    if not main_mp4.exists():
+        return GateCheckResult(
+            capability="H_VERTICAL_MASTER", status="fail",
+            reason=f"vertical deliverable not found on disk: {main_mp4}",
+        )
+    findings = vm.conformance_findings(probe_media(main_mp4, ffmpeg_binary))
+    if findings:
+        return GateCheckResult(
+            capability="H_VERTICAL_MASTER", status="fail",
+            reason=f"vertical file is not VERTICAL_MASTER-conformant: {'; '.join(findings)}",
+            evidence={"spec": vm.RESOLUTION, "findings": findings, "file": str(main_mp4)},
+            remediation="Re-run assembly — video_renderer.conform_to_vertical_master "
+                        "must bring the file to 1080x1920 / H.264 High / 30fps / AAC "
+                        "48kHz stereo / Rec.709 / <=58s before publish.",
+        )
+    return GateCheckResult(
+        capability="H_VERTICAL_MASTER", status="pass",
+        reason="vertical file matches VERTICAL_MASTER (one file for all four platforms)",
+    )
 
 
 def _check_visual_playback(

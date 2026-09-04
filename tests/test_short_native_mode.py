@@ -199,7 +199,10 @@ class TestAgentInputInjection:
         def _fake_run_agent(**kw):
             seen.update(kw["input_package"])
             return {"episode_metadata": {}, "sections": [], "shorts_scripts": [],
-                    "traceability_manifest": {}, "script_integrity": {}}
+                    "traceability_manifest": {},
+                    "script_integrity": {"short_native": {
+                        "hook_opener_type": "contradiction", "spine_question": "why?",
+                        "spine_paid_off": True, "has_stinger": True}}}
 
         monkeypatch.setattr(se, "run_agent", _fake_run_agent)
         cfg = SimpleNamespace(SHORT_NATIVE_MODE=True, SHORT_NATIVE_MAX_NARRATION_WORDS=150)

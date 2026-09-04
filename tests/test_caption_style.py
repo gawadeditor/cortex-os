@@ -16,10 +16,10 @@ def test_default_is_1080_safe_and_bottom():
     a = build_ass_style(SHORT_NATIVE_DEFAULT, 1080, 1920)
     assert a["play_res_x"] == 1080 and a["play_res_y"] == 1920
     assert a["alignment"] == 2                       # bottom-centre
-    # sits above the platform bottom chrome (~18% of 1920) + extra lift
-    assert 320 <= a["margin_v"] <= 420
-    # clear of the right action rail
-    assert a["margin_r"] >= round(1080 * 0.16) - 1
+    # sits above the VERTICAL_MASTER bottom safe zone (500px on 1920) + extra lift
+    assert 490 <= a["margin_v"] <= 560
+    # clear of the right action rail (VERTICAL_MASTER right = 180px on 1080)
+    assert a["margin_r"] >= 178
 
 
 def test_safe_area_scales_with_width():

@@ -172,17 +172,17 @@
   {% if config.schedules %}
   {% for s in config.schedules %}
   <div class="cfg-row">
-    <span class="cr-lbl">{{ s.label or s.scope or s.schedule_id[:8] }}</span>
+    <span class="cr-lbl">{{ (s.channel_id | channel_name) if s.channel_id else (s.label or s.scope) }}</span>
     <span class="cr-val">
       <span class="badge badge-{{ 'active' if s.status == 'active' else 'unknown' }}"
-            style="font-size:10px;">{{ s.status }}</span>
+            style="font-size:10px;">{{ s.status | plain_status }}</span>
       &nbsp;{{ s.cadence }}
     </span>
   </div>
   {% if s.next_run_at %}
   <div class="cfg-row">
     <span class="cr-lbl">Next run</span>
-    <span class="cr-val muted" style="font-size:11px;">{{ s.next_run_at[:16] | replace("T"," ") }}</span>
+    <span class="cr-val muted" style="font-size:11px;">{{ s.next_run_at | friendly_dt }}</span>
   </div>
   {% endif %}
   {% endfor %}
@@ -222,10 +222,13 @@
     <span class="cfg-title">Budget</span>
   </div>
   <div class="cfg-row">
-    <span class="cr-lbl">Ceiling per episode</span>
+    <span class="cr-lbl">Factory default per episode</span>
     <span class="cr-val {% if bud.ceiling_configured %}ok{% else %}warn{% endif %}">
       {% if bud.ceiling_configured %}${{ "%.2f"|format(bud.ceiling_usd) }}{% else %}Not set{% endif %}
     </span>
+  </div>
+  <div class="cfg-row">
+    <span class="cr-lbl" style="font-size:11px; color:var(--faint);">Each channel sets its own cap, which overrides this.</span>
   </div>
   <div class="cfg-row">
     <span class="cr-lbl">Estimated cost range</span>
@@ -277,8 +280,7 @@
 </div>{# end .cfg-grid #}
 
 <div style="margin-top:calc(var(--gap)*2); font-size:11px; color:var(--muted);">
-  <a href="/api/infrastructure/config" style="color:var(--muted);">/api/infrastructure/config</a>
-  &ensp;·&ensp; Read-only. No configuration values are changed here.
+  Read-only. No configuration values are changed here.
   &ensp;·&ensp; <a href="/channel-profile" style="color:var(--muted);">Edit channel profile →</a>
   &ensp;·&ensp; <a href="/preflight" style="color:var(--muted);">Environment checklist →</a>
 </div>

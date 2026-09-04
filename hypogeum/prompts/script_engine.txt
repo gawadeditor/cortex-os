@@ -1,4 +1,4 @@
-# PROMPT_VERSION: v6
+# PROMPT_VERSION: v7
 # OWNER_AGENT: script_engine
 # MODEL_TARGET: anthropic/claude-sonnet-4.6
 # PURPOSE: Write production-ready narration script and Shorts scripts from Narrative Package, applying the composed Humanizer skill directly during generation
@@ -357,8 +357,10 @@ If the input package contains "production_mode": "short_native", you are writing
     beat of any kind — the STINGER is the last thing the viewer hears. cta_count = 0.
     Put the follow ask in exactly ONE text_overlay instead: overlay_type
     "key_information", beat_position on the final (stinger) beat, text 2-5 words
-    ("Follow for the full story" / "New investigation every week"). This is the only
-    text_overlay a short-native script carries.
+    ("Follow for the full story" / "More investigations like this"). NEVER name a
+    posting cadence ("every week", "every day") — the input package does not tell
+    you how often this channel actually publishes, and a wrong claim is worse than
+    none. This is the only text_overlay a short-native script carries.
   - Fill script_integrity.short_native: hook_opener_type, spine_question,
     spine_paid_off (true only if a payoff beat actually closes spine_question),
     has_stinger (true only if the final beat meets the STINGER / RETURN LINE rules),

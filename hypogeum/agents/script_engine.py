@@ -514,9 +514,13 @@ _GENTLE_OUTRO = {
     ),
 }
 _INVESTIGATIVE_OUTRO = {
+    # No posting cadence claim ("every week", "every day") — this default has
+    # no way to know how often a given channel actually publishes, and a
+    # wrong claim reads worse than none (caught 2026-09-04: hypogeum
+    # publishes daily, this said "every week" on every episode).
     "follow_line": (
-        "If this changed how you see it, subscribe — there's a new "
-        "investigation every week."
+        "If this changed how you see it, subscribe for more investigations "
+        "like this one."
     ),
     "tie_directive": (
         "one quiet closing shot that returns to the central artefact or "

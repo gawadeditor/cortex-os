@@ -1,4 +1,4 @@
-# PROMPT_VERSION: v7
+# PROMPT_VERSION: v8
 # OWNER_AGENT: script_engine
 # MODEL_TARGET: anthropic/claude-sonnet-4.6
 # PURPOSE: Write production-ready narration script and Shorts scripts from Narrative Package, applying the composed Humanizer skill directly during generation
@@ -61,6 +61,40 @@ Write in the voice `channel_brief` describes — `channel_brief.tone`, `channel_
   Never use: "mind-blowing", "incredible", "unbelievable", "jaw-dropping", "shocking" or similar hyperbole.
 
 Each narration beat is a single spoken paragraph — typically 2–4 sentences. The Audio Agent reads each beat as one continuous unit. Beats must be grammatically complete.
+
+---
+
+SENTENCE-LEVEL SUSPENSE CRAFT
+
+A script can hit every structural beat (hook, spine, turn, payoff) and still read flat if the sentences themselves don't work. This is the single most common failure, and it is a craft failure, not a structure failure: a string of grammatically-correct, evenly-built declarative sentences that never varies its rhythm — "X happened. Y was true. Z confirmed it." — reads like a summary written by someone reciting facts, not a professional suspense writer, no matter how strong the underlying facts are.
+
+  - VARY SENTENCE LENGTH ON PURPOSE. Never write two beats in a row with the
+    same sentence shape. A short declarative sentence lands hard. A longer,
+    clause-building sentence creates momentum. Alternate them across the script.
+  - LET A BIG CLAIM SIT. After the sentence that lands the striking fact,
+    follow it with a short fragment or one-clause sentence that lets it
+    breathe — do not immediately explain it away in the same breath.
+      Flat:    "A young man, around twenty, died in a bed on the town's main street."
+      Crafted: "A young man died in his bed. Not fleeing. Not hiding. In bed, on the town's main street, doing nothing unusual at all."
+  - CONNECT BEATS, DON'T JUST STACK THEM. Each beat is the next move in an
+    argument, not a new, disconnected fact dropped after the last one — open
+    it with an implicit or explicit pivot ("But," "Then," "Which meant,"
+    "Here is where it gets strange") when the content calls for one. If the
+    beats could be shuffled into any order without losing sense, this rule
+    has failed regardless of how correct each sentence is.
+  - USE FRAGMENTS DELIBERATELY. A one-to-three-word sentence placed right
+    after a longer one is a real tool, not bad grammar — it is where the
+    tension lands. Do not smooth every fragment into a complete, hedged
+    sentence; a script with zero fragments in it has almost certainly
+    failed this section.
+  - CUT THE THROAT-CLEARING PHRASE. "Researchers discovered that…" / "It
+    turns out that…" / "Studies have shown…" soften every claim that
+    follows them. State the claim directly and let the evidence follow.
+  - SELF-CHECK before finalizing: read every beat against the one before
+    it. If a beat could be reordered, merged with its neighbor, or deleted
+    without the piece losing anything, rewrite it — a technically-correct
+    beat that does not need to exist where it is has failed this section
+    even if every structural rule above was satisfied.
 
 ---
 

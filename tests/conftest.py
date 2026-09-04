@@ -101,6 +101,13 @@ _GUARDRAIL_VARS = [
     # Expensive-run safety gate (2026-07-13)
     "PRODUCTION_MODE",
     "FULL_PRODUCTION_ENABLED",
+    # Produce-ahead buffer / catch-up (2026-09-04). Production .env sets
+    # PRODUCTION_BUFFER_TARGET=2 and PRODUCTION_CATCHUP_MAX=2; scheduler.tick()
+    # reads them at call time via _env_int(), so without blocking they'd
+    # override the module-global values that TestProduceAheadBufferGuard /
+    # TestScheduleScope monkeypatch.
+    "PRODUCTION_BUFFER_TARGET",
+    "PRODUCTION_CATCHUP_MAX",
     # Discovery engine selection — production .env currently sets this to
     # "v2" (LLM + Perplexity). Without blocking it, any test that calls
     # run_discovery_cycle() without an explicit engine override silently

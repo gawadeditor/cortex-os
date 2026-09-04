@@ -1940,11 +1940,29 @@ function resumeEpisode(episodeId, kind) {
   <div class="card-title" style="margin-bottom:10px;">Performance</div>
 
   {% if ov.has_real_data %}
-  <div class="anl-kpi-grid">
-    <div class="anl-kpi-card">
-      <div class="anl-kpi-val">{{ "{:,}".format(ov.total_views) if ov.total_views is not none else '—' }}</div>
-      <div class="anl-kpi-lbl">Views</div>
+  {% from '_charts.html' import radial %}
+  <div class="anl-hero-row">
+    {% if ov.avg_retention_pct is not none %}
+    <div class="anl-hero-card">
+      {{ radial(ov.avg_retention_pct, label='watched', size=104,
+                tone=('good' if ov.avg_retention_pct >= 50 else ('warn' if ov.avg_retention_pct >= 25 else 'critical'))) }}
+      <div>
+        <div class="anl-hero-k">How much they watched</div>
+        <div class="anl-hero-sub">{{ ov.avg_view_duration_s|round|int }}s on average per view</div>
+      </div>
     </div>
+    {% endif %}
+    <div class="anl-hero-card">
+      <div class="anl-hero-v">{{ "{:,}".format(ov.total_views) if ov.total_views is not none else '—' }}</div>
+      <div>
+        <div class="anl-hero-k">Views</div>
+        <div class="anl-hero-sub">
+          {% if ov.total_watch_time_h %}≈ {{ ov.total_watch_time_h }}h watched in total{% else %}across every platform{% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="anl-kpi-grid">
     <div class="anl-kpi-card">
       <div class="anl-kpi-val">{{ "{:,}".format(ov.total_impressions) if ov.total_impressions is not none else '—' }}</div>
       <div class="anl-kpi-lbl">Times shown</div>
@@ -1952,18 +1970,6 @@ function resumeEpisode(episodeId, kind) {
     <div class="anl-kpi-card">
       <div class="anl-kpi-val">{{ ov.avg_ctr ~ '%' if ov.avg_ctr is not none else '—' }}</div>
       <div class="anl-kpi-lbl">Click rate</div>
-    </div>
-    <div class="anl-kpi-card">
-      <div class="anl-kpi-val">{{ ov.total_watch_time_h ~ 'h' if ov.total_watch_time_h is not none else '—' }}</div>
-      <div class="anl-kpi-lbl">Watch Time</div>
-    </div>
-    <div class="anl-kpi-card">
-      <div class="anl-kpi-val">{{ ov.avg_view_duration_s|round|int ~ 's' if ov.avg_view_duration_s is not none else '—' }}</div>
-      <div class="anl-kpi-lbl">Avg watch time</div>
-    </div>
-    <div class="anl-kpi-card">
-      <div class="anl-kpi-val">{{ ov.avg_retention_pct ~ '%' if ov.avg_retention_pct is not none else '—' }}</div>
-      <div class="anl-kpi-lbl">Watch-through</div>
     </div>
     <div class="anl-kpi-card">
       <div class="anl-kpi-val">{{ "{:,}".format(ov.total_likes) if ov.total_likes is not none else '—' }}</div>
@@ -1978,6 +1984,18 @@ function resumeEpisode(episodeId, kind) {
       <div class="anl-kpi-lbl">Shares</div>
     </div>
   </div>
+  <style>
+    .anl-hero-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+                    gap: 12px; margin-bottom: 12px; }
+    .anl-hero-card { display: flex; align-items: center; gap: 16px;
+                     background: linear-gradient(180deg, var(--raised), var(--surface));
+                     border: 1px solid var(--border); border-radius: var(--radius);
+                     padding: 16px 18px; box-shadow: var(--shadow-1); }
+    .anl-hero-v { font-family: var(--font-display); font-size: 30px; font-weight: 700;
+                  font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+    .anl-hero-k { font-size: 12px; font-weight: 600; color: var(--text); }
+    .anl-hero-sub { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+  </style>
   {% else %}
   <div class="dv-empty">
     {{ icon('analytics') }}
@@ -2038,9 +2056,9 @@ function resumeEpisode(episodeId, kind) {
           <span class="anl-metric-value">{{ p.avg_retention_pct }}%</span>
         </div>
         {% endif %}
-        {% if p.total_watch_time_h is not none %}
+        {% if p.total_watch_time_h %}
         <div class="anl-metric-row">
-          <span class="anl-metric-label">Watch Time</span>
+          <span class="anl-metric-label">Watch time</span>
           <span class="anl-metric-value">{{ p.total_watch_time_h }}h</span>
         </div>
         {% endif %}
@@ -2058,8 +2076,8 @@ function resumeEpisode(episodeId, kind) {
         {% endif %}
         {% if p.latest_snapshot %}
         <div class="anl-metric-row">
-          <span class="anl-metric-label">Last snapshot</span>
-          <span class="anl-metric-value muted">{{ p.latest_snapshot }}</span>
+          <span class="anl-metric-label">Updated</span>
+          <span class="anl-metric-value muted">{{ p.latest_snapshot | rel_time }}</span>
         </div>
         {% endif %}
       {% else %}

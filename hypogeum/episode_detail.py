@@ -2306,12 +2306,22 @@ def _build_analytics_data(conn, episode_id: str) -> dict:
         vals = [p[field] for p in platform_cards if p.get(field) is not None]
         return round(sum(vals) / len(vals), 2) if vals else None
 
+    _views = _sum("views")
+    _avg_dur = _avg("avg_watch_time_s")
+    _reported_watch_h = _sum("total_watch_time_h")
+    # Platforms often don't report total watch time — derive it from
+    # views × average view duration so the number isn't a misleading 0.0h.
+    if (not _reported_watch_h) and _views and _avg_dur:
+        _watch_h = round(_views * _avg_dur / 3600, 1)
+    else:
+        _watch_h = _reported_watch_h
+
     overview: dict = {
-        "total_views":         _sum("views"),
+        "total_views":         _views,
         "total_impressions":   _sum("impressions"),
         "avg_ctr":             _avg("ctr_pct"),
-        "total_watch_time_h":  _sum("total_watch_time_h"),
-        "avg_view_duration_s": _avg("avg_watch_time_s"),
+        "total_watch_time_h":  _watch_h,
+        "avg_view_duration_s": _avg_dur,
         "avg_retention_pct":   _avg("avg_retention_pct"),
         "total_likes":         _sum("likes"),
         "total_comments":      _sum("comments"),

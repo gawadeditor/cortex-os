@@ -671,13 +671,18 @@ def _build_attention_context() -> dict:
             }
 
     blocking_count       = len(blocking_signals) + len(readiness_blocks) + (1 if run_clearance_issue else 0)
-    action_required_count = len(approvals) + len(learning_pending)
+    # Approvals genuinely wait on the operator; learning suggestions are
+    # optional ("Cortex isn't sure enough to apply on its own") — keep them
+    # separate so the page doesn't cry "action required" over a nice-to-have.
+    action_required_count = len(approvals)
+    suggestions_count     = len(learning_pending)
     warning_count        = len(warning_signals) + len(platform_issues)
 
     return {
-        "total":                  blocking_count + action_required_count + warning_count,
+        "total":                  blocking_count + action_required_count + suggestions_count + warning_count,
         "blocking_count":         blocking_count,
         "action_required_count":  action_required_count,
+        "suggestions_count":      suggestions_count,
         "warning_count":          warning_count,
         "blocking_signals":       blocking_signals,
         "warning_signals":        warning_signals,
@@ -3117,10 +3122,12 @@ def legacy_dashboard():
             "total":          attn["total"],
             "blocking":       attn["blocking_count"],
             "action_required": attn["action_required_count"],
+            "suggestions":    attn.get("suggestions_count", 0),
             "warnings":       attn["warning_count"],
         }
     except Exception:
-        attention_summary = {"total": 0, "blocking": 0, "action_required": 0, "warnings": 0}
+        attention_summary = {"total": 0, "blocking": 0, "action_required": 0,
+                             "suggestions": 0, "warnings": 0}
 
     try:
         from hypogeum.dashboard_rollup import get_factory_rollup
@@ -3155,6 +3162,7 @@ def api_attention_summary():
         "total":           ctx["total"],
         "blocking":        ctx["blocking_count"],
         "action_required": ctx["action_required_count"],
+        "suggestions":     ctx.get("suggestions_count", 0),
         "warnings":        ctx["warning_count"],
         "sections": {
             "blocking_signals": len(ctx["blocking_signals"]),

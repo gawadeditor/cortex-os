@@ -347,11 +347,14 @@
 {% if attention_summary and attention_summary.total > 0 %}
 <div class="action-banner">
   <div class="action-banner-body">
-    <div class="action-banner-title">Needs attention</div>
+    {% set _blk = attention_summary.blocking or 0 %}
+    {% set _act = attention_summary.action_required or 0 %}
+    <div class="action-banner-title">{{ 'Needs attention' if (_blk or _act) else 'Worth a look' }}</div>
     <div class="action-banner-sub">
-      {% if attention_summary.blocking > 0 %}<span class="err">{{ attention_summary.blocking }} blocking</span>{% endif %}
-      {% if attention_summary.action_required > 0 %}<span class="muted"> · {{ attention_summary.action_required }} action required</span>{% endif %}
-      {% if attention_summary.warnings > 0 %}<span class="warn"> · {{ attention_summary.warnings }} warning{% if attention_summary.warnings != 1 %}s{% endif %}</span>{% endif %}
+      {% if _blk > 0 %}<span class="err">{{ _blk }} blocking</span>{% endif %}
+      {% if _act > 0 %}<span class="muted">{% if _blk %} · {% endif %}{{ _act }} waiting for you</span>{% endif %}
+      {% if (attention_summary.suggestions or 0) > 0 %}<span class="muted">{% if _blk or _act %} · {% endif %}{{ attention_summary.suggestions }} suggestion{{ 's' if attention_summary.suggestions != 1 }}</span>{% endif %}
+      {% if (attention_summary.warnings or 0) > 0 %}<span class="warn"> · {{ attention_summary.warnings }} warning{{ 's' if attention_summary.warnings != 1 }}</span>{% endif %}
     </div>
   </div>
   <a href="/attention" class="btn">Review all →</a>

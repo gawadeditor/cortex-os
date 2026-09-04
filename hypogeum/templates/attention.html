@@ -73,13 +73,15 @@
 <div class="container">
 
 {% set _need = (blocking_count or 0) + (action_required_count or 0) %}
+{% set _sugg = suggestions_count or 0 %}
 {{ hero(
    eyebrow='Review',
    title=('Everything is running smoothly' if total == 0 else
           (_need ~ ' thing' ~ ('' if _need == 1 else 's') ~ ' need you') if _need else
+          (_sugg ~ ' suggestion' ~ ('' if _sugg == 1 else 's') ~ ' to review') if _sugg else
           'A few things worth a glance'),
    lede=('Nothing needs a decision from you right now. Cortex will flag anything that does.' if total == 0
-         else 'Blocking items stop production until you act. Warnings are safe to clear once the factory is producing normally.'),
+         else 'Blocking items stop production until you act. The rest is safe to clear whenever you get to it.'),
    figure=(total if total else ''),
    figure_label='open items' if total else '',
    pill=(readiness_level | plain_status) if readiness_level else '',
@@ -104,7 +106,13 @@
     <div class="attn-tile-val {% if action_required_count > 0 %}{% else %}muted{% endif %}">
       {{ action_required_count }}
     </div>
-    <div class="attn-tile-lbl">Action Required</div>
+    <div class="attn-tile-lbl">Waiting for you</div>
+  </div>
+  <div class="attn-tile">
+    <div class="attn-tile-val {% if (suggestions_count or 0) == 0 %}muted{% endif %}">
+      {{ suggestions_count or 0 }}
+    </div>
+    <div class="attn-tile-lbl">Suggestions</div>
   </div>
   <div class="attn-tile {% if warning_count > 0 %}attn-tile-yellow{% endif %}">
     <div class="attn-tile-val {% if warning_count > 0 %}warn{% else %}muted{% endif %}">

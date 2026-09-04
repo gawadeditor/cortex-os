@@ -35,7 +35,7 @@ from typing import Optional
 
 import hypogeum.asset_registry as _asset_registry
 from hypogeum.agents.entity_continuity_manager import (
-    build_visual_spec_text,
+    build_character_sheet_prompt,
     is_ref_image_eligible,
 )
 from hypogeum.config import Config
@@ -117,7 +117,7 @@ def generate_entity_reference_images(
             continue
 
         entity_id        = entity["entity_id"]
-        visual_spec_text = build_visual_spec_text(entity)
+        visual_spec_text = build_character_sheet_prompt(entity)
 
         log.info(
             "vpd_ref_image_started",

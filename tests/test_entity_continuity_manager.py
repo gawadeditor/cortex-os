@@ -2,13 +2,14 @@
 tests/test_entity_continuity_manager.py — Unit tests for entity_continuity_manager.py
 
 Coverage:
-  TestBuildVisualSpecText              — rich text construction from entity visual_spec
+  TestBuildVisualSpecText              — rich text construction from entity visual_spec (single-pose framing)
+  TestBuildCharacterSheetPrompt         — the current production reference-image prompt (multi-angle studio shot)
   TestIsRefImageEligible                — lock_state == "final" gate
   TestGetFinalEntities                  — filter locked_entities by lock_state
   TestGetPrimaryEntityUrl                — entity-to-scene mapping for ref URL injection
   TestApplyReferenceImageAssetIds        — entity lock record update after ref image generation
   TestBuildEntityDescriptionForScene     — video-prompt-mode description (no visual_identity tail)
-  TestInjectEntityDescriptionsIntoScenes — the current I2V-replacement mechanism (2026-09-04)
+  TestInjectEntityDescriptionsIntoScenes — additive text-description injection alongside I2V (2026-09-04)
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from hypogeum.agents.entity_continuity_manager import (
     apply_reference_image_asset_ids,
+    build_character_sheet_prompt,
     build_entity_description_for_scene,
     build_visual_spec_text,
     get_final_entities,
@@ -178,6 +180,55 @@ class TestBuildVisualSpecText:
         )
         result = build_visual_spec_text(entity)
         assert result.endswith(".")
+
+
+# ---------------------------------------------------------------------------
+# TestBuildCharacterSheetPrompt
+# ---------------------------------------------------------------------------
+
+class TestBuildCharacterSheetPrompt:
+    """The current production reference-image prompt (2026-09-05): a
+    proper multi-angle studio-shot / character-sheet framing, not a
+    single flat pose (build_visual_spec_text()'s older framing)."""
+
+    def test_includes_multi_angle_studio_framing(self):
+        entity = _make_entity()
+        result = build_character_sheet_prompt(entity)
+        assert "multi-angle studio shot" in result.lower()
+        assert "front view" in result.lower()
+        assert "three-quarter" in result.lower()
+        assert "side profile" in result.lower()
+
+    def test_includes_the_core_description(self):
+        entity = _make_entity(description="A tiny golden star.")
+        result = build_character_sheet_prompt(entity)
+        assert "A tiny golden star." in result
+
+    def test_requests_plain_neutral_background(self):
+        entity = _make_entity()
+        result = build_character_sheet_prompt(entity)
+        assert "neutral background" in result.lower() or "plain" in result.lower()
+        assert "no scene" in result.lower() or "no environment" in result.lower()
+
+    def test_empty_visual_spec_returns_empty_string(self):
+        entity = {"entity_id": "e1", "visual_spec": {}}
+        assert build_character_sheet_prompt(entity) == ""
+
+    def test_wording_is_entity_type_neutral(self):
+        """Must read naturally for a person entity or an object entity —
+        never hardcode "character" as the subject noun."""
+        entity = _make_entity()
+        result = build_character_sheet_prompt(entity)
+        assert "the same subject" in result.lower()
+
+    def test_includes_visual_identity_directive(self):
+        entity = _make_entity()
+        result = build_character_sheet_prompt(entity)
+        assert "(reference_image, light enforcement)" in result
+
+    def test_differs_from_build_visual_spec_text(self):
+        entity = _make_entity()
+        assert build_character_sheet_prompt(entity) != build_visual_spec_text(entity)
 
 
 # ---------------------------------------------------------------------------

@@ -108,6 +108,40 @@ def test_run_bakeoff_writes_progress_fields(tmp_path, monkeypatch, stub_catalogu
     assert {"status", "done", "total", "now_running"} <= set(disk)
 
 
+def test_run_bakeoff_threads_reference_image_url_for_i2v(tmp_path, monkeypatch, stub_catalogue):
+    """
+    I2V models require a real hosted reference image (hypogeum.muapi.
+    _build_job_payload's own docstring: Seedance I2V returns HTTP 422
+    without one) -- run_bakeoff()/start_bakeoff() must actually pass it
+    through to the real payload builder, not silently drop it the way the
+    bake-off tool did before (2026-09-04: the tool was T2V-only).
+    """
+    monkeypatch.setattr(bo, "_BAKEOFF_ROOT", tmp_path / "bakeoffs")
+    from hypogeum.config import Config
+    cfg = Config(); cfg.MUAPI_DRY_RUN = True
+
+    captured = []
+    import hypogeum.muapi as muapi_mod
+    real_build = muapi_mod._build_job_payload
+
+    def _spy(prompt, model, aspect_ratio, req_dur, reference_image_url, **kw):
+        captured.append(reference_image_url)
+        return real_build(prompt, model, aspect_ratio, req_dur, reference_image_url, **kw)
+
+    monkeypatch.setattr(muapi_mod, "_build_job_payload", _spy)
+
+    ref_url = "https://cdn.muapi.ai/outputs/generated/fake_ref.jpg"
+    manifest = bo.run_bakeoff(
+        "twinkle_mini_tales", "Scene: a soft glowing bakery at night.",
+        ["cheap-t2v"], aspect_ratio="9:16", config=cfg,
+        reference_image_url=ref_url,
+    )
+
+    assert captured == [ref_url]
+    assert manifest["reference_image_url"] == ref_url
+    assert manifest["results"][0]["ok"] is True
+
+
 def test_start_bakeoff_returns_immediately_and_finishes(tmp_path, monkeypatch, stub_catalogue):
     monkeypatch.setattr(bo, "_BAKEOFF_ROOT", tmp_path / "bakeoffs")
     from hypogeum.config import Config

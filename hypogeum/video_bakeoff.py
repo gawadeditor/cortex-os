@@ -292,9 +292,17 @@ def _probe_duration(path: Path) -> Optional[float]:
 
 
 def _generate_one(prompt: str, model: str, aspect_ratio: str, dest: Path,
-                  config, req_dur: float, price: float) -> dict:
+                  config, req_dur: float, price: float,
+                  reference_image_url: Optional[str] = None) -> dict:
     """Submit → poll → download one clip for `model`. Returns a result dict.
-    Never raises."""
+    Never raises.
+
+    reference_image_url (added for I2V bake-offs): when given, conditions
+    the generation on that hosted image -- required for any I2V model
+    (hypogeum.muapi._build_job_payload's own docstring: Seedance I2V
+    returns HTTP 422 without one). None (default, every pre-existing
+    caller) submits pure text-to-video, byte-identical to prior behavior.
+    """
     from hypogeum.muapi import (
         _build_job_payload, _submit_http, _poll_until_complete, _download_file,
         _validate_video_file, _DRY_RUN_REQUEST_ID_PREFIX,
@@ -309,7 +317,7 @@ def _generate_one(prompt: str, model: str, aspect_ratio: str, dest: Path,
     try:
         endpoint = f"{config.MUAPI_BASE_URL}/{model}"
         payload = _build_job_payload(
-            prompt, model, aspect_ratio, req_dur, None,
+            prompt, model, aspect_ratio, req_dur, reference_image_url,
             video_resolution=getattr(config, "MUAPI_VIDEO_RESOLUTION", "1080p"),
         )
         request_id, fail = _submit_http(endpoint, payload, config, f"bakeoff-{_safe(model)}", log)
@@ -381,9 +389,14 @@ def _write_manifest(run_dir: Path, manifest: dict) -> None:
 _ACTIVE: dict = {}  # run_id -> threading.Thread
 
 
-def _prepare_run(channel_id, prompt, models, aspect_ratio, config):
+def _prepare_run(channel_id, prompt, models, aspect_ratio, config, reference_image_url=None):
     """Validate inputs, create the run dir, write the initial 'running'
-    manifest. Returns (run_id, run_dir, picked_models, price_map)."""
+    manifest. Returns (run_id, run_dir, picked_models, price_map).
+
+    reference_image_url: see _generate_one()'s docstring. Recorded on the
+    manifest (never used for anything else here) so a later review of
+    bakeoff history can tell an I2V run apart from a T2V one.
+    """
     price_map = _model_price_map(config)
     picked = [m for m in dict.fromkeys(models) if m in price_map]
     if not picked:
@@ -397,6 +410,7 @@ def _prepare_run(channel_id, prompt, models, aspect_ratio, config):
     _write_manifest(run_dir, {
         "run_id": run_id, "channel_id": channel_id, "aspect_ratio": aspect_ratio,
         "prompt": prompt, "dry_run": bool(getattr(config, "MUAPI_DRY_RUN", False)),
+        "reference_image_url": reference_image_url,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "status": "running", "models": picked, "done": 0, "total": len(picked),
         "now_running": picked[0], "results": [],
@@ -405,7 +419,8 @@ def _prepare_run(channel_id, prompt, models, aspect_ratio, config):
     return run_id, run_dir, picked, price_map
 
 
-def _execute_run(run_id, run_dir, prompt, models, aspect_ratio, config, price_map):
+def _execute_run(run_id, run_dir, prompt, models, aspect_ratio, config, price_map,
+                 reference_image_url=None):
     """Generate one clip per model, re-writing the manifest after each so a
     results page can poll progress. Each model can take a minute or two."""
     dry = bool(getattr(config, "MUAPI_DRY_RUN", False))
@@ -417,7 +432,8 @@ def _execute_run(run_id, run_dir, prompt, models, aspect_ratio, config, price_ma
         log.info("video_bakeoff_model_start", run_id=run_id, model=model)
         r = _generate_one(prompt, model, aspect_ratio,
                           run_dir / f"{_safe(model)}.mp4", config, 8.0,
-                          price_map.get(model, 2.5))
+                          price_map.get(model, 2.5),
+                          reference_image_url=reference_image_url)
         results.append(r)
         # Passive Provider Learning — every bake-off clip is real evidence.
         try:
@@ -447,31 +463,41 @@ def _execute_run(run_id, run_dir, prompt, models, aspect_ratio, config, price_ma
 
 
 def run_bakeoff(channel_id, prompt, models, *, aspect_ratio="16:9",
-                db_path=None, config=None) -> dict:
-    """Synchronous bake-off (used by tests / CLI). Returns the final manifest."""
+                db_path=None, config=None, reference_image_url=None) -> dict:
+    """Synchronous bake-off (used by tests / CLI). Returns the final manifest.
+
+    reference_image_url: see _generate_one()'s docstring -- pass a real
+    hosted image URL to bake off I2V models; None (default) is a pure
+    text-to-video comparison, unchanged from every prior caller.
+    """
     if config is None:
         from hypogeum.config import Config
         config = Config()
     run_id, run_dir, picked, price_map = _prepare_run(
-        channel_id, prompt, models, aspect_ratio, config)
-    return _execute_run(run_id, run_dir, prompt, picked, aspect_ratio, config, price_map)
+        channel_id, prompt, models, aspect_ratio, config, reference_image_url)
+    return _execute_run(run_id, run_dir, prompt, picked, aspect_ratio, config, price_map,
+                        reference_image_url)
 
 
 def start_bakeoff(channel_id, prompt, models, *, aspect_ratio="16:9",
-                  db_path=None, config=None) -> str:
+                  db_path=None, config=None, reference_image_url=None) -> str:
     """Start the bake-off on a background thread; return the run_id at once
     so the caller can redirect to a polling results page. Generation of many
-    models takes many minutes — it must not block the request."""
+    models takes many minutes — it must not block the request.
+
+    reference_image_url: see run_bakeoff()'s docstring.
+    """
     import threading
     if config is None:
         from hypogeum.config import Config
         config = Config()
     run_id, run_dir, picked, price_map = _prepare_run(
-        channel_id, prompt, models, aspect_ratio, config)
+        channel_id, prompt, models, aspect_ratio, config, reference_image_url)
 
     def _worker():
         try:
-            _execute_run(run_id, run_dir, prompt, picked, aspect_ratio, config, price_map)
+            _execute_run(run_id, run_dir, prompt, picked, aspect_ratio, config, price_map,
+                        reference_image_url)
         except Exception as exc:  # noqa: BLE001
             log.error("video_bakeoff_thread_crashed", run_id=run_id, error=str(exc))
             m = get_bakeoff(run_id) or {}

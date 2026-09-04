@@ -12,6 +12,7 @@ Public API:
 
 from __future__ import annotations
 
+import re as _re
 from pathlib import Path
 from typing import Optional
 
@@ -183,10 +184,18 @@ def get_analytics_overview(db_path: Optional[Path] = None,
             # Episode performance from view
             try:
                 ep_rows = conn.execute(
-                    "SELECT * FROM v_episode_performance ORDER BY episode_created_at DESC LIMIT 30"
+                    "SELECT * FROM v_episode_performance ORDER BY episode_created_at DESC LIMIT 60"
                 ).fetchall()
             except Exception:
                 ep_rows = []
+            # Drop rows whose "episode_id" is really a platform post title /
+            # caption that was synced but never linked to an episode Cortex
+            # made — they render as fake episodes. Their views still count in
+            # the platform totals.
+            _real_ep = _re.compile(r"^(ep[_-][a-z0-9]|[0-9a-f]{8}-[0-9a-f]{4})", _re.I)
+            ep_rows = [r for r in ep_rows
+                       if _real_ep.match(str(dict(r).get("episode_id") or ""))
+                       or dict(r).get("episode_title")][:30]
 
             recent = conn.execute(
                 "SELECT episode_id, platform, snapshot_date, views, ctr, avg_view_pct, "
@@ -291,11 +300,17 @@ def _channel_scoped_overview(conn, channel_id: str) -> dict:
         pb.pop("_ctrs", None)
         pb.pop("_rets", None)
 
+    # Same guard as the factory-wide path: don't list platform captions /
+    # post-ids that were synced but never linked to an episode.
+    _real_ep = _re.compile(r"^(ep[_-][a-z0-9]|[0-9a-f]{8}-[0-9a-f]{4})", _re.I)
+    _eps = [e for e in episodes.values()
+            if _real_ep.match(str(e.get("episode_id") or ""))
+            or titles.get(e.get("episode_id"))]
+
     return {
         "platform_breakdown":   platform_breakdown,
         "recent_snapshots":     rows[:10],
-        "episodes":             sorted(episodes.values(),
-                                       key=lambda e: -(e["total_views"] or 0)),
+        "episodes":             sorted(_eps, key=lambda e: -(e["total_views"] or 0)),
         "pending_action_count": 0,
         "total_insights":       0,
         "channel_scoped":       True,

@@ -133,11 +133,18 @@ def _short_native_viral_findings(pkg: dict, *, investigative: bool) -> list[str]
     if beats:
         last = str((beats[-1].get("text") or "")).strip()
         low = last.lower()
-        if any(w in low for w in ("subscribe", "follow the", "every week", "hit the",
-                                  "new investigation every", "tap the", "don't forget")):
+        if any(w in low for w in ("subscribe", "hit the", "new investigation every",
+                                  "don't forget", "smash")):
             problems.append(f"final beat is a subscribe/CTA line, not a stinger: {last[:70]!r}")
-        elif len(last.split()) < 7:
-            problems.append(f"final beat is too short to be a stinger ({len(last.split())} words): {last[:70]!r}")
+        else:
+            # Investigative stingers must be a full 8-16w sentence; a gentle
+            # return line is allowed shorter (6+).
+            floor = 8 if investigative else 6
+            if len(last.split()) < floor:
+                problems.append(
+                    f"final beat is too short for a {'stinger' if investigative else 'return line'} "
+                    f"({len(last.split())} words, need {floor}+): {last[:70]!r}"
+                )
     return problems
 
 

@@ -1,4 +1,4 @@
-# PROMPT_VERSION: v3
+# PROMPT_VERSION: v4
 # OWNER_AGENT: script_engine
 # MODEL_TARGET: anthropic/claude-sonnet-4.6
 # PURPOSE: Write production-ready narration script and Shorts scripts from Narrative Package, applying the composed Humanizer skill directly during generation
@@ -324,20 +324,34 @@ If the input package contains "production_mode": "short_native", you are writing
               unresolved unknown (investigative) / the wish is answered and the
               character settles (gentle). beat_type = "resolution". NEVER hand the
               payoff to a CTA or leave it for the viewer to infer.
-    Final beat — STINGER (investigative: a reframe or live implication that makes the
-              viewer want to comment) or RETURN LINE (gentle: the soft "one more
-              tomorrow night" cue). beat_type = "resolution".
+    Final beat — STINGER (investigative) or RETURN LINE (gentle). beat_type = "resolution".
+              The STINGER is a COMPLETE sentence (8-16 words) that does one of:
+                • reframes what the whole video was actually about ("This was never
+                  about the eruption — it's about what a body can still tell us."), or
+                • names the live, unsettled implication ("And nobody has explained why
+                  it happened to only one person in the town.").
+              It must be able to stand alone as the single line someone screenshots.
+              BANNED as a stinger: a sentence fragment ("We can image his neurons."),
+              a restating of a fact already given, a question with an obvious answer,
+              or anything that sounds like a caption. If your draft stinger is under
+              8 words or is not a full independent clause, rewrite it.
+              The gentle RETURN LINE is the soft "one more tomorrow night" cue.
   - The opening hook line must NOT contain a year, a full date, or a place-name-first
     clause on an investigative channel. If the strongest fact is tied to a year, lead
     with the fact and let the year arrive later.
-  - CTA: no separate spoken subscribe beat. cta_count = 0. The subscribe / follow ask
-    belongs in a text_overlay only (overlay_type "key_information" or "payoff"), never
-    as a narration beat that displaces the stinger.
+  - CTA: no separate spoken subscribe beat, and no closing subscribe/follow narration
+    beat of any kind — the STINGER is the last thing the viewer hears. cta_count = 0.
+    Put the follow ask in exactly ONE text_overlay instead: overlay_type
+    "key_information", beat_position on the final (stinger) beat, text 2-5 words
+    ("Follow for the full story" / "New investigation every week"). This is the only
+    text_overlay a short-native script carries.
   - Fill script_integrity.short_native: hook_opener_type, spine_question,
     spine_paid_off (true only if a payoff beat actually closes spine_question),
-    has_stinger. spine_paid_off = false is a self-declared failure — rewrite before responding.
+    has_stinger (true only if the final beat meets the STINGER rules above).
+    spine_paid_off = false or has_stinger = false is a self-declared failure —
+    rewrite before responding.
 Follow the "short_native_directive" object in the input package for any specifics it names.
 
 ════════════════════════════════════════════════════════════════════
 
-CRITICAL: Respond with valid JSON only. No prose, no markdown, no code fences. The entire response must be parseable as a single JSON object. shorts_scripts must contain exactly 3 entries UNLESS production_mode is "short_native" (then exactly 0). Every section must have section_id, title, and at least one narration beat. Every Short must have narration_beats and text_overlays. shorts_extraction_markers must contain exactly 3 entries matching the 3 Short IDs (0 entries in short_native mode). cta_count in script_integrity must equal 2 for a long-form episode and 0 in short_native mode. aggressive_cta_language must be false. In short_native mode, script_integrity.short_native must be present with hook_opener_type, spine_question, spine_paid_off (must be true), and has_stinger.
+CRITICAL: Respond with valid JSON only. No prose, no markdown, no code fences. The entire response must be parseable as a single JSON object. shorts_scripts must contain exactly 3 entries UNLESS production_mode is "short_native" (then exactly 0). Every section must have section_id, title, and at least one narration beat. Every Short must have narration_beats and text_overlays. shorts_extraction_markers must contain exactly 3 entries matching the 3 Short IDs (0 entries in short_native mode). cta_count in script_integrity must equal 2 for a long-form episode and 0 in short_native mode. aggressive_cta_language must be false. In short_native mode: script_integrity.short_native must be present with hook_opener_type, spine_question, spine_paid_off (must be true), has_stinger (must be true); the single section carries exactly one text_overlay (the follow ask, on the final beat); and the final narration beat is the stinger, never a subscribe line.

@@ -124,12 +124,20 @@ def _short_native_viral_findings(pkg: dict, *, investigative: bool) -> list[str]
             problems.append("has_stinger is not true: the script has no landing final line")
         if not str(sn.get("spine_question") or "").strip():
             problems.append("spine_question is empty: there is no single through-line")
-    if investigative:
-        secs = pkg.get("sections") or []
-        beats = (secs[0].get("narration_beats") if secs else []) or []
-        first = str((beats[0].get("text") if beats else "") or "").strip()
+    secs = pkg.get("sections") or []
+    beats = (secs[0].get("narration_beats") if secs else []) or []
+    if investigative and beats:
+        first = str((beats[0].get("text") or "")).strip()
         if first and _DATE_OPENER_RE.match(first):
             problems.append(f"hook opens on a date/year clause (flat opener): {first[:70]!r}")
+    if beats:
+        last = str((beats[-1].get("text") or "")).strip()
+        low = last.lower()
+        if any(w in low for w in ("subscribe", "follow the", "every week", "hit the",
+                                  "new investigation every", "tap the", "don't forget")):
+            problems.append(f"final beat is a subscribe/CTA line, not a stinger: {last[:70]!r}")
+        elif len(last.split()) < 7:
+            problems.append(f"final beat is too short to be a stinger ({len(last.split())} words): {last[:70]!r}")
     return problems
 
 

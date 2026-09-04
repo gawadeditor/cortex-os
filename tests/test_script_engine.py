@@ -950,10 +950,14 @@ from hypogeum.agents.script_engine import (  # noqa: E402
 )
 
 
-def _sn_pkg(first_line, *, paid=True, stinger=True, spine="why?"):
+_GOOD_STINGER = "And two thousand years later nobody can fully explain how it happened."
+
+
+def _sn_pkg(first_line, *, paid=True, stinger=True, spine="why?", last_line=_GOOD_STINGER):
     return {
         "sections": [{"section_id": "s1", "title": "x",
-                      "narration_beats": [{"beat_id": "b1", "text": first_line}]}],
+                      "narration_beats": [{"beat_id": "b1", "text": first_line},
+                                          {"beat_id": "b2", "text": last_line}]}],
         "shorts_scripts": [], "chapter_markers": [], "shorts_extraction_markers": [],
         "traceability_manifest": {},
         "script_integrity": {"cta_count": 0, "short_native": {

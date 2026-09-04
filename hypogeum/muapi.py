@@ -745,6 +745,7 @@ def _submit_scene_via_gate(
     *, channel_id: str, grant, prompt: str, tier: int, reference_image_url: Optional[str],
     scene_id: str, short_id: Optional[str], aspect_ratio: str, requested_duration: float,
     episode_id: str, output_dir: Path, config: Config, log, is_fallback: bool,
+    repair_fallback_ok: bool = False,
 ) -> "tuple[Optional[dict], Optional[str]]":
     """
     The grant-derived gate path (Correction 3/5.5): compile an
@@ -760,6 +761,24 @@ def _submit_scene_via_gate(
     shape _attempt_generation() returns, so submit_scene()'s two-attempt
     orchestration and every caller's result handling are unaffected by
     which path actually ran.
+
+    repair_fallback_ok (operator-approved 2026-09-04, Option B): clip
+    repair (hypogeum.agents.clip_repair_agent) has no access to the
+    original entity reference images at repair time, so a scene the
+    Production Plan declared as I2V (a "locked entity" scene) can never
+    be resubmitted with a matching model from that call site -- it was
+    hard-rejected as model_mismatch every time, retrying forever without
+    ever succeeding (observed 2026-09-04, ep_90382de2). When True AND
+    reference_image_url is None AND the resolved model is the channel's
+    OWN I2V model would have been (i.e. the plan really did declare the
+    I2V path, not some other legitimate model drift) AND the resolved
+    T2V price is <= the plan's declared price, a model/price mismatch is
+    downgraded to a logged fallback instead of a denial. This can only
+    ever substitute a CHEAPER model than what Finance authorized for
+    this asset -- it can never spend more than the plan approved -- and
+    only clip_repair_agent's two repair call sites pass this flag at
+    all; every other caller (VPD's own Phase 2 executor included) is
+    completely unaffected.
     """
     import hashlib
 
@@ -827,10 +846,29 @@ def _submit_scene_via_gate(
             f"prompt_mismatch: real prompt fingerprint for {expected_output_identity!r} "
             f"does not match the plan's declared fingerprint for this asset identity"
         )
+    _repair_i2v_fallback = False
     if model != declared_asset.model:
-        return None, (
-            f"model_mismatch: {model!r} does not match the plan's declared "
-            f"model {declared_asset.model!r} for {expected_output_identity!r}"
+        # The channel's OWN I2V model, recomputed the same way the plan
+        # itself would have -- confirms this mismatch really is "plan
+        # declared I2V, repair has no reference image", not some other,
+        # unrelated model drift that must still fail closed.
+        _channel_i2v_model = _resolve_scene_model(tier, "repair-fallback-probe", config, channel_id)
+        _repair_i2v_fallback = (
+            repair_fallback_ok
+            and reference_image_url is None
+            and declared_asset.model == _channel_i2v_model
+        )
+        if not _repair_i2v_fallback:
+            return None, (
+                f"model_mismatch: {model!r} does not match the plan's declared "
+                f"model {declared_asset.model!r} for {expected_output_identity!r}"
+            )
+        log.warn(
+            "clip_repair_i2v_to_t2v_fallback",
+            scene_id=scene_id,
+            declared_model=declared_asset.model,
+            fallback_model=model,
+            reason="no entity reference image available at repair time (operator-approved 2026-09-04, Option B)",
         )
 
     # ------------------------------------------------------------------
@@ -940,11 +978,18 @@ def _submit_scene_via_gate(
             f"non-positive price can never be authorized spend"
         )
     if plan_unit_price_dec != max_cost:
-        return None, (
-            f"plan_price_mismatch: verified persisted plan prices asset "
-            f"{expected_output_identity!r} at {plan_unit_price_dec} USD but tier "
-            f"model {model!r} resolves to {max_cost} USD -- refusing to submit "
-            f"an amount the plan did not authorize"
+        if not (_repair_i2v_fallback and max_cost <= plan_unit_price_dec):
+            return None, (
+                f"plan_price_mismatch: verified persisted plan prices asset "
+                f"{expected_output_identity!r} at {plan_unit_price_dec} USD but tier "
+                f"model {model!r} resolves to {max_cost} USD -- refusing to submit "
+                f"an amount the plan did not authorize"
+            )
+        log.warn(
+            "clip_repair_i2v_to_t2v_fallback_price",
+            scene_id=scene_id,
+            declared_price_usd=str(plan_unit_price_dec),
+            fallback_price_usd=str(max_cost),
         )
 
     # ------------------------------------------------------------------
@@ -1277,6 +1322,7 @@ def submit_scene(
     shadow_evidence: Optional["_shadow_observation.ShadowEvidence"] = None,
     observation_only: bool = False,
     channel_id: Optional[str] = None,
+    allow_i2v_to_t2v_repair_fallback: bool = False,
 ) -> dict:
     """
     Generate a video clip for one scene and return the asset manifest entry.
@@ -1374,6 +1420,13 @@ def submit_scene(
     legacy two-attempt structure, since a grant-derived attempt that
     fails at the provider boundary must never silently reattempt
     outside the Authority's own accounting.
+
+    allow_i2v_to_t2v_repair_fallback (operator-approved 2026-09-04,
+    Option B): forwarded to _submit_scene_via_gate()'s
+    repair_fallback_ok -- see that function's own docstring. Defaults
+    to False, so every existing caller is unaffected; only
+    hypogeum.agents.clip_repair_agent's two repair call sites pass
+    True. Has no effect on the legacy (channel_id=None) path.
     """
     scene_id = scene_spec["scene_id"]
     short_id = scene_spec.get("short_id")
@@ -1478,6 +1531,7 @@ def submit_scene(
             reference_image_url=reference_image_url, scene_id=scene_id, short_id=short_id,
             aspect_ratio=aspect_ratio, requested_duration=requested_duration, episode_id=eid,
             output_dir=output_dir, config=config, log=log, is_fallback=False,
+            repair_fallback_ok=allow_i2v_to_t2v_repair_fallback,
         )
         if manifest is not None:
             return manifest

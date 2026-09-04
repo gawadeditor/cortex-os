@@ -217,13 +217,22 @@ def run_clip_repair(
                 submit_spec = build_scene_spec(missing_scene, entity_hosted_urls={})
                 _force_short_native_aspect(submit_spec, config)
 
-                # channel_id is included only when not None, so every
-                # existing caller's exact prior submit_scene() kwarg set
-                # (and any test mock with a fixed signature) is completely
-                # unaffected -- mirrors the same "omit entirely, don't
-                # pass None" discipline used at this function's other two
-                # gate-eligible call sites.
-                _gate_kwargs = {"channel_id": channel_id} if channel_id is not None else {}
+                # channel_id (and, bundled with it, allow_i2v_to_t2v_repair_
+                # fallback -- Option B, operator-approved 2026-09-04: this
+                # call always builds its scene_spec with entity_hosted_urls={}
+                # above, so a scene the plan declared I2V can never resolve a
+                # matching model from here; without the fallback flag it was
+                # hard model_mismatch-rejected every time, see
+                # hypogeum.muapi._submit_scene_via_gate's own docstring) are
+                # included only when channel_id is not None, so every existing
+                # caller's exact prior submit_scene() kwarg set (and any test
+                # mock with a fixed signature) is completely unaffected --
+                # mirrors the same "omit entirely, don't pass None" discipline
+                # used at this function's other two gate-eligible call sites.
+                _gate_kwargs = (
+                    {"channel_id": channel_id, "allow_i2v_to_t2v_repair_fallback": True}
+                    if channel_id is not None else {}
+                )
                 asset_result = submit_scene(
                     scene_spec=submit_spec,
                     config=config,
@@ -636,7 +645,13 @@ def fill_coverage_deficits(
                         )
 
                     output_dir.mkdir(parents=True, exist_ok=True)
-                    _gate_kwargs = {"channel_id": channel_id} if channel_id is not None else {}
+                    # See the identical comment at run_clip_repair()'s
+                    # Strategy B call site above (entity_hosted_urls={} +
+                    # allow_i2v_to_t2v_repair_fallback, Option B, 2026-09-04).
+                    _gate_kwargs = (
+                        {"channel_id": channel_id, "allow_i2v_to_t2v_repair_fallback": True}
+                        if channel_id is not None else {}
+                    )
                     asset_result = submit_scene(
                         scene_spec=extra_scene_spec,
                         config=config,
@@ -1175,7 +1190,13 @@ def fill_confirmed_missing_shots(
 
             try:
                 output_dir.mkdir(parents=True, exist_ok=True)
-                _gate_kwargs = {"channel_id": channel_id} if channel_id is not None else {}
+                # See the identical comment at run_clip_repair()'s Strategy B
+                # call site (entity_hosted_urls={} + allow_i2v_to_t2v_repair_
+                # fallback, Option B, 2026-09-04).
+                _gate_kwargs = (
+                    {"channel_id": channel_id, "allow_i2v_to_t2v_repair_fallback": True}
+                    if channel_id is not None else {}
+                )
                 asset_result = submit_scene(
                     scene_spec=scene_spec,
                     config=config,

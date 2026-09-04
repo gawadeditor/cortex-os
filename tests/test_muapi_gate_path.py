@@ -744,3 +744,107 @@ class TestPhase2PlanBoundAuthorization:
         config = make_config()
         monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
         return priv, config, None
+
+
+class TestI2VRepairFallback:
+    """Option B (operator-approved 2026-09-04): clip_repair_agent has no
+    entity reference image at repair time, so a scene the Production Plan
+    declared I2V could never be resubmitted from a repair call site --
+    every attempt hard-failed model_mismatch and clip_repair retried
+    forever without ever succeeding (observed ep_90382de2). These tests
+    prove the narrow, cheaper-only exception in
+    hypogeum.muapi._submit_scene_via_gate, exercised the same way
+    TestGrantDerivedGatePath.test_gate_path_end_to_end is."""
+
+    def _setup(self, keypair, tmp_path, monkeypatch, config, *, declared_model, unit_price_usd, grant_model):
+        priv, _pub = keypair
+        db_path = tmp_path / "auth.db"
+        import hypogeum.db as db
+        db.initialize_schema(db_path)
+        # The grant's registered plan hash must bind to the plan actually
+        # persisted below (declared_model/unit_price_usd), not the plan
+        # _register_grant() would otherwise build implicitly from
+        # grant_model -- those are two different scenes/models here by
+        # design (that's the whole point of this fallback), so they hash
+        # differently. The grant's own PROVIDER/MODEL binding (what
+        # authorizes the real submitted call) is still grant_model.
+        _register_grant(
+            priv, db_path, model=grant_model,
+            production_plan_content_hash=_matching_plan_hash(model=declared_model, unit_price_usd=unit_price_usd),
+        )
+        monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
+        _configure_channel_weekly(db_path)
+        _persist_matching_plan(tmp_path, model=declared_model, unit_price_usd=unit_price_usd)
+
+    def test_repair_falls_back_to_t2v_when_plan_declared_i2v(self, keypair, tmp_path, monkeypatch):
+        """Plan declared the I2V model at $2.50; repair has no reference
+        image (make_scene_spec's default) so it can only resolve the
+        channel's T2V model ($0.15) -- with the flag set, that cheaper
+        substitution is allowed instead of model_mismatch."""
+        config = make_config()
+        self._setup(
+            keypair, tmp_path, monkeypatch, config,
+            declared_model=config.MUAPI_I2V_MODEL, unit_price_usd=2.5, grant_model=config.MUAPI_T2_MODEL,
+        )
+        spec = make_scene_spec(scene_id="s01b01")  # reference_image_url=None by default
+
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.requests.get") as mock_get, \
+             patch("hypogeum.muapi.time.sleep"), \
+             patch("hypogeum.muapi._download_file", return_value=(True, "")), \
+             patch("hypogeum.muapi._validate_video_file", return_value=(True, "")):
+            mock_post.return_value = _mock_submit_ok("req_repair_fallback")
+            mock_get.return_value = _mock_poll_completed()
+            result = submit_scene(
+                spec, config, "ep_gate_test", tmp_path, channel_id="test_channel",
+                agent="clip_repair_agent", allow_i2v_to_t2v_repair_fallback=True,
+            )
+
+        assert result["generation_status"] == "generated", result
+        assert result["model_used"] == config.MUAPI_T2_MODEL
+
+    def test_without_the_flag_the_same_call_still_hard_fails(self, keypair, tmp_path, monkeypatch):
+        """The exact same plan/grant/scene as above, but the calling
+        convention every OTHER caller (VPD's own Phase 2 executor included)
+        uses: no flag at all -- must still be model_mismatch, unaffected."""
+        config = make_config()
+        self._setup(
+            keypair, tmp_path, monkeypatch, config,
+            declared_model=config.MUAPI_I2V_MODEL, unit_price_usd=2.5, grant_model=config.MUAPI_T2_MODEL,
+        )
+        spec = make_scene_spec(scene_id="s01b01")
+
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.requests.get") as mock_get:
+            result = submit_scene(spec, config, "ep_gate_test", tmp_path, channel_id="test_channel")
+            assert mock_post.called is False
+
+        assert result["generation_status"] == "generation_failed"
+        assert "model_mismatch" in result["failure_reason"]
+
+    def test_flag_does_not_waive_an_unrelated_model_drift(self, keypair, tmp_path, monkeypatch):
+        """The exception is narrow: it only fires when the declared model IS
+        the channel's own I2V model. A plan declaring some OTHER model the
+        resolved model doesn't match (unrelated drift, e.g. a stale/renamed
+        tier model) must still hard-fail even with the flag set -- this is
+        not a general model_mismatch bypass."""
+        config = make_config()
+        other_model = "veo3-text-to-video"  # T1 -- not this channel's I2V model, not T2 either
+        assert other_model != config.MUAPI_I2V_MODEL
+        assert other_model != config.MUAPI_T2_MODEL
+        self._setup(
+            keypair, tmp_path, monkeypatch, config,
+            declared_model=other_model, unit_price_usd=2.5, grant_model=config.MUAPI_T2_MODEL,
+        )
+        spec = make_scene_spec(scene_id="s01b01")
+
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.requests.get") as mock_get:
+            result = submit_scene(
+                spec, config, "ep_gate_test", tmp_path, channel_id="test_channel",
+                allow_i2v_to_t2v_repair_fallback=True,
+            )
+            assert mock_post.called is False
+
+        assert result["generation_status"] == "generation_failed"
+        assert "model_mismatch" in result["failure_reason"]

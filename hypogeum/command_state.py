@@ -228,11 +228,21 @@ def _get_run_state(db_path: Path) -> dict:
                 LIMIT 1
             """).fetchone()
 
+            # Only *actionable* failures: the episode still exists and wasn't
+            # superseded, nothing later succeeded for it, and its topic wasn't
+            # abandoned. Phantom / retried-and-recovered failures don't count.
             failures = conn.execute("""
-                SELECT run_id, episode_id, started_at, completed_at, error_message, channel_id
-                FROM runs
-                WHERE status = 'failed'
-                ORDER BY COALESCE(completed_at, started_at) DESC
+                SELECT r.run_id, r.episode_id, r.started_at, r.completed_at,
+                       r.error_message, r.channel_id
+                FROM runs r
+                WHERE LOWER(r.status) IN ('failed', 'error')
+                  AND EXISTS (SELECT 1 FROM episodes e WHERE e.episode_id = r.episode_id
+                              AND COALESCE(e.status,'') != 'superseded')
+                  AND NOT EXISTS (SELECT 1 FROM runs r2 WHERE r2.episode_id = r.episode_id
+                              AND LOWER(r2.status) IN ('complete','completed','published'))
+                  AND NOT EXISTS (SELECT 1 FROM episode_topics t WHERE t.episode_id = r.episode_id
+                              AND t.status IN ('cancelled','skipped'))
+                ORDER BY COALESCE(r.completed_at, r.started_at) DESC
                 LIMIT 5
             """).fetchall()
         finally:

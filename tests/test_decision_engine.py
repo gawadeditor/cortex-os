@@ -300,7 +300,7 @@ class TestCostReview:
         assert "threshold" in evidence_str.lower()
 
     def test_confidence_is_0_8(self):
-        di = _make_di(costs_has=True, costs_avg=2.0)
+        di = _make_di(costs_has=True, costs_avg=COST_THRESHOLD_USD_PER_EPISODE + 2.0)
         decs, _ = _rule_cost_review(di)
         assert decs[0]["confidence"] == 0.8
 

@@ -47,7 +47,10 @@ from typing import Optional
 # Configurable constants
 # ---------------------------------------------------------------------------
 
-COST_THRESHOLD_USD_PER_EPISODE: float = 1.00
+# A real episode costs ~$5 (short) to ~$50 (long). $1 was a placeholder that
+# made this decision fire on every single episode. This flags a genuine
+# overrun without crying wolf; the per-channel cap is the hard limit.
+COST_THRESHOLD_USD_PER_EPISODE: float = 15.00
 MIN_FAILURES_FOR_REVIEW:        int   = 2
 MIN_AUDIENCE_SNAPSHOTS:         int   = 3
 
@@ -220,16 +223,16 @@ def _rule_cost_review(di: dict) -> tuple[list, list]:
                            key=lambda kv: kv[1], default=("unknown", 0))
         decisions = [_card(
             dtype="cost_review", priority=3,
-            title=f"Cost per episode ${avg:.4f} exceeds threshold ${COST_THRESHOLD_USD_PER_EPISODE:.2f}",
+            title=f"Cost per episode ${avg:.2f} exceeds ${COST_THRESHOLD_USD_PER_EPISODE:.2f}",
             recommendation=(
                 f"Review cost drivers. Largest provider: {top_provider[0]} "
-                f"(${top_provider[1]:.4f} total). "
+                f"(${top_provider[1]:.2f} total). "
                 "Check model assignments and retry rates."
             ),
             evidence=[
-                f"avg_cost_per_episode = ${avg:.4f}",
+                f"avg_cost_per_episode = ${avg:.2f}",
                 f"threshold = ${COST_THRESHOLD_USD_PER_EPISODE:.2f}",
-                f"total_cost_usd = ${costs.get('total_cost_usd', 0):.4f}",
+                f"total_cost_usd = ${costs.get('total_cost_usd', 0):.2f}",
                 f"episodes_costed = {costs.get('total_episodes_costed', 0)}",
             ],
             expected_impact="Reduces cost per episode toward threshold.",

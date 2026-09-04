@@ -850,6 +850,10 @@ _EVIDENCE_RULES = [
      lambda m: f"{m.group(1)} demo readings (not counted)"),
     (re.compile(r"minimum_for_trends\s*=\s*(\d+)", re.I),
      lambda m: f"{m.group(1)} are needed before trends are reliable"),
+    (re.compile(r"blocked by QA Agent.*verdict=REJECTED", re.I | re.S),
+     "The quality review stopped an episode before publishing"),
+    (re.compile(r"^Run\s+[0-9a-f]{4,}[…\.]+\s*[—-]\s*episode\s+\S+\s*$", re.I),
+     "A production run stopped early"),
 ]
 
 

@@ -305,6 +305,54 @@ class TestGenerateEntityReferenceImages:
         call_kwargs = mock_gen.call_args[1]
         assert call_kwargs["budget_guard"] is None
 
+    def test_video_aspect_ratio_threaded_through(self, tmp_path):
+        """Fixed 2026-09-05: the channel's real deliverable orientation must
+        reach generate_reference_image(), or a short-native/portrait
+        channel's reference images get generated in the wrong (16:9)
+        aspect ratio regardless of which I2V model later conditions on
+        them -- the root cause behind two real production episodes
+        (ep_90382de2, ep_1b6b2c50) getting distorted I2V scenes."""
+        entity = _make_entity(lock_state="final")
+        log = _make_log()
+        with patch(_PATCH, return_value=_make_ref_result()) as mock_gen:
+            generate_entity_reference_images(
+                [entity], MagicMock(), "ep_001", tmp_path, log,
+                video_aspect_ratio="9:16",
+            )
+        call_kwargs = mock_gen.call_args[1]
+        assert call_kwargs["video_aspect_ratio"] == "9:16"
+
+    def test_video_aspect_ratio_defaults_to_16_9(self, tmp_path):
+        entity = _make_entity(lock_state="final")
+        log = _make_log()
+        with patch(_PATCH, return_value=_make_ref_result()) as mock_gen:
+            generate_entity_reference_images(
+                [entity], MagicMock(), "ep_001", tmp_path, log,
+            )
+        call_kwargs = mock_gen.call_args[1]
+        assert call_kwargs["video_aspect_ratio"] == "16:9"
+
+    def test_channel_id_threaded_through(self, tmp_path):
+        entity = _make_entity(lock_state="final")
+        log = _make_log()
+        with patch(_PATCH, return_value=_make_ref_result()) as mock_gen:
+            generate_entity_reference_images(
+                [entity], MagicMock(), "ep_001", tmp_path, log,
+                channel_id="twinkle_mini_tales",
+            )
+        call_kwargs = mock_gen.call_args[1]
+        assert call_kwargs["channel_id"] == "twinkle_mini_tales"
+
+    def test_channel_id_none_by_default(self, tmp_path):
+        entity = _make_entity(lock_state="final")
+        log = _make_log()
+        with patch(_PATCH, return_value=_make_ref_result()) as mock_gen:
+            generate_entity_reference_images(
+                [entity], MagicMock(), "ep_001", tmp_path, log,
+            )
+        call_kwargs = mock_gen.call_args[1]
+        assert call_kwargs["channel_id"] is None
+
     def test_vpd_ref_image_started_logged(self, tmp_path):
         entity = _make_entity("pharaoh_amenhotep", "final")
         log = _make_log()

@@ -464,12 +464,17 @@ class TestCompileProductionPlan:
 # into_scenes()'s own docstring for why) -- every scene prices as T2V.
 # ---------------------------------------------------------------------------
 
-class TestSceneNeverDeclaredI2V:
+class TestSceneDeclaredI2VForFinalLockedEntity:
+    """I2V briefly retired 2026-09-04 after a real reference-image
+    aspect-ratio bug, then restored the same day once the actual bug was
+    understood (fixed in hypogeum.agents.image_generation_agent instead —
+    see that module's own docstring) and the operator asked for I2V models
+    to be properly qualified per channel rather than removed."""
 
-    def test_final_locked_primary_entity_still_declares_t2v(self):
-        """The exact scenario _scene_will_be_i2v() used to flip on: a scene's
-        FIRST primary entity_appearance is a "final"-locked entity. Must still
-        declare the channel's ordinary T2V model/price, never I2V."""
+    def test_final_locked_primary_entity_declares_i2v(self):
+        """A scene's FIRST primary entity_appearance being a "final"-locked
+        entity is exactly what _scene_will_be_i2v() predicts -- the plan
+        must declare the channel's I2V model/price for it, not T2V."""
         from hypogeum.production_plan import _scene_will_be_i2v
 
         scene = _make_scene("s01", "b_001")
@@ -483,13 +488,31 @@ class TestSceneNeverDeclaredI2V:
             },
         }
 
-        # The retired predicate itself: always False now, regardless of input.
-        assert _scene_will_be_i2v(scene, {"pip"}) is False
+        assert _scene_will_be_i2v(scene, {"pip"}) is True
 
         plan = _compile(visual_package=vp)
         s01_asset = next(a for a in plan.assets if a.scene_id == "s01")
-        assert s01_asset.model == "veo3.1-lite-text-to-video"  # MUAPI_T2_MODEL, never MUAPI_I2V_MODEL
-        assert s01_asset.model != "veo3-image-to-video"
+        assert s01_asset.model == "veo3-image-to-video"  # MUAPI_I2V_MODEL
+
+    def test_secondary_entity_does_not_declare_i2v(self):
+        """Only the FIRST primary entity_appearance matters -- a secondary
+        appearance of a final-locked entity must not trigger I2V."""
+        from hypogeum.production_plan import _scene_will_be_i2v
+
+        scene = _make_scene("s01", "b_001")
+        scene["entity_appearances"] = [{"entity_id": "pip", "role": "secondary"}]
+
+        assert _scene_will_be_i2v(scene, {"pip"}) is False
+
+    def test_provisional_entity_does_not_declare_i2v(self):
+        """A primary entity_appearance not in final_locked_entity_ids
+        (i.e. not "final"-locked) must not trigger I2V."""
+        from hypogeum.production_plan import _scene_will_be_i2v
+
+        scene = _make_scene("s01", "b_001")
+        scene["entity_appearances"] = [{"entity_id": "pip", "role": "primary"}]
+
+        assert _scene_will_be_i2v(scene, set()) is False
 
 
 # ---------------------------------------------------------------------------

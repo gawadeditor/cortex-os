@@ -145,6 +145,8 @@ from pathlib import Path
 from typing import Optional
 
 from hypogeum.agent import run_agent
+from hypogeum.agents.entity_continuity_manager import apply_reference_image_asset_ids
+from hypogeum.agents.image_generation_agent import generate_entity_reference_images
 from hypogeum.agents.provider_router import update_routing_manifest
 from hypogeum.agents.scene_planner import build_scene_plan_input, order_and_filter_scenes
 from hypogeum.agents.thumbnail_handoff_brief_builder import build_thumbnail_handoff_brief
@@ -2289,18 +2291,27 @@ def _execute_muapi_phase(
     locked_entities = vcr.get("locked_entities", [])
     scenes = visual_package.get("scenes", [])
 
-    # Step 1 (RETIRED 2026-09-04 — I2V is no longer generated at all):
-    # entity_hosted_urls stays permanently empty. get_primary_entity_url()
-    # then always returns None for every scene, so build_scene_spec()'s
-    # reference_image_url is always None and _resolve_scene_model() always
-    # resolves a T2V model — entity consistency is now carried entirely by
-    # the text description hypogeum.agents.visual_package_director's own
-    # Phase 1 already injected into every scene's prompt (see
-    # inject_entity_descriptions_into_scenes()'s docstring for why I2V was
-    # retired rather than fixed). generate_entity_reference_images() /
-    # apply_reference_image_asset_ids() remain importable for any future
-    # direct caller but are no longer invoked from the production path.
-    entity_hosted_urls: dict[str, str] = {}
+    # Step 1: Generate reference images for final-locked entities.
+    #
+    # video_aspect_ratio (2026-09-05 fix): the reference image MUST be
+    # generated in the channel's real deliverable orientation, or an I2V
+    # scene later inherits a distorted seed image regardless of which I2V
+    # model is used (found live 2026-09-04 tracing ep_90382de2/ep_1b6b2c50 —
+    # a short-native/portrait channel's reference images were always
+    # generated 16:9 because this call site never passed the real
+    # orientation at all). SHORT_NATIVE_MODE is the same authoritative
+    # per-channel signal hypogeum.agents.clip_repair_agent._force_short_
+    # native_aspect() already uses for the identical decision at the video-
+    # submission boundary — reused here for consistency, not reinvented.
+    _ref_video_aspect_ratio = "9:16" if getattr(config, "SHORT_NATIVE_MODE", False) else "16:9"
+    entity_hosted_urls: dict[str, str] = generate_entity_reference_images(
+        locked_entities, config, episode_id, output_dir, log,
+        budget_guard=budget_guard, video_aspect_ratio=_ref_video_aspect_ratio,
+        channel_id=channel_id,
+    )
+
+    # Update locked_entities[] with reference_image_asset_id from results
+    apply_reference_image_asset_ids(locked_entities, entity_hosted_urls, episode_id)
 
     # Step 2: Generate each scene video
     scenes_sorted = order_and_filter_scenes(scenes, config, log)

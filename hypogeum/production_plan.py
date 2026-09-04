@@ -576,19 +576,25 @@ _I2V_PLAN_SENTINEL = "planned-i2v-conditioning"
 
 
 def _scene_will_be_i2v(scene: dict, final_locked_entity_ids: set) -> bool:
-    """Always False — I2V (reference-image conditioning) was retired
-    2026-09-04: real production episodes showed the reference image was
-    generated in the wrong aspect ratio regardless of channel orientation,
-    so an I2V scene always inherited a distorted seed image no matter
-    which I2V model was used. Entity consistency is now carried entirely
-    by a text description injected directly into every scene's own prompt
-    (hypogeum.agents.entity_continuity_manager.
-    inject_entity_descriptions_into_scenes()) — no scene is ever declared
-    I2V in the plan any more, so every scene prices and resolves as T2V.
-    Kept (rather than deleted) as the single, still-correct answer to
-    "will this scene route to I2V" for any future caller; final_locked_
-    entity_ids is accepted for signature compatibility but unused.
+    """True when submit_scene() will route this scene to the I2V model.
+
+    Mirrors entity_continuity_manager.get_primary_entity_url: only the FIRST
+    primary entity_appearance matters, and I2V applies iff that entity is
+    final-locked (and therefore carries a generated reference image).
+
+    Briefly retired 2026-09-04 after a real reference-image aspect-ratio
+    bug (video_aspect_ratio never threaded through from the channel's real
+    orientation) made every I2V scene inherit a distorted seed image
+    regardless of model. Restored the same day once the operator's actual
+    call was understood: fix the real bug (generate_reference_image() now
+    receives the channel's true orientation) and properly qualify I2V
+    models per channel (Video Model Bake-off), rather than remove I2V
+    conditioning altogether -- see hypogeum.agents.image_generation_agent's
+    own module docstring for the aspect-ratio fix.
     """
+    for ea in scene.get("entity_appearances", []) or []:
+        if ea.get("role") == "primary":
+            return ea.get("entity_id") in final_locked_entity_ids
     return False
 
 
@@ -888,10 +894,13 @@ def compile_production_plan(
         _channel_video_model, _channel_video_price = None, None
         _channel_i2v_model, _channel_i2v_price = None, None
 
-    # I2V retired 2026-09-04 (_scene_will_be_i2v() is a permanent no-op now
-    # — see its own docstring). _final_locked_entity_ids is still computed
-    # and passed through for signature compatibility, but no scene is ever
-    # declared I2V any more; every scene prices and resolves as T2V.
+    # Scenes whose first primary entity is a final-locked entity will be routed
+    # to the I2V model at submission time (submit_scene() conditions on that
+    # entity's generated reference image — see
+    # entity_continuity_manager.get_primary_entity_url). The reference URL does
+    # not exist yet at plan-compile time, so predict it here and declare the
+    # I2V model + price now — otherwise every such scene's real submission
+    # mismatches its own authorized plan (model_mismatch / plan_price_mismatch).
     _final_locked_entity_ids = {
         e.get("entity_id")
         for e in ((visual_package.get("visual_continuity_record") or {}).get("locked_entities") or [])

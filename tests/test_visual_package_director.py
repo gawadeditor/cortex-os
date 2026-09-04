@@ -895,10 +895,13 @@ class TestVPDSceneIndexOrder:
 # ---------------------------------------------------------------------------
 
 class TestVPDEntityDescriptionInjection:
-    """End-to-end coverage of the I2V replacement mechanism (2026-09-04):
-    the scene's primary final-locked entity's description reaches the
-    ACTUAL submit_scene() call, injected directly into the prompt text —
-    no reference image is ever generated on this path any more."""
+    """Entity description injection (added 2026-09-04) is ADDITIVE to I2V,
+    not a replacement for it (I2V was briefly retired the same day, then
+    restored once the real bug — reference images generated in the wrong
+    aspect ratio — was understood; see hypogeum.agents.image_generation_
+    agent's own module docstring). A scene's primary final-locked entity
+    now gets BOTH its description injected into the prompt text AND a real
+    reference_image_url for I2V conditioning."""
 
     def test_final_entity_description_reaches_submit_scene_prompt(self, tmp_path):
         config = make_config()
@@ -906,6 +909,8 @@ class TestVPDEntityDescriptionInjection:
         plan = _make_visual_package(scenes=[scene])
 
         with patch("hypogeum.agents.visual_package_director.run_agent", return_value=plan), \
+             patch("hypogeum.agents.image_generation_agent.generate_reference_image",
+                   return_value=ReferenceImageResult("ep/ref", "https://cdn/r.jpg")), \
              patch("hypogeum.agents.video_generation_agent.submit_scene",
                    return_value=_make_submit_result()) as mock_sub:
 
@@ -916,35 +921,39 @@ class TestVPDEntityDescriptionInjection:
         assert "Tall imposing figure in white linen robes." in spec["production_spec"]["primary_prompt"]
         assert "Tall imposing figure in white linen robes." in spec["production_spec"]["fallback_prompt"]
 
-    def test_no_reference_image_url_ever_set(self, tmp_path):
+    def test_final_entity_reference_image_url_is_set(self, tmp_path):
+        """The text description does not replace I2V conditioning -- a
+        final-locked primary entity still gets a real reference_image_url."""
         config = make_config()
         scene = _make_scene(entity_id="pharaoh_amenhotep", entity_role="primary")
         plan = _make_visual_package(scenes=[scene])
 
         with patch("hypogeum.agents.visual_package_director.run_agent", return_value=plan), \
+             patch("hypogeum.agents.image_generation_agent.generate_reference_image",
+                   return_value=ReferenceImageResult("ep/ref", "https://cdn/r.jpg")), \
              patch("hypogeum.agents.video_generation_agent.submit_scene",
                    return_value=_make_submit_result()) as mock_sub:
 
             run_visual_package_director(_make_script_package(), config, "ep_001", tmp_path)
 
         spec = mock_sub.call_args[0][0]
-        assert spec["production_spec"]["reference_image_url"] is None
+        assert spec["production_spec"]["reference_image_url"] == "https://cdn/r.jpg"
 
-    def test_entity_reference_image_asset_id_stays_null(self, tmp_path):
-        """No reference image is ever generated any more -- the field
-        stays null rather than being populated with a generated asset_id."""
+    def test_entity_reference_image_asset_id_is_set(self, tmp_path):
         config = make_config()
         scene = _make_scene(entity_id="pharaoh_amenhotep", entity_role="primary")
         plan = _make_visual_package(scenes=[scene])
 
         with patch("hypogeum.agents.visual_package_director.run_agent", return_value=plan), \
+             patch("hypogeum.agents.image_generation_agent.generate_reference_image",
+                   return_value=ReferenceImageResult("ep/ref", "https://cdn/r.jpg")), \
              patch("hypogeum.agents.video_generation_agent.submit_scene",
                    return_value=_make_submit_result()):
 
             result = run_visual_package_director(_make_script_package(), config, "ep_001", tmp_path)
 
         entity = result["visual_continuity_record"]["locked_entities"][0]
-        assert entity["reference_image_asset_id"] is None
+        assert entity["reference_image_asset_id"] == "episodes/ep_001/video/ref_pharaoh_amenhotep"
 
     def test_secondary_entity_not_injected(self, tmp_path):
         config = make_config()
@@ -952,6 +961,8 @@ class TestVPDEntityDescriptionInjection:
         plan = _make_visual_package(scenes=[scene])
 
         with patch("hypogeum.agents.visual_package_director.run_agent", return_value=plan), \
+             patch("hypogeum.agents.image_generation_agent.generate_reference_image",
+                   return_value=ReferenceImageResult("ep/ref", "https://cdn/r.jpg")), \
              patch("hypogeum.agents.video_generation_agent.submit_scene",
                    return_value=_make_submit_result()) as mock_sub:
 
@@ -967,6 +978,8 @@ class TestVPDEntityDescriptionInjection:
         plan = _make_visual_package(entities=entities, scenes=[scene])
 
         with patch("hypogeum.agents.visual_package_director.run_agent", return_value=plan), \
+             patch("hypogeum.agents.image_generation_agent.generate_reference_image",
+                   return_value=ReferenceImageResult("ep/ref", "https://cdn/r.jpg")), \
              patch("hypogeum.agents.video_generation_agent.submit_scene",
                    return_value=_make_submit_result()) as mock_sub:
 

@@ -1,4 +1,4 @@
-# PROMPT_VERSION: v3
+# PROMPT_VERSION: v4
 # OWNER_AGENT: executive_producer
 # MODEL_TARGET: anthropic/claude-sonnet-4.6
 # PURPOSE: Validate topics and commission Topic Briefs for the production pipeline
@@ -64,7 +64,7 @@ Weighted dimensions. Score each on a 1–10 scale relative to THIS channel, then
 | Dimension                 | Weight | Scoring direction (interpret through the channel_brief)          |
 |---------------------------|--------|-----------------------------------------------------------------|
 | Audience Demand           | 25%    | Higher = stronger proven interest among this channel's audience |
-| Curiosity Potential       | 25%    | Higher = more of a hook / open loop / reason to keep watching, in this channel's register |
+| Curiosity Potential       | 25%    | Higher = more of a hook / open loop / reason to keep watching, judged against `channel_brief.virality_directive` — can this topic carry a scroll-stopping hook and one shareable line? A topic with no possible viral angle for this channel scores 4 or below here. |
 | Mystery Potential         | 20%    | Higher = the topic delivers more of what `what_makes_a_good_topic` values as its central pull (genuine unknowns for an investigative channel; a gentle sense of wonder for a calming one; etc.) |
 | Visual Potential          | 10%    | Higher = stronger imagery for this channel's format and AI-generated visual style |
 | Differentiation Opportunity | 15%  | Higher = a more specific, less generic angle than existing coverage in this space |
@@ -174,7 +174,8 @@ Produce a JSON object with this exact structure:
   "topic_category": "<the single best-fitting category from channel_brief.topic_taxonomy; if none fits well, a short lowercase_snake_case category of your own that suits this channel>",
   "logline": "<single sentence: the core question, story, or idea the episode delivers>",
   "audience_demand_signal": "<specific evidence of interest among this channel's audience: search trends, viral content, community activity, etc.>",
-  "curiosity_hook": "<the central hook that makes this channel's audience want to watch — an open question, a surprising fact, or (for a calming channel) an inviting promise of the moment ahead>",
+  "curiosity_hook": "<the central hook that makes this channel's audience want to watch — an open question, a surprising fact, or (for a calming channel) an inviting promise of the moment ahead. Phrase it the way it would actually be said in the first 2 seconds, following channel_brief.virality_directive.>",
+  "viral_promise": "<one sentence a viewer would repeat to a friend after watching — the shareable core of this topic. For a calming channel: the single image a parent would describe. If you cannot write a strong one, the topic's Curiosity Potential score must reflect that.>",
   "mystery_anchor": "<the single element that carries the topic's central pull, in this channel's register — the specific unknown or gap for an investigative channel; the small wonder or gentle turn for a soothing one>",
   "differentiation_hypothesis": "<your specific angle that is fresher or more particular than existing coverage in this space — this will be tested by the Research Director>",
   "research_depth_flags": {

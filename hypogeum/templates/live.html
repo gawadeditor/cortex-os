@@ -16,6 +16,11 @@
     .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
     @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
     #refresh-ts { font-size: 11px; color: var(--faint); }
+    #metric-strip .stat-card { background: linear-gradient(180deg, var(--raised), var(--surface));
+                               box-shadow: var(--shadow-1); }
+    #metric-strip .stat-card.is-live { border-color: var(--good);
+                                       box-shadow: 0 0 0 1px var(--good-bg), var(--shadow-1); }
+    #metric-strip .stat-card.is-live .stat-lbl { color: var(--good); }
   </style>
 </head>
 <body>
@@ -43,12 +48,12 @@
 
 {# ── Metric strip ── #}
 <div class="stat-grid" id="metric-strip">
-  <div class="stat-card">
+  <div class="stat-card {{ 'is-live' if metrics.active_runs }}" id="card-active">
     <div class="stat-lbl">{{ icon('play') }} In production</div>
     <div class="stat-val {% if metrics.active_runs == 0 %}is-muted{% endif %}" id="m-active">{{ metrics.active_runs }}</div>
   </div>
   <div class="stat-card">
-    <div class="stat-lbl">{{ icon('queue') }} Waiting</div>
+    <div class="stat-lbl">{{ icon('queue') }} Topics waiting</div>
     <div class="stat-val {% if metrics.queue_depth == 0 %}is-muted{% endif %}" id="m-queue">{{ metrics.queue_depth }}</div>
   </div>
   <div class="stat-card">
@@ -95,9 +100,10 @@
   <div class="sec-head"><h2>Up next</h2></div>
   <div class="card" id="queue-card">
     <div class="row" style="gap:24px;">
-      <div><span class="stat-val" style="font-size:20px;" id="q-queued">{{ queue.queued }}</span><div class="stat-note">topics waiting</div></div>
-      <div><span class="stat-val" style="font-size:20px;" id="q-claimed">{{ queue.claimed }}</span><div class="stat-note">about to start</div></div>
+      <div><span class="stat-val" style="font-size:20px;" id="q-queued">{{ queue.topic_backlog }}</span><div class="stat-note">topics in the queue</div></div>
+      {% if queue.claimed %}<div><span class="stat-val" style="font-size:20px;" id="q-claimed">{{ queue.claimed }}</span><div class="stat-note">about to start</div></div>{% endif %}
     </div>
+    <div class="stat-note" style="margin-top:6px;">Cortex takes the top one at each channel's scheduled time.</div>
     <div style="margin-top:12px;"><a href="/create" class="btn btn-sm">Open the queue</a></div>
   </div>
 
@@ -141,12 +147,16 @@ function pollLive() {
     var m = data.metrics;
     document.getElementById('m-active').textContent = m.active_runs;
     document.getElementById('m-queue').textContent  = m.queue_depth;
+    var ca = document.getElementById('card-active');
+    if (ca) ca.classList.toggle('is-live', m.active_runs > 0);
     document.getElementById('m-cost').textContent   = money(m.cost_today_usd);
     document.getElementById('m-done').textContent   = m.completed_24h;
     document.getElementById('m-failed').textContent = m.failed_24h;
-    var q = data.queue;
-    document.getElementById('q-queued').textContent    = q.queued;
-    document.getElementById('q-claimed').textContent   = q.claimed;
+    var q = data.queue || {};
+    var qq = document.getElementById('q-queued');
+    if (qq && q.topic_backlog != null) qq.textContent = q.topic_backlog;
+    var qc = document.getElementById('q-claimed');
+    if (qc && q.claimed != null) qc.textContent = q.claimed;
     var ar = document.getElementById('active-runs');
     document.getElementById('active-count').textContent = data.active_runs.length;
     if (data.active_runs.length === 0) {

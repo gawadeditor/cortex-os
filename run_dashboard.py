@@ -7191,13 +7191,12 @@ def api_run_log_stream(run_id):
 
 @app.route("/live")
 def live_page():
-    metrics  = get_live_metrics(db_path=_db_path())
-    active   = get_active_runs(db_path=_db_path())
-    failures = get_recent_failures(db_path=_db_path(), limit=5)
-    queue    = get_queue_snapshot(db_path=_db_path())
+    db = _db_path()
     return render_template("live.html",
-                           metrics=metrics, active=active,
-                           failures=failures, queue=queue)
+                           metrics=get_live_metrics(db_path=db),
+                           active=get_active_runs(db_path=db),
+                           failures=get_recent_failures(db_path=db, limit=5),
+                           queue=get_queue_snapshot(db_path=db))
 
 
 @app.route("/run/<run_id>/live")

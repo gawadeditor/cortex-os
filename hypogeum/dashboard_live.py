@@ -206,7 +206,7 @@ def get_queue_snapshot(db_path: Optional[Path] = None) -> dict:
     Non-blocking: returns zeroed snapshot on error.
     """
     _empty = {"queued": 0, "claimed": 0, "completed": 0, "failed": 0,
-              "cancelled": 0, "total": 0, "pending": []}
+              "cancelled": 0, "total": 0, "pending": [], "topic_backlog": 0}
     try:
         conn = get_connection(_db(db_path))
         try:
@@ -221,6 +221,11 @@ def get_queue_snapshot(db_path: Optional[Path] = None) -> dict:
                 ORDER BY priority ASC, queued_at ASC
                 LIMIT 50
             """).fetchall()
+            # The real "up next" number an operator cares about: the topic
+            # backlog, not run_queue rows (which are only briefly non-empty).
+            backlog = conn.execute(
+                "SELECT COUNT(*) FROM episode_topics WHERE status = 'queued'"
+            ).fetchone()[0]
         finally:
             conn.close()
 
@@ -229,6 +234,7 @@ def get_queue_snapshot(db_path: Optional[Path] = None) -> dict:
             counts[r["status"]] = r["n"]
         counts["total"]   = sum(counts.values())
         counts["pending"] = [_row(r) for r in items]
+        counts["topic_backlog"] = backlog
         return counts
     except Exception:
         return _empty
@@ -258,8 +264,10 @@ def get_live_metrics(db_path: Optional[Path] = None) -> dict:
                 "SELECT COUNT(*) AS n FROM runs WHERE status='running'"
             ).fetchone()["n"]
 
+            # "Waiting" = the topic backlog an operator sees, not run_queue
+            # rows (those are only briefly non-empty during a hand-off).
             queue_depth = conn.execute(
-                "SELECT COUNT(*) AS n FROM run_queue WHERE status='queued'"
+                "SELECT COUNT(*) AS n FROM episode_topics WHERE status='queued'"
             ).fetchone()["n"]
 
             # costs.cost_usd holds no MUAPI (video/upscale) spend — ~70% of

@@ -43,6 +43,12 @@ _FALLBACK = {
         "clear visual potential for AI-generated imagery, and offers a fresh "
         "angle rather than a generic overview."
     ),
+    "virality_directive": (
+        "Every script is built to be watched to the end and to be worth sharing. "
+        "Open on the most interesting specific thing in the story, keep one clear "
+        "through-line, pay off what the opening promised, and end on a line that "
+        "lands. Concrete and specific beats vague and comprehensive."
+    ),
     "topic_taxonomy": [],
     "voice_notes": "",
     "shorts_native": False,
@@ -60,6 +66,63 @@ def _investigative(tone: str) -> bool:
     t = tone.lower()
     return any(w in t for w in ("investigat", "evidence", "mystery", "forensic",
                                 "analytical", "rigorous", "documentary"))
+
+
+def _virality_directive(tone: str, audience: str, short_native: bool) -> str:
+    """What "built to be watched to the last second and worth sharing" means
+    for THIS channel. Read by the Narrative Architect and Script Engine —
+    every script has this as its job, expressed in the channel's own
+    mechanics (an investigative channel earns the watch with tension; a
+    bedtime channel earns it with warmth and the return habit)."""
+    length = "one ~45-60s vertical short" if short_native else "one narrated episode"
+    if _investigative(tone):
+        return (
+            f"Every script for this channel is engineered to stop the scroll and hold "
+            f"attention to the final frame of {length}. A script that only informs has "
+            f"failed. Mechanics:\n"
+            f"- HOOK (first spoken line, first ~2 seconds): lead with the single most "
+            f"provocative TRUE thing in the story — a claim that contradicts what the "
+            f"viewer assumes, a number that sounds impossible, or a direct challenge to "
+            f"the viewer. Never open with a date, a place name, or 'In [year]…'. The "
+            f"hook may dramatize a real fact or a real unresolved question; it must NOT "
+            f"invent, overstate past the evidence, or promise a payoff the research "
+            f"cannot deliver.\n"
+            f"- ONE SPINE: a single question or tension opened by the hook, escalated by "
+            f"every beat, never dropped. A fact that does not feed the spine is cut.\n"
+            f"- PAYOFF: the spine's question is answered — or explicitly named as a "
+            f"genuine unknown — before the final beat. Never tease 'the real story' and "
+            f"then withhold it.\n"
+            f"- STINGER: the last spoken line is a reframe or a live implication that "
+            f"makes the viewer want to argue in the comments — not a subscribe line.\n"
+            f"- SHAREABLE CORE: one sentence a viewer would repeat to a friend; build "
+            f"the script so that sentence is impossible to miss.\n"
+            f"- VOICE: tense, vivid, concrete, present tense where it can be, second "
+            f"person allowed. No hedging, no throat-clearing; every sentence earns the "
+            f"next."
+        )
+    if _gentle(tone):
+        return (
+            f"Every script for this channel is built so a tired parent scrolling at "
+            f"bedtime stops, taps, and comes back tomorrow — through warmth, never "
+            f"tension. Mechanics for {length}:\n"
+            f"- FIRST LINE: one warm, oddly specific, visual image that is impossible to "
+            f"scroll past ('There is a tiny bakery made of moonlight outside Milo's "
+            f"window.'). Never a question, never a threat, never suspense.\n"
+            f"- ONE small sensory journey, unhurried, with a single soft turn — a "
+            f"kindness or a tiny wonder, never a scare or a cliffhanger.\n"
+            f"- A fully resolved, reassuring close, then a clear cue to rest.\n"
+            f"- RETURN LINE: the final line gently invites 'one more tomorrow night' — "
+            f"the bedtime-routine habit is this channel's growth engine, not a hook.\n"
+            f"- VOICE: soft, simple, rhythmic, present tense, rich concrete sensory "
+            f"detail for {audience or 'young children'}."
+        )
+    return (
+        f"Every script for this channel is built to be watched to the end and to be "
+        f"worth sharing. Open {length} on the most interesting specific thing in the "
+        f"story — never a generic setup. Keep one clear through-line the whole way, "
+        f"pay off what the opening promised, and end on a line that lands rather than "
+        f"trailing off. Concrete and specific beats vague and comprehensive."
+    )
 
 
 def _pillar_head(p: str) -> str:
@@ -163,6 +226,7 @@ def build_creative_brief(channel_id: str, *, db_path: Optional[Path] = None) -> 
             "language": bp.language or "en",
             "content_pillars": pillars,
             "what_makes_a_good_topic": _standard_of_quality(genre, audience, tone, pillars),
+            "virality_directive": _virality_directive(tone, audience, short_native),
             "topic_taxonomy": _taxonomy(genre, pillars, tone),
             "voice_notes": (bp.voice_guidelines or "").strip()[:600],
             "shorts_native": short_native,

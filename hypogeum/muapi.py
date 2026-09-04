@@ -23,7 +23,7 @@ Tier → model mapping (no `tier` parameter exists in the API):
   Tier 2 → config.MUAPI_T2_MODEL  (default: veo3.1-lite-text-to-video, $0.39/gen, fixed 8s, 1080p candidate)  # confirmed 2026-07-06; primary production tier; .env overrides default
   Tier 3 → config.MUAPI_T3_MODEL  (default: veo3.1-lite-text-to-video, $0.39/gen, fixed 8s, 1080p candidate)  # cheap-mode alias, same model as T2
   I2V    → config.MUAPI_I2V_MODEL (default: veo3-image-to-video,      $2.50/gen, fixed 8s)
-  Image  → config.MUAPI_IMAGE_MODEL (default: flux-dev-image,         ~$0.01/gen)
+  Image  → config.MUAPI_IMAGE_MODEL (default: gpt-image-2-text-to-image, $0.09/gen; changed 2026-09-05 from flux-2-dev, which has no "aspect_ratio" input field at all — every reference image silently came back square regardless of the requested orientation)
 
 Duration constraints:
   Veo3 models:   duration is fixed by the provider (8s) — no duration parameter sent

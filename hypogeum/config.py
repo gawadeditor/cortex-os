@@ -483,7 +483,21 @@ class Config:
         self.MUAPI_T3_MODEL = _get_optional("MUAPI_T3_MODEL", default="veo3.1-lite-text-to-video")
         self.MUAPI_VIDEO_RESOLUTION = _get_optional("MUAPI_VIDEO_RESOLUTION", default="1080p")
         self.MUAPI_I2V_MODEL = _get_optional("MUAPI_I2V_MODEL", default="veo3-image-to-video")
-        self.MUAPI_IMAGE_MODEL = _get_optional("MUAPI_IMAGE_MODEL", default="flux-2-dev")  # legacy
+        # Default changed 2026-09-05 (flux-2-dev -> gpt-image-2-text-to-image):
+        # flux-2-dev's real MUAPI catalogue input_fields are
+        # ["prompt", "width", "height"] -- it has NO "aspect_ratio" field at
+        # all, so the aspect_ratio value hypogeum.muapi.generate_reference_
+        # image() has always sent it was silently ignored and every
+        # reference image came back the model's own square default (1024x1024)
+        # regardless of the channel's real orientation -- confirmed live
+        # 2026-09-05 generating a real portrait (9:16) reference image and
+        # getting 1024x1024 back. gpt-image-2-text-to-image's real
+        # input_fields ARE ["prompt", "aspect_ratio", "resolution", "quality"]
+        # -- the exact field this codebase already sends -- and it is
+        # already the trusted, currently-in-production THUMBNAIL_IMAGE_MODEL,
+        # so this reuses an already-proven model/payload combination rather
+        # than introducing a new one.
+        self.MUAPI_IMAGE_MODEL = _get_optional("MUAPI_IMAGE_MODEL", default="gpt-image-2-text-to-image")  # legacy
         # Canonical routing decision (docs/validation/thumbnail_image_generation_validation/
         # GPT_IMAGE_2_ROUTING_AUDIT.md): MUAPI gpt-image-2-text-to-image is the primary
         # thumbnail provider/model. openrouter and openai are genuine-failure fallbacks only.

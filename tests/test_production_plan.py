@@ -456,6 +456,43 @@ class TestCompileProductionPlan:
 
 
 # ---------------------------------------------------------------------------
+# TestSceneNeverDeclaredI2V — I2V retired 2026-09-04. A scene whose primary
+# entity_appearance is a final-locked entity used to be predicted-declared
+# I2V here (_scene_will_be_i2v) so its later real submission wouldn't
+# mismatch the plan; that path is now a permanent no-op (see
+# hypogeum.agents.entity_continuity_manager.inject_entity_descriptions_
+# into_scenes()'s own docstring for why) -- every scene prices as T2V.
+# ---------------------------------------------------------------------------
+
+class TestSceneNeverDeclaredI2V:
+
+    def test_final_locked_primary_entity_still_declares_t2v(self):
+        """The exact scenario _scene_will_be_i2v() used to flip on: a scene's
+        FIRST primary entity_appearance is a "final"-locked entity. Must still
+        declare the channel's ordinary T2V model/price, never I2V."""
+        from hypogeum.production_plan import _scene_will_be_i2v
+
+        scene = _make_scene("s01", "b_001")
+        scene["entity_appearances"] = [{"entity_id": "pip", "role": "primary"}]
+        scenes = [scene] + _make_visual_package()["scenes"][1:]
+        vp = {
+            "episode_id": "ep_test",
+            "scenes": scenes,
+            "visual_continuity_record": {
+                "locked_entities": [{"entity_id": "pip", "lock_state": "final"}],
+            },
+        }
+
+        # The retired predicate itself: always False now, regardless of input.
+        assert _scene_will_be_i2v(scene, {"pip"}) is False
+
+        plan = _compile(visual_package=vp)
+        s01_asset = next(a for a in plan.assets if a.scene_id == "s01")
+        assert s01_asset.model == "veo3.1-lite-text-to-video"  # MUAPI_T2_MODEL, never MUAPI_I2V_MODEL
+        assert s01_asset.model != "veo3-image-to-video"
+
+
+# ---------------------------------------------------------------------------
 # TestMixedRouting — real per-scene routing, never a single uniform tier.
 # ---------------------------------------------------------------------------
 

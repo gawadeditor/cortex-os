@@ -2,11 +2,13 @@
 tests/test_entity_continuity_manager.py — Unit tests for entity_continuity_manager.py
 
 Coverage:
-  TestBuildVisualSpecText         — rich text construction from entity visual_spec
-  TestIsRefImageEligible          — lock_state == "final" gate
-  TestGetFinalEntities            — filter locked_entities by lock_state
-  TestGetPrimaryEntityUrl         — entity-to-scene mapping for ref URL injection
-  TestApplyReferenceImageAssetIds — entity lock record update after ref image generation
+  TestBuildVisualSpecText              — rich text construction from entity visual_spec
+  TestIsRefImageEligible                — lock_state == "final" gate
+  TestGetFinalEntities                  — filter locked_entities by lock_state
+  TestGetPrimaryEntityUrl                — entity-to-scene mapping for ref URL injection
+  TestApplyReferenceImageAssetIds        — entity lock record update after ref image generation
+  TestBuildEntityDescriptionForScene     — video-prompt-mode description (no visual_identity tail)
+  TestInjectEntityDescriptionsIntoScenes — the current I2V-replacement mechanism (2026-09-04)
 """
 
 from __future__ import annotations
@@ -21,9 +23,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from hypogeum.agents.entity_continuity_manager import (
     apply_reference_image_asset_ids,
+    build_entity_description_for_scene,
     build_visual_spec_text,
     get_final_entities,
     get_primary_entity_url,
+    inject_entity_descriptions_into_scenes,
     is_ref_image_eligible,
 )
 
@@ -415,3 +419,143 @@ class TestApplyReferenceImageAssetIds:
             apply_reference_image_asset_ids(entities, {}, "ep_001")
         except KeyError:
             pytest.fail("apply_reference_image_asset_ids raised KeyError on missing entity_id")
+
+
+# ---------------------------------------------------------------------------
+# TestBuildEntityDescriptionForScene
+# ---------------------------------------------------------------------------
+
+class TestBuildEntityDescriptionForScene:
+    """Video-prompt-mode description — same core text as build_visual_spec_text()
+    but WITHOUT its reference-image-mode visual_identity directive tail (a video
+    scene prompt gets its own, separate Brand DNA section instead)."""
+
+    def test_matches_core_text_of_visual_spec_text(self):
+        entity = _make_entity()
+        scene_desc = build_entity_description_for_scene(entity)
+        ref_desc = build_visual_spec_text(entity)
+        assert scene_desc in ref_desc
+        assert scene_desc != ref_desc  # ref_desc has the extra directive tail
+
+    def test_includes_description_period_and_markers(self):
+        entity = _make_entity(
+            description="A tiny golden star.",
+            period_detail="Timeless night sky.",
+            markers=["rounded points", "wide eyes"],
+        )
+        text = build_entity_description_for_scene(entity)
+        assert "A tiny golden star." in text
+        assert "Timeless night sky." in text
+        assert "rounded points, wide eyes" in text
+
+    def test_empty_visual_spec_returns_empty_string(self):
+        entity = {"entity_id": "e1", "visual_spec": {}}
+        assert build_entity_description_for_scene(entity) == ""
+
+    def test_no_visual_identity_directive_leaked_in(self):
+        entity = _make_entity()
+        text = build_entity_description_for_scene(entity)
+        # build_visual_spec_text's directive is built for mode="reference_image" —
+        # its distinctive marker string must not appear in the scene-prompt version.
+        assert "reference_image" not in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# TestInjectEntityDescriptionsIntoScenes
+# ---------------------------------------------------------------------------
+
+def _make_full_scene(scene_id="s01", entity_appearances=None,
+                     primary_prompt="A wide establishing shot.",
+                     fallback_prompt="A simpler wide shot."):
+    return {
+        "scene_id": scene_id,
+        "entity_appearances": entity_appearances or [],
+        "production_spec": {
+            "provider_routing": {
+                "primary_prompt": primary_prompt,
+                "fallback_prompt": fallback_prompt,
+            },
+        },
+    }
+
+
+class TestInjectEntityDescriptionsIntoScenes:
+    """The current (2026-09-04) I2V-replacement mechanism: a scene's primary
+    final-locked entity's description is appended directly into that scene's
+    own prompt text, in place -- see the function's own docstring for why
+    (I2V retired: reference images were generated in the wrong aspect ratio
+    regardless of channel orientation, no matter which I2V model was used)."""
+
+    def test_appends_description_to_primary_and_fallback_prompt(self):
+        entity = _make_entity(entity_id="pip", description="A tiny golden star.")
+        scene = _make_full_scene(entity_appearances=[{"entity_id": "pip", "role": "primary"}])
+
+        inject_entity_descriptions_into_scenes([scene], [entity])
+
+        routing = scene["production_spec"]["provider_routing"]
+        assert "A wide establishing shot." in routing["primary_prompt"]
+        assert "A tiny golden star." in routing["primary_prompt"]
+        assert "A tiny golden star." in routing["fallback_prompt"]
+
+    def test_secondary_entity_is_not_injected(self):
+        entity = _make_entity(entity_id="pip", description="A tiny golden star.")
+        scene = _make_full_scene(entity_appearances=[{"entity_id": "pip", "role": "secondary"}])
+
+        inject_entity_descriptions_into_scenes([scene], [entity])
+
+        assert "A tiny golden star." not in scene["production_spec"]["provider_routing"]["primary_prompt"]
+
+    def test_non_final_locked_entity_is_not_injected(self):
+        entity = _make_entity(entity_id="pip", lock_state="provisional", description="A tiny golden star.")
+        scene = _make_full_scene(entity_appearances=[{"entity_id": "pip", "role": "primary"}])
+
+        inject_entity_descriptions_into_scenes([scene], [entity])
+
+        assert "A tiny golden star." not in scene["production_spec"]["provider_routing"]["primary_prompt"]
+
+    def test_scene_with_no_entity_appearances_untouched(self):
+        entity = _make_entity(entity_id="pip", description="A tiny golden star.")
+        scene = _make_full_scene(entity_appearances=[])
+        original = scene["production_spec"]["provider_routing"]["primary_prompt"]
+
+        inject_entity_descriptions_into_scenes([scene], [entity])
+
+        assert scene["production_spec"]["provider_routing"]["primary_prompt"] == original
+
+    def test_idempotent_does_not_duplicate_on_second_call(self):
+        entity = _make_entity(entity_id="pip", description="A tiny golden star.")
+        scene = _make_full_scene(entity_appearances=[{"entity_id": "pip", "role": "primary"}])
+
+        inject_entity_descriptions_into_scenes([scene], [entity])
+        inject_entity_descriptions_into_scenes([scene], [entity])
+
+        assert scene["production_spec"]["provider_routing"]["primary_prompt"].count(
+            "A tiny golden star."
+        ) == 1
+
+    def test_multiple_scenes_different_entities(self):
+        e1 = _make_entity(entity_id="pip", description="A tiny golden star.")
+        e2 = _make_entity(entity_id="luna", description="A soft silver moon.")
+        s1 = _make_full_scene(scene_id="s01", entity_appearances=[{"entity_id": "pip", "role": "primary"}])
+        s2 = _make_full_scene(scene_id="s02", entity_appearances=[{"entity_id": "luna", "role": "primary"}])
+
+        inject_entity_descriptions_into_scenes([s1, s2], [e1, e2])
+
+        assert "A tiny golden star." in s1["production_spec"]["provider_routing"]["primary_prompt"]
+        assert "A soft silver moon." in s2["production_spec"]["provider_routing"]["primary_prompt"]
+        assert "A soft silver moon." not in s1["production_spec"]["provider_routing"]["primary_prompt"]
+
+    def test_never_raises_on_malformed_scene(self):
+        entity = _make_entity(entity_id="pip")
+        malformed_scene = {"scene_id": "bad", "entity_appearances": "not-a-list"}
+        # Must not raise -- defensive per-scene handling.
+        inject_entity_descriptions_into_scenes([malformed_scene], [entity])
+
+    def test_never_raises_on_malformed_locked_entities(self):
+        scene = _make_full_scene(entity_appearances=[{"entity_id": "pip", "role": "primary"}])
+        original = scene["production_spec"]["provider_routing"]["primary_prompt"]
+        inject_entity_descriptions_into_scenes([scene], "not-a-list")
+        assert scene["production_spec"]["provider_routing"]["primary_prompt"] == original
+
+    def test_empty_scenes_and_entities_no_error(self):
+        inject_entity_descriptions_into_scenes([], [])

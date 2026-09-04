@@ -5,8 +5,27 @@ Extracted from visual_package_director.py. Responsible for:
   - Reference-image eligibility flags (lock_state == "final" gate)
   - Filtering entities by lock state
   - Building rich visual spec text from entity records for ref image models
+    (build_visual_spec_text — historical/unused in production, see below)
+    and for direct video-scene-prompt injection (build_entity_description_
+    for_scene / inject_entity_descriptions_into_scenes — the current path)
   - Entity-to-scene mapping: resolving primary entity URL for a scene
   - Updating entity lock records with reference_image_asset_id after ref image generation
+
+I2V (reference-image conditioning) retired 2026-09-04: real production
+episodes showed the reference image was generated in the wrong aspect
+ratio regardless of channel orientation (hypogeum.muapi.
+generate_reference_image()'s video_aspect_ratio was never threaded
+through from the channel's real orientation), so an I2V scene always
+inherited a distorted seed image no matter which I2V model was used.
+Rather than fix that wiring gap, entity consistency across scenes is now
+carried entirely by inject_entity_descriptions_into_scenes() — a precise,
+deterministic text description repeated verbatim in every scene featuring
+that entity, injected directly into the scene's own prompt text before
+hypogeum.production_plan.compile_production_plan() runs. get_primary_
+entity_url() / apply_reference_image_asset_ids() / build_visual_spec_text()
+remain (nothing calls them from the production path anymore, but no
+existing test/caller is broken by keeping them) for any future direct
+reference-image caller.
 
 Not responsible for:
   - Scene list construction (scene_planner)
@@ -18,6 +37,8 @@ Not responsible for:
 
 Public API:
     build_visual_spec_text(entity)
+    build_entity_description_for_scene(entity)
+    inject_entity_descriptions_into_scenes(scenes, locked_entities)
     is_ref_image_eligible(entity)
     get_final_entities(locked_entities)
     get_primary_entity_url(scene, entity_hosted_urls)
@@ -35,20 +56,12 @@ from hypogeum.brand import visual_identity
 # Visual spec text construction
 # ---------------------------------------------------------------------------
 
-def build_visual_spec_text(entity: dict) -> str:
-    """
-    Build a rich text description from an entity's visual_spec for use
-    as input to a reference image model.
-
-    Combines description, period_detail, and distinctive_markers into a
-    single string. Each component is appended only when non-empty.
-
-    Args:
-        entity: Entity dict containing a "visual_spec" sub-dict.
-
-    Returns:
-        Rich text description string.
-    """
+def _build_core_entity_description(entity: dict) -> str:
+    """Description + period_detail + distinctive_markers, combined into
+    one string. Each component is appended only when non-empty. Shared
+    core for build_visual_spec_text() (reference-image mode, historical)
+    and build_entity_description_for_scene() (video-prompt mode, current
+    production path — see that function's own docstring)."""
     visual_spec = entity.get("visual_spec", {})
     description   = visual_spec.get("description", "")
     period_detail = visual_spec.get("period_detail", "")
@@ -59,11 +72,61 @@ def build_visual_spec_text(entity: dict) -> str:
         text += f" {period_detail}"
     if markers:
         text += f" Distinctive features: {markers}."
+    return text
+
+
+def build_visual_spec_text(entity: dict) -> str:
+    """
+    Build a rich text description from an entity's visual_spec for use
+    as input to a reference image model.
+
+    Combines description, period_detail, and distinctive_markers into a
+    single string, then appends the reference-image-mode visual identity
+    directive. Each component is appended only when non-empty.
+
+    Retained for any caller still generating a standalone reference
+    image; the current production path never calls this (I2V retired
+    2026-09-04, see build_entity_description_for_scene()) — it injects
+    the entity description directly into the video scene prompt instead.
+
+    Args:
+        entity: Entity dict containing a "visual_spec" sub-dict.
+
+    Returns:
+        Rich text description string.
+    """
+    text = _build_core_entity_description(entity)
 
     if not text:
         return text
 
     return text + visual_identity.build_visual_identity_directive(mode="reference_image")
+
+
+def build_entity_description_for_scene(entity: dict) -> str:
+    """
+    Core entity description text for injection directly into a VIDEO
+    scene prompt (production_spec.provider_routing.primary_prompt /
+    fallback_prompt) — the replacement for I2V reference-image
+    conditioning (retired 2026-09-04: repeated real production episodes
+    showed reference images were generated in the wrong aspect ratio
+    regardless of channel orientation — hypogeum.muapi.
+    generate_reference_image()'s video_aspect_ratio was never actually
+    threaded through from the channel's real orientation, so an I2V scene
+    always inherited a distorted seed image no matter which I2V model was
+    used). A precise, deterministic text description repeated verbatim in
+    every scene featuring that entity carries no aspect-ratio dependency
+    and no per-model image-conditioning field-name quirks.
+
+    Deliberately does NOT append build_visual_spec_text()'s
+    visual_identity directive tail: that directive is reference-image-
+    mode brand guidance, and a video scene prompt already gets its own,
+    separate, video-scene-mode Brand DNA section from
+    hypogeum.video_prompt_writer.assemble_video_scene_prompt() —
+    appending the reference-image-mode one here would be a redundant,
+    wrong-mode duplicate.
+    """
+    return _build_core_entity_description(entity)
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +190,68 @@ def get_primary_entity_url(
         if ea.get("role") == "primary":
             return entity_hosted_urls.get(ea.get("entity_id", ""))
     return None
+
+
+def inject_entity_descriptions_into_scenes(scenes: list, locked_entities: list) -> None:
+    """
+    Append each scene's primary final-locked entity's visual description
+    directly into that scene's own primary_prompt / fallback_prompt text,
+    in place — the current production mechanism for entity visual
+    consistency (I2V retired 2026-09-04; see build_entity_description_
+    for_scene()'s own docstring for why).
+
+    MUST run before hypogeum.production_plan.compile_production_plan():
+    the plan's prompt_fingerprint is computed from the prompt text as it
+    exists at compile time, and hypogeum.muapi._submit_scene_via_gate()'s
+    plan-conformance check fail-closed rejects (prompt_mismatch) any
+    submission whose real, fully-assembled prompt doesn't match what the
+    plan declared — so the injected text must already be present in the
+    plan's own declared prompt, not added afterward.
+
+    Same eligibility gate as the retired I2V path (is_ref_image_eligible:
+    only "final"-locked entities) and the same "first primary
+    entity_appearance only" scope get_primary_entity_url() used — this
+    is a mechanism swap (text instead of an image), not an expansion of
+    what gets carried for consistency.
+
+    Idempotent (skips a prompt that already contains the description
+    text verbatim) and defensive (a malformed scene or entity dict is
+    skipped, never fatal to the whole episode) — never raises.
+
+    Args:
+        scenes:          visual_package["scenes"], mutated in place.
+        locked_entities: visual_package["visual_continuity_record"]["locked_entities"].
+    """
+    try:
+        entities_by_id = {
+            e.get("entity_id"): e for e in locked_entities if is_ref_image_eligible(e)
+        }
+    except Exception:  # noqa: BLE001
+        return
+
+    for scene in scenes:
+        try:
+            entity_id = None
+            for ea in scene.get("entity_appearances", []) or []:
+                if ea.get("role") == "primary":
+                    entity_id = ea.get("entity_id")
+                    break
+            if not entity_id:
+                continue
+            entity = entities_by_id.get(entity_id)
+            if not entity:
+                continue
+            description = build_entity_description_for_scene(entity)
+            if not description:
+                continue
+
+            routing = scene.get("production_spec", {}).get("provider_routing", {})
+            for key in ("primary_prompt", "fallback_prompt"):
+                current = routing.get(key, "") or ""
+                if current and description not in current:
+                    routing[key] = f"{current} {description}"
+        except Exception:  # noqa: BLE001
+            continue
 
 
 # ---------------------------------------------------------------------------

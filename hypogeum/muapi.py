@@ -4463,6 +4463,19 @@ def _build_job_payload(
         if reference_image_url:
             payload["image_url"] = reference_image_url
 
+    elif "wan" in model:
+        # Wan family (wan2.7-text-to-video / wan2.7-image-to-video, and any
+        # future wan2.x/wan3.x variant — substring-matched, same rationale
+        # as the Seedance branch above). The I2V variant takes the
+        # reference image as image_url = "<url>" (single string) — the
+        # request had NO reference-image field at all before this branch
+        # existed, confirmed 2026-09-04 by a live bake-off probe of
+        # wan2.7-image-to-video (422 body: {"loc":["body","image_url"],
+        # "msg":"Field required"}). Same field name as Runway/Seedance I2V,
+        # different from Veo3/Veo3.1 (images_list).
+        if reference_image_url:
+            payload["image_url"] = reference_image_url
+
     # For image models: no duration or images_list
     return payload
 

@@ -145,8 +145,6 @@ from pathlib import Path
 from typing import Optional
 
 from hypogeum.agent import run_agent
-from hypogeum.agents.entity_continuity_manager import apply_reference_image_asset_ids
-from hypogeum.agents.image_generation_agent import generate_entity_reference_images
 from hypogeum.agents.provider_router import update_routing_manifest
 from hypogeum.agents.scene_planner import build_scene_plan_input, order_and_filter_scenes
 from hypogeum.agents.thumbnail_handoff_brief_builder import build_thumbnail_handoff_brief
@@ -1231,6 +1229,24 @@ def run_visual_package_director(
     )
 
     # ------------------------------------------------------------------
+    # Entity description injection (2026-09-04 — I2V retired) — carries
+    # entity visual consistency across scenes via a precise text
+    # description injected directly into each scene's own prompt, rather
+    # than an image-conditioning input. Must run before
+    # compile_production_plan() just below: the plan's prompt_fingerprint
+    # is computed from the prompt text as it exists at compile time. See
+    # hypogeum.agents.entity_continuity_manager.
+    # inject_entity_descriptions_into_scenes()'s own docstring.
+    # ------------------------------------------------------------------
+    from hypogeum.agents.entity_continuity_manager import (  # noqa: PLC0415
+        inject_entity_descriptions_into_scenes,
+    )
+    inject_entity_descriptions_into_scenes(
+        visual_package.get("scenes", []),
+        visual_package.get("visual_continuity_record", {}).get("locked_entities", []),
+    )
+
+    # ------------------------------------------------------------------
     # BGA Pass 1 — brand compliance gate (before MUAPI spend)
     # ------------------------------------------------------------------
     if config.BGA_ENABLED and _bga_allowed_for_active_channel():
@@ -2273,15 +2289,18 @@ def _execute_muapi_phase(
     locked_entities = vcr.get("locked_entities", [])
     scenes = visual_package.get("scenes", [])
 
-    # Step 1: Generate reference images for final-locked entities
-    # entity_id → hosted_url (transient — not stored in package)
-    entity_hosted_urls: dict[str, str] = generate_entity_reference_images(
-        locked_entities, config, episode_id, output_dir, log,
-        budget_guard=budget_guard,
-    )
-
-    # Update locked_entities[] with reference_image_asset_id from results
-    apply_reference_image_asset_ids(locked_entities, entity_hosted_urls, episode_id)
+    # Step 1 (RETIRED 2026-09-04 — I2V is no longer generated at all):
+    # entity_hosted_urls stays permanently empty. get_primary_entity_url()
+    # then always returns None for every scene, so build_scene_spec()'s
+    # reference_image_url is always None and _resolve_scene_model() always
+    # resolves a T2V model — entity consistency is now carried entirely by
+    # the text description hypogeum.agents.visual_package_director's own
+    # Phase 1 already injected into every scene's prompt (see
+    # inject_entity_descriptions_into_scenes()'s docstring for why I2V was
+    # retired rather than fixed). generate_entity_reference_images() /
+    # apply_reference_image_asset_ids() remain importable for any future
+    # direct caller but are no longer invoked from the production path.
+    entity_hosted_urls: dict[str, str] = {}
 
     # Step 2: Generate each scene video
     scenes_sorted = order_and_filter_scenes(scenes, config, log)

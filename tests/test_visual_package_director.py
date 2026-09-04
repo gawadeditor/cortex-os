@@ -34,7 +34,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from hypogeum.config import Config
-from hypogeum.muapi import MUAPIAuthFailure, MUAPIQuotaExhausted, MUAPIError, ReferenceImageResult
+from hypogeum.muapi import MUAPIAuthFailure, MUAPIQuotaExhausted, ReferenceImageResult
 from hypogeum.agents.entity_continuity_manager import apply_reference_image_asset_ids
 from hypogeum.agents.image_generation_agent import (
     generate_entity_reference_images as _generate_entity_reference_images,
@@ -674,76 +674,15 @@ class TestVPDNoFinalEntities:
 # TestVPDRefImageFails
 # ---------------------------------------------------------------------------
 
-class TestVPDRefImageFails:
-
-    def test_ref_image_error_does_not_abort_pipeline(self, tmp_path):
-        config = make_config()
-        plan = _make_visual_package()
-
-        with patch("hypogeum.agents.visual_package_director.run_agent", return_value=plan), \
-             patch("hypogeum.agents.image_generation_agent.generate_reference_image",
-                   side_effect=MUAPIError("Generation failed")), \
-             patch("hypogeum.agents.video_generation_agent.submit_scene",
-                   return_value=_make_submit_result()) as mock_sub:
-
-            result = run_visual_package_director(_make_script_package(), config, "ep_001", tmp_path)
-
-        # Scene generation still called
-        mock_sub.assert_called_once()
-        assert isinstance(result, dict)
-
-    def test_ref_image_fail_means_no_conditioning_url(self, tmp_path):
-        config = make_config()
-        scene = _make_scene(entity_id="pharaoh_amenhotep")
-        plan = _make_visual_package(scenes=[scene])
-
-        with patch("hypogeum.agents.visual_package_director.run_agent", return_value=plan), \
-             patch("hypogeum.agents.image_generation_agent.generate_reference_image",
-                   side_effect=MUAPIError("Failed")), \
-             patch("hypogeum.agents.video_generation_agent.submit_scene",
-                   return_value=_make_submit_result()) as mock_sub:
-
-            run_visual_package_director(_make_script_package(), config, "ep_001", tmp_path)
-
-        spec = mock_sub.call_args[0][0]
-        assert spec["production_spec"]["reference_image_url"] is None
-
-    def test_ref_image_fail_leaves_entity_asset_id_null(self, tmp_path):
-        config = make_config()
-        plan = _make_visual_package()
-
-        with patch("hypogeum.agents.visual_package_director.run_agent", return_value=plan), \
-             patch("hypogeum.agents.image_generation_agent.generate_reference_image",
-                   side_effect=MUAPIError("Failed")), \
-             patch("hypogeum.agents.video_generation_agent.submit_scene",
-                   return_value=_make_submit_result()):
-
-            result = run_visual_package_director(_make_script_package(), config, "ep_001", tmp_path)
-
-        entity = result["visual_continuity_record"]["locked_entities"][0]
-        assert entity["reference_image_asset_id"] is None
-
-
-# ---------------------------------------------------------------------------
-# TestVPDAuthFailureDuringRef
-# ---------------------------------------------------------------------------
-
-class TestVPDAuthFailureDuringRef:
-
-    def test_auth_failure_during_ref_image_propagates(self, tmp_path):
-        config = make_config()
-        plan = _make_visual_package()
-
-        with patch("hypogeum.agents.visual_package_director.run_agent", return_value=plan), \
-             patch("hypogeum.agents.image_generation_agent.generate_reference_image",
-                   side_effect=MUAPIAuthFailure()), \
-             patch("hypogeum.agents.video_generation_agent.submit_scene") as mock_sub:
-
-            with pytest.raises(MUAPIAuthFailure):
-                run_visual_package_director(_make_script_package(), config, "ep_001", tmp_path)
-
-        mock_sub.assert_not_called()
-
+# TestVPDRefImageFails and TestVPDAuthFailureDuringRef removed 2026-09-04:
+# both exercised generate_reference_image() failure modes — I2V/reference-
+# image generation is retired from the production path entirely (real
+# production episodes showed the reference image was generated in the
+# wrong aspect ratio regardless of channel orientation, no matter which
+# I2V model was used — see hypogeum.agents.entity_continuity_manager.
+# inject_entity_descriptions_into_scenes()'s own docstring), so these
+# call sites no longer exist to fail. See TestVPDEntityDescriptionInjection
+# below for the replacement mechanism's own coverage.
 
 # ---------------------------------------------------------------------------
 # TestVPDAuthFailureDuringScene
@@ -942,35 +881,63 @@ class TestVPDSceneIndexOrder:
 # TestVPDEntityAssetIdUpdated
 # ---------------------------------------------------------------------------
 
-class TestVPDEntityAssetIdUpdated:
+# TestVPDEntityAssetIdUpdated and TestVPDRefImageCalledWithEntitySpec
+# removed 2026-09-04: both exercised generate_reference_image()/
+# reference_image_asset_id tracking, which no longer runs on the
+# production path. See TestVPDEntityDescriptionInjection below for the
+# replacement behavior (a text description injected into the scene
+# prompt instead of a generated reference image), and
+# hypogeum.agents.entity_continuity_manager.inject_entity_descriptions_
+# into_scenes()'s docstring for why.
 
-    def test_reference_image_asset_id_set_after_successful_ref_gen(self, tmp_path):
+# ---------------------------------------------------------------------------
+# TestVPDEntityDescriptionInjection
+# ---------------------------------------------------------------------------
+
+class TestVPDEntityDescriptionInjection:
+    """End-to-end coverage of the I2V replacement mechanism (2026-09-04):
+    the scene's primary final-locked entity's description reaches the
+    ACTUAL submit_scene() call, injected directly into the prompt text —
+    no reference image is ever generated on this path any more."""
+
+    def test_final_entity_description_reaches_submit_scene_prompt(self, tmp_path):
         config = make_config()
-        plan = _make_visual_package()
-
-        ref_result = ReferenceImageResult(
-            asset_id="episodes/ep_001/video/ref_pharaoh_amenhotep",
-            hosted_url="https://cdn/ref.jpg",
-        )
+        scene = _make_scene(entity_id="pharaoh_amenhotep", entity_role="primary")
+        plan = _make_visual_package(scenes=[scene])
 
         with patch("hypogeum.agents.visual_package_director.run_agent", return_value=plan), \
-             patch("hypogeum.agents.image_generation_agent.generate_reference_image",
-                   return_value=ref_result), \
              patch("hypogeum.agents.video_generation_agent.submit_scene",
-                   return_value=_make_submit_result()):
+                   return_value=_make_submit_result()) as mock_sub:
 
-            result = run_visual_package_director(_make_script_package(), config, "ep_001", tmp_path)
+            run_visual_package_director(_make_script_package(), config, "ep_001", tmp_path)
 
-        entity = result["visual_continuity_record"]["locked_entities"][0]
-        assert entity["reference_image_asset_id"] == "episodes/ep_001/video/ref_pharaoh_amenhotep"
+        spec = mock_sub.call_args[0][0]
+        # The default entity's visual_spec description (see _make_entity()).
+        assert "Tall imposing figure in white linen robes." in spec["production_spec"]["primary_prompt"]
+        assert "Tall imposing figure in white linen robes." in spec["production_spec"]["fallback_prompt"]
 
-    def test_provisional_entity_asset_id_stays_null(self, tmp_path):
+    def test_no_reference_image_url_ever_set(self, tmp_path):
         config = make_config()
-        entities = [_make_entity(lock_state="provisional")]
-        plan = _make_visual_package(entities=entities)
+        scene = _make_scene(entity_id="pharaoh_amenhotep", entity_role="primary")
+        plan = _make_visual_package(scenes=[scene])
 
         with patch("hypogeum.agents.visual_package_director.run_agent", return_value=plan), \
-             patch("hypogeum.agents.image_generation_agent.generate_reference_image"), \
+             patch("hypogeum.agents.video_generation_agent.submit_scene",
+                   return_value=_make_submit_result()) as mock_sub:
+
+            run_visual_package_director(_make_script_package(), config, "ep_001", tmp_path)
+
+        spec = mock_sub.call_args[0][0]
+        assert spec["production_spec"]["reference_image_url"] is None
+
+    def test_entity_reference_image_asset_id_stays_null(self, tmp_path):
+        """No reference image is ever generated any more -- the field
+        stays null rather than being populated with a generated asset_id."""
+        config = make_config()
+        scene = _make_scene(entity_id="pharaoh_amenhotep", entity_role="primary")
+        plan = _make_visual_package(scenes=[scene])
+
+        with patch("hypogeum.agents.visual_package_director.run_agent", return_value=plan), \
              patch("hypogeum.agents.video_generation_agent.submit_scene",
                    return_value=_make_submit_result()):
 
@@ -979,89 +946,34 @@ class TestVPDEntityAssetIdUpdated:
         entity = result["visual_continuity_record"]["locked_entities"][0]
         assert entity["reference_image_asset_id"] is None
 
-    def test_ref_image_asset_id_follows_entity_id(self, tmp_path):
-        """asset_id = episodes/{ep_id}/video/ref_{entity_id}"""
+    def test_secondary_entity_not_injected(self, tmp_path):
         config = make_config()
-        entities = [_make_entity(entity_id="antikythera_mechanism", lock_state="final")]
-        plan = _make_visual_package(entities=entities)
-
-        ref_result = ReferenceImageResult(
-            asset_id="episodes/ep_001/video/ref_antikythera_mechanism",
-            hosted_url="https://cdn/ref_m.jpg",
-        )
+        scene = _make_scene(entity_id="pharaoh_amenhotep", entity_role="secondary")
+        plan = _make_visual_package(scenes=[scene])
 
         with patch("hypogeum.agents.visual_package_director.run_agent", return_value=plan), \
-             patch("hypogeum.agents.image_generation_agent.generate_reference_image",
-                   return_value=ref_result), \
              patch("hypogeum.agents.video_generation_agent.submit_scene",
-                   return_value=_make_submit_result()):
-
-            result = run_visual_package_director(_make_script_package(), config, "ep_001", tmp_path)
-
-        entity = result["visual_continuity_record"]["locked_entities"][0]
-        assert entity["reference_image_asset_id"] == "episodes/ep_001/video/ref_antikythera_mechanism"
-
-
-# ---------------------------------------------------------------------------
-# TestVPDRefImageCalledWithEntitySpec
-# ---------------------------------------------------------------------------
-
-class TestVPDRefImageCalledWithEntitySpec:
-
-    def test_generate_ref_image_called_once_per_final_entity(self, tmp_path):
-        config = make_config()
-        entities = [
-            _make_entity(entity_id="entity_a", lock_state="final"),
-            _make_entity(entity_id="entity_b", lock_state="final"),
-            _make_entity(entity_id="entity_c", lock_state="provisional"),
-        ]
-        plan = _make_visual_package(entities=entities)
-
-        ref_result = ReferenceImageResult("ep/ref", "https://cdn/r.jpg")
-
-        with patch("hypogeum.agents.visual_package_director.run_agent", return_value=plan), \
-             patch("hypogeum.agents.image_generation_agent.generate_reference_image",
-                   return_value=ref_result) as mock_gen, \
-             patch("hypogeum.agents.video_generation_agent.submit_scene",
-                   return_value=_make_submit_result()):
+                   return_value=_make_submit_result()) as mock_sub:
 
             run_visual_package_director(_make_script_package(), config, "ep_001", tmp_path)
 
-        # Only the 2 final entities trigger ref image generation
-        assert mock_gen.call_count == 2
+        spec = mock_sub.call_args[0][0]
+        assert "Tall imposing figure" not in spec["production_spec"]["primary_prompt"]
 
-    def test_ref_image_called_with_entity_id(self, tmp_path):
+    def test_provisional_entity_not_injected(self, tmp_path):
         config = make_config()
-        plan = _make_visual_package()
-        ref_result = ReferenceImageResult("ep/ref", "https://cdn/r.jpg")
+        entities = [_make_entity(lock_state="provisional")]
+        scene = _make_scene(entity_id="pharaoh_amenhotep", entity_role="primary")
+        plan = _make_visual_package(entities=entities, scenes=[scene])
 
         with patch("hypogeum.agents.visual_package_director.run_agent", return_value=plan), \
-             patch("hypogeum.agents.image_generation_agent.generate_reference_image",
-                   return_value=ref_result) as mock_gen, \
              patch("hypogeum.agents.video_generation_agent.submit_scene",
-                   return_value=_make_submit_result()):
+                   return_value=_make_submit_result()) as mock_sub:
 
             run_visual_package_director(_make_script_package(), config, "ep_001", tmp_path)
 
-        call_kwargs = mock_gen.call_args[1]
-        assert call_kwargs["entity_id"] == "pharaoh_amenhotep"
-        assert call_kwargs["episode_id"] == "ep_001"
-
-    def test_ref_image_visual_spec_text_includes_description(self, tmp_path):
-        config = make_config()
-        plan = _make_visual_package()
-        ref_result = ReferenceImageResult("ep/ref", "https://cdn/r.jpg")
-
-        with patch("hypogeum.agents.visual_package_director.run_agent", return_value=plan), \
-             patch("hypogeum.agents.image_generation_agent.generate_reference_image",
-                   return_value=ref_result) as mock_gen, \
-             patch("hypogeum.agents.video_generation_agent.submit_scene",
-                   return_value=_make_submit_result()):
-
-            run_visual_package_director(_make_script_package(), config, "ep_001", tmp_path)
-
-        call_kwargs = mock_gen.call_args[1]
-        assert "Tall imposing figure" in call_kwargs["visual_spec_text"]
+        spec = mock_sub.call_args[0][0]
+        assert "Tall imposing figure" not in spec["production_spec"]["primary_prompt"]
 
 
 # ---------------------------------------------------------------------------
@@ -1268,14 +1180,12 @@ class TestFromPlan:
             run_visual_package_director_from_plan(plan, cfg, "ep_001", tmp_path)
         assert mock_submit.called
 
-    def test_quota_exhausted_propagates(self, tmp_path):
-        cfg = make_config()
-        plan = _make_visual_package()
-        _persist_minimal_plan(tmp_path)
-        with patch("hypogeum.agents.image_generation_agent.generate_reference_image",
-                   side_effect=MUAPIQuotaExhausted()):
-            with pytest.raises(MUAPIQuotaExhausted):
-                run_visual_package_director_from_plan(plan, cfg, "ep_001", tmp_path)
+    # test_quota_exhausted_propagates removed 2026-09-04: exercised
+    # generate_reference_image() propagating MUAPIQuotaExhausted — that
+    # call site no longer exists on this path either (I2V retired, see
+    # entity_continuity_manager.inject_entity_descriptions_into_scenes()).
+    # TestVPDAuthFailureDuringScene/TestVPDQuotaExhausted above still
+    # cover the (unchanged) submit_scene()-side propagation.
 
     def test_returns_visual_package_dict(self, tmp_path):
         cfg = make_config()

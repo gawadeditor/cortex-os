@@ -7260,13 +7260,17 @@ def channel_detail(channel_id):
         rollup = None
     try:
         _all = list_runs(db_path=db, channel_id=channel_id, limit=30)
-        # One row per episode (its most recent run), and never show a
-        # superseded episode — a client shouldn't see the retry archaeology.
+        # One row per episode (its most recent run). A client channel page
+        # shows finished work — not superseded retries, not phantom failed
+        # runs that never produced a titled episode.
         recent_runs, _seen = [], set()
         for r in _all:
             ep = r.get("episode_id")
+            _st = (r.get("status") or "").lower()
+            _untitled = not (r.get("episode_title") or r.get("episode_topic"))
             if (r.get("superseded") or r.get("episode_status") == "superseded"
-                    or not ep or ep in _seen):
+                    or not ep or ep in _seen
+                    or (_st in ("failed", "error") and (_untitled or not r.get("episode_status")))):
                 continue
             _seen.add(ep)
             recent_runs.append(r)

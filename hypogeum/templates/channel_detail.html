@@ -43,7 +43,19 @@
   {% endif %}
 
   {% if rollup %}
+  {% from '_charts.html' import radial %}
+  {% set _wb = runtime.weekly_budget if runtime else none %}
   <div class="stat-grid">
+    {% if _wb and _wb.configured %}
+    <div class="stat-card" style="display:flex; align-items:center; gap:14px;">
+      {{ radial(_wb.pct_used or 0, size=72,
+                tone=('critical' if (_wb.pct_used or 0) >= 90 else ('warn' if (_wb.pct_used or 0) >= 70 else 'good'))) }}
+      <div>
+        <div class="stat-lbl">This week's budget</div>
+        <div class="stat-val" style="font-size:19px;">{{ (_wb.reserved_committed_usd or 0) | friendly_money }}<span style="font-size:12px;color:var(--muted);font-weight:400;"> / {{ (_wb.ceiling_usd or 0) | friendly_money }}</span></div>
+      </div>
+    </div>
+    {% endif %}
     <div class="stat-card">
       <div class="stat-lbl">{{ icon('live') }} Views</div>
       <div class="stat-val {% if rollup.views is none %}is-muted{% endif %}">
@@ -94,6 +106,19 @@
       </button>
     </div>
     {% endif %}
+    {% set _all_ok = not c.blocker and not c.warn %}
+    {% if _all_ok %}
+    <div class="rd-item" style="align-items:center;">
+      <span class="rd-mark rd-ok">{{ icon('check') }}</span>
+      <div style="flex:1;">
+        <div class="rd-title">Everything's in place — this channel runs on its own</div>
+        <div class="rd-detail">Cortex produces, publishes and learns for it on the daily schedule, up to the weekly budget.</div>
+      </div>
+    </div>
+    <details style="margin:8px 0 0;">
+      <summary style="border:none; background:none; padding:4px 0; font-size:11px;">See all {{ readiness['items'] | length }} checks</summary>
+      <div style="padding-top:8px;">
+    {% endif %}
     {% for i in readiness['items'] %}
     <div class="rd-item">
       <span class="rd-mark rd-{{ i.level }}">
@@ -105,6 +130,7 @@
       </div>
     </div>
     {% endfor %}
+    {% if _all_ok %}</div></details>{% endif %}
   </div>
   {% endif %}
 

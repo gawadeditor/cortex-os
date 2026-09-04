@@ -91,6 +91,48 @@ def _load_system_prompt() -> str:
 SYSTEM_PROMPT: str = _load_system_prompt()
 
 
+class ScriptViralityError(RuntimeError):
+    """A short-native script failed the viral-shape check (hook opens on a
+    date/place on an investigative channel, the hook's spine is never paid
+    off, or the script has no landing final line) and one corrective retry
+    did not fix it. Fail-closed — the pipeline does not ship a flat script."""
+
+
+# An investigative channel's hook must not open on a date or a full calendar
+# date — "In 2006, archaeologists…" is the exact flat opener the virality
+# directive bans. Conservative: only fires on an actual leading year / date.
+_DATE_OPENER_RE = re.compile(
+    r"^\s*(in\s+|by\s+|around\s+|circa\s+)?(the\s+year\s+)?"
+    r"((late|early|mid)[\s-])?\d{3,4}(\s*(bc|bce|ad|ce))?\b"
+    r"|^\s*(on\s+)?[A-Z][a-z]+\s+\d{1,2},?\s+\d{4}\b",
+    re.IGNORECASE,
+)
+
+
+def _short_native_viral_findings(pkg: dict, *, investigative: bool) -> list[str]:
+    """Objective + self-reported checks on a short-native script's viral
+    shape. Empty list = OK."""
+    problems: list[str] = []
+    si = pkg.get("script_integrity") or {}
+    sn = si.get("short_native") or {}
+    if not isinstance(sn, dict) or not sn:
+        problems.append("script_integrity.short_native is missing — the viral self-audit was not done")
+    else:
+        if sn.get("spine_paid_off") is not True:
+            problems.append("spine_paid_off is not true: the question the hook opens is never answered")
+        if sn.get("has_stinger") is not True:
+            problems.append("has_stinger is not true: the script has no landing final line")
+        if not str(sn.get("spine_question") or "").strip():
+            problems.append("spine_question is empty: there is no single through-line")
+    if investigative:
+        secs = pkg.get("sections") or []
+        beats = (secs[0].get("narration_beats") if secs else []) or []
+        first = str((beats[0].get("text") if beats else "") or "").strip()
+        if first and _DATE_OPENER_RE.match(first):
+            problems.append(f"hook opens on a date/year clause (flat opener): {first[:70]!r}")
+    return problems
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -119,6 +161,8 @@ def run_script_engine(
     Raises:
         ResponseParseError — Claude returned non-dict JSON.
         SchemaError        — Claude output failed script_package schema validation.
+        ScriptViralityError — short-native script failed the viral-shape check
+                             (flat date opener / unpaid spine / no stinger) after retry.
         Any exception from run_agent() / hypogeum.openrouter that is not caught here.
     """
     log = get_logger(episode_id=episode_id, agent=_AGENT_NAME)
@@ -195,18 +239,52 @@ def run_script_engine(
     except Exception:  # noqa: BLE001
         pass
 
-    script_package = run_agent(
-        agent_name=_AGENT_NAME,
-        model_slug=_CLAUDE_SONNET,
-        system_prompt=SYSTEM_PROMPT,
-        input_package=_input_package,
-        output_schema="script_package",
-        episode_id=episode_id,
-        max_tokens=_SE_MAX_TOKENS,
-        config=config,
-        output_dir=output_dir,
-        channel_id=channel_id,
-    )
+    def _invoke() -> dict:
+        return run_agent(
+            agent_name=_AGENT_NAME,
+            model_slug=_CLAUDE_SONNET,
+            system_prompt=SYSTEM_PROMPT,
+            input_package=_input_package,
+            output_schema="script_package",
+            episode_id=episode_id,
+            max_tokens=_SE_MAX_TOKENS,
+            config=config,
+            output_dir=output_dir,
+            channel_id=channel_id,
+        )
+
+    script_package = _invoke()
+
+    # Short-native viral-shape gate (2026-09-04). The hook must not open on a
+    # date/place on an investigative channel, the hook's spine must be paid
+    # off, and the script must land a final line. One corrective retry, then
+    # fail closed — the pipeline never ships a flat short.
+    if getattr(config, "SHORT_NATIVE_MODE", False) is True:
+        from hypogeum.channel_creative_brief import _investigative  # noqa: PLC0415
+        _brief = channel_brief_for(channel_id)
+        _is_investigative = _investigative(str(_brief.get("tone") or ""))
+        _problems = _short_native_viral_findings(script_package, investigative=_is_investigative)
+        if _problems:
+            log.warn("se_viral_shape_retry", problems=_problems)
+            _input_package["revision_required"] = {
+                "reason": "the previous draft failed the short-native viral-shape check",
+                "problems": _problems,
+                "instruction": (
+                    "Rewrite the whole short so every listed problem is resolved. "
+                    "The question the hook opens (spine_question) MUST be answered by a "
+                    "payoff beat before the end. The final beat MUST be a stinger / "
+                    "return line. An investigative hook MUST NOT open with a year, a "
+                    "date, or 'In [year]…'. Re-fill script_integrity.short_native."
+                ),
+            }
+            script_package = _invoke()
+            _problems = _short_native_viral_findings(script_package, investigative=_is_investigative)
+            if _problems:
+                log.error("se_viral_shape_failed", problems=_problems)
+                raise ScriptViralityError(
+                    "short-native script failed the viral-shape check after one "
+                    f"corrective retry: {_problems}"
+                )
 
     # Humanize beat text fields (deterministic — no schema changes)
     for section in script_package.get("sections", []):

@@ -939,3 +939,103 @@ class TestPipelineIntegration:
                     episode_id=EPISODE_ID, output_dir=p,
                 )
             assert mock_se.call_args.kwargs["output_dir"] == p
+
+
+# ---------------------------------------------------------------------------
+# Short-native viral-shape gate (2026-09-04)
+# ---------------------------------------------------------------------------
+
+from hypogeum.agents.script_engine import (  # noqa: E402
+    ScriptViralityError, _DATE_OPENER_RE, _short_native_viral_findings,
+)
+
+
+def _sn_pkg(first_line, *, paid=True, stinger=True, spine="why?"):
+    return {
+        "sections": [{"section_id": "s1", "title": "x",
+                      "narration_beats": [{"beat_id": "b1", "text": first_line}]}],
+        "shorts_scripts": [], "chapter_markers": [], "shorts_extraction_markers": [],
+        "traceability_manifest": {},
+        "script_integrity": {"cta_count": 0, "short_native": {
+            "hook_opener_type": "contradiction", "spine_question": spine,
+            "spine_paid_off": paid, "has_stinger": stinger}},
+        "episode_metadata": {},
+    }
+
+
+class TestDateOpenerRegex:
+    @pytest.mark.parametrize("line", [
+        "In 2006, archaeologists opened the tomb.",
+        "2006: the year everything changed.",
+        "By 1974 the site was buried.",
+        "On March 3, 1912 the ship sailed.",
+        "Circa 1500 BC, the temple stood.",
+    ])
+    def test_flags_date_openers(self, line):
+        assert _DATE_OPENER_RE.match(line)
+
+    @pytest.mark.parametrize("line", [
+        "A sealed tomb with everything for a burial — except a body.",
+        "You have been told the Colosseum held 70,000 victims.",
+        "Sixty winches lifted cages through the arena floor.",
+    ])
+    def test_passes_strong_hooks(self, line):
+        assert not _DATE_OPENER_RE.match(line)
+
+
+class TestShortNativeViralFindings:
+    def test_clean_investigative_script_has_no_findings(self):
+        pkg = _sn_pkg("A sealed tomb with no body inside.")
+        assert _short_native_viral_findings(pkg, investigative=True) == []
+
+    def test_date_opener_flagged_for_investigative(self):
+        pkg = _sn_pkg("In 2006, archaeologists opened the tomb.")
+        out = _short_native_viral_findings(pkg, investigative=True)
+        assert any("date/year" in p for p in out)
+
+    def test_date_opener_ignored_for_gentle(self):
+        pkg = _sn_pkg("In 2006, archaeologists opened the tomb.")
+        assert _short_native_viral_findings(pkg, investigative=False) == []
+
+    def test_unpaid_spine_flagged(self):
+        pkg = _sn_pkg("A sealed tomb with no body.", paid=False)
+        assert any("spine_paid_off" in p for p in _short_native_viral_findings(pkg, investigative=True))
+
+    def test_missing_stinger_flagged(self):
+        pkg = _sn_pkg("A sealed tomb with no body.", stinger=False)
+        assert any("has_stinger" in p for p in _short_native_viral_findings(pkg, investigative=True))
+
+    def test_missing_short_native_object_flagged(self):
+        pkg = _sn_pkg("A sealed tomb with no body.")
+        del pkg["script_integrity"]["short_native"]
+        assert _short_native_viral_findings(pkg, investigative=True)
+
+
+class TestShortNativeGateInRunScriptEngine:
+    def _cfg_short_native(self):
+        c = make_config()
+        c.SHORT_NATIVE_MODE = True
+        return c
+
+    def test_retry_then_pass(self, monkeypatch):
+        monkeypatch.setattr("hypogeum.agents.script_engine.channel_brief_for",
+                            lambda cid: {"tone": "investigative, evidence-based"})
+        monkeypatch.setattr("hypogeum.agents.script_engine._enforce_short_native_budget",
+                            lambda *a, **k: None)
+        bad = _sn_pkg("In 2006, they opened it.", paid=False)
+        good = _sn_pkg("A sealed tomb, no body inside.")
+        calls = iter([bad, good])
+        monkeypatch.setattr("hypogeum.agents.script_engine.run_agent",
+                            lambda **kw: next(calls))
+        out = run_script_engine(NP, self._cfg_short_native(), EPISODE_ID, None)
+        assert _short_native_viral_findings(out, investigative=True) == []
+
+    def test_retry_then_fail_raises(self, monkeypatch):
+        monkeypatch.setattr("hypogeum.agents.script_engine.channel_brief_for",
+                            lambda cid: {"tone": "investigative, evidence-based"})
+        monkeypatch.setattr("hypogeum.agents.script_engine._enforce_short_native_budget",
+                            lambda *a, **k: None)
+        bad = _sn_pkg("In 2006, they opened it.", paid=False)
+        monkeypatch.setattr("hypogeum.agents.script_engine.run_agent", lambda **kw: bad)
+        with pytest.raises(ScriptViralityError):
+            run_script_engine(NP, self._cfg_short_native(), EPISODE_ID, None)

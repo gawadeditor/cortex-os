@@ -228,6 +228,81 @@ class TestComputeNextPublishSlot:
     def test_empty_publishing_schedule_returns_none(self):
         assert compute_next_publish_slot({}, "UTC", _now()) is None
 
+
+class TestComputeNextPublishSlotPerWeekday:
+    """
+    Per-weekday shape: {"weekday_time_of_day": {...}, "default_time_of_day":
+    "..."} — daily cadence (one slot every day, like the Daily shape), but
+    each named weekday gets its own time instead of one fixed clock time
+    for the whole week. Added 2026-09-04 for a channel's real Zernio
+    best-time-to-post data (distinct Monday/Wednesday peaks, everything
+    else falling back to a single default time).
+
+    2026-06-15 is a Monday (same reference week the weekly-shape tests
+    above use), so 06-16=Tue, 06-17=Wed, 06-18=Thu.
+    """
+
+    _SCHEDULE = {
+        "weekday_time_of_day": {"monday": "10:00", "wednesday": "18:00"},
+        "default_time_of_day": "16:00",
+    }
+
+    def test_named_weekday_before_its_own_time_uses_that_time_today(self):
+        result = compute_next_publish_slot(self._SCHEDULE, "UTC", _utc(2026, 6, 15, 9, 0, 0))
+        assert result == _utc(2026, 6, 15, 10, 0, 0)
+
+    def test_named_weekday_after_its_own_time_rolls_to_next_day_default(self):
+        # Monday 11:00 -- 10:00 already passed; Tuesday is unnamed, uses default.
+        result = compute_next_publish_slot(self._SCHEDULE, "UTC", _utc(2026, 6, 15, 11, 0, 0))
+        assert result == _utc(2026, 6, 16, 16, 0, 0)
+
+    def test_unnamed_weekday_uses_default_time(self):
+        # Tuesday, before the default -- today at the default time.
+        result = compute_next_publish_slot(self._SCHEDULE, "UTC", _utc(2026, 6, 16, 9, 0, 0))
+        assert result == _utc(2026, 6, 16, 16, 0, 0)
+
+    def test_second_named_weekday_uses_its_own_time(self):
+        result = compute_next_publish_slot(self._SCHEDULE, "UTC", _utc(2026, 6, 17, 9, 0, 0))
+        assert result == _utc(2026, 6, 17, 18, 0, 0)
+
+    def test_case_insensitive_weekday_key(self):
+        schedule = {"weekday_time_of_day": {"MONDAY": "10:00"}, "default_time_of_day": "16:00"}
+        result = compute_next_publish_slot(schedule, "UTC", _utc(2026, 6, 15, 9, 0, 0))
+        assert result == _utc(2026, 6, 15, 10, 0, 0)
+
+    def test_non_utc_timezone(self):
+        # 10:00 Asia/Dubai (UTC+4) == 06:00 UTC.
+        result = compute_next_publish_slot(self._SCHEDULE, "Asia/Dubai", _utc(2026, 6, 15, 3, 0, 0))
+        assert result == _utc(2026, 6, 15, 6, 0, 0)
+
+    def test_takes_priority_over_flat_time_of_day(self):
+        schedule = {
+            "weekday_time_of_day": {"monday": "10:00"}, "default_time_of_day": "16:00",
+            "time_of_day": "23:00",  # must be ignored -- the per-weekday shape wins
+        }
+        result = compute_next_publish_slot(schedule, "UTC", _utc(2026, 6, 15, 9, 0, 0))
+        assert result == _utc(2026, 6, 15, 10, 0, 0)
+
+    def test_missing_default_time_of_day_returns_none(self):
+        schedule = {"weekday_time_of_day": {"monday": "10:00"}}
+        assert compute_next_publish_slot(schedule, "UTC", _now()) is None
+
+    def test_unrecognized_weekday_name_returns_none(self):
+        schedule = {"weekday_time_of_day": {"funday": "10:00"}, "default_time_of_day": "16:00"}
+        assert compute_next_publish_slot(schedule, "UTC", _now()) is None
+
+    def test_unparseable_named_time_returns_none(self):
+        schedule = {"weekday_time_of_day": {"monday": "25:99"}, "default_time_of_day": "16:00"}
+        assert compute_next_publish_slot(schedule, "UTC", _now()) is None
+
+    def test_unparseable_default_time_returns_none(self):
+        schedule = {"weekday_time_of_day": {"monday": "10:00"}, "default_time_of_day": "not-a-time"}
+        assert compute_next_publish_slot(schedule, "UTC", _now()) is None
+
+    def test_invalid_timezone_returns_none(self):
+        result = compute_next_publish_slot(self._SCHEDULE, "Not/A_Real_Zone", _now())
+        assert result is None
+
     def test_invalid_day_name_returns_none(self):
         result = compute_next_publish_slot(
             {"day_of_week": "someday", "time_of_day": "18:00"}, "UTC", _now(),

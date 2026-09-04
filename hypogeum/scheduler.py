@@ -207,7 +207,7 @@ def compute_next_publish_slot(
     hypogeum.dashboard_control.next_thursday_publish_slot()'s "next weekday
     at fixed time" pattern to any channel-configured day/time/timezone.
 
-    Two schedule shapes are accepted:
+    Three schedule shapes are accepted:
       - Weekly: {"day_of_week": "thursday", "time_of_day": "18:00"} — the
         next occurrence of that weekday at that time (the original behavior).
       - Daily:  {"time_of_day": "15:00"} with day_of_week absent, or
@@ -216,9 +216,23 @@ def compute_next_publish_slot(
         shorts-only channel (production_cadence.videos_per_week == 0) needs:
         one release per day at a fixed wall-clock time, which the weekly
         7-slot recurrence cannot express.
+      - Per-weekday: {"weekday_time_of_day": {"monday": "10:00",
+        "wednesday": "18:00"}, "default_time_of_day": "18:00"} — daily
+        cadence (one release every day, same as the Daily shape above),
+        but a channel's own best-time-to-post data rarely says the same
+        clock time is optimal on every day of the week. Any weekday named
+        in weekday_time_of_day uses its own time; every other day falls
+        back to default_time_of_day. Checked first (a non-empty
+        weekday_time_of_day dict takes priority over a top-level
+        time_of_day, if both happen to be present). default_time_of_day is
+        REQUIRED whenever weekday_time_of_day is used — this shape only
+        changes WHICH TIME each day publishes at, never WHICH DAYS publish
+        (an incomplete map with no fallback would silently skip days the
+        scheduler/buffer logic elsewhere still assumes are daily) — fails
+        closed (returns None) rather than guessing a day should be skipped.
 
     Args:
-        publishing_schedule: see the two shapes above.
+        publishing_schedule: see the three shapes above.
         tz_name:             IANA timezone name (ChannelOperationsProfile.timezone).
         from_dt:              Timezone-aware reference datetime.
 
@@ -230,6 +244,13 @@ def compute_next_publish_slot(
         matching worker_integration.py's existing fail-closed behavior for
         scheduled runs with no target_publish_at.
     """
+    weekday_times_raw = publishing_schedule.get("weekday_time_of_day")
+    if isinstance(weekday_times_raw, dict) and weekday_times_raw:
+        return _compute_next_weekday_varying_slot(
+            weekday_times_raw, publishing_schedule.get("default_time_of_day"),
+            tz_name, from_dt,
+        )
+
     day_raw = publishing_schedule.get("day_of_week")
     time_raw = publishing_schedule.get("time_of_day")
     if not time_raw:
@@ -269,6 +290,64 @@ def compute_next_publish_slot(
         candidate += timedelta(weeks=1)
 
     return candidate.astimezone(timezone.utc)
+
+
+def _compute_next_weekday_varying_slot(
+    weekday_times_raw: dict,
+    default_raw,
+    tz_name: str,
+    from_dt: datetime,
+) -> Optional[datetime]:
+    """
+    compute_next_publish_slot()'s Per-weekday shape — daily cadence, but
+    each weekday may name its own time_of_day, with default_time_of_day as
+    the required fallback for every day not explicitly named.
+
+    Same fail-closed philosophy as the two existing shapes: any
+    unrecognized day name, any unparseable HH:MM value (named day or the
+    default itself), a missing/falsy default_time_of_day, or an invalid
+    tz_name returns None rather than guessing. Never raises.
+    """
+    if not default_raw:
+        return None
+
+    def _parse_hm(raw) -> Optional[tuple]:
+        if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", str(raw)):
+            return None
+        h, m = (int(p) for p in str(raw).split(":"))
+        return h, m
+
+    default_hm = _parse_hm(default_raw)
+    if default_hm is None:
+        return None
+
+    per_weekday_hm = {}
+    for day_name, time_raw in weekday_times_raw.items():
+        weekday = _WEEKDAY_NAMES.get(str(day_name).strip().lower())
+        if weekday is None:
+            return None
+        hm = _parse_hm(time_raw)
+        if hm is None:
+            return None
+        per_weekday_hm[weekday] = hm
+
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        return None
+
+    local_from = from_dt.astimezone(tz)
+    # Search today .. +7 days (a full week ahead) so a slot always resolves
+    # even when every explicitly-named day has already passed this week.
+    for offset in range(8):
+        candidate_local = local_from + timedelta(days=offset)
+        hour, minute = per_weekday_hm.get(candidate_local.weekday(), default_hm)
+        candidate = candidate_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if candidate > local_from:
+            return candidate.astimezone(timezone.utc)
+
+    return None
 
 
 def is_scheduled_invocation(claimed_row: dict) -> bool:

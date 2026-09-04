@@ -1407,24 +1407,97 @@ def process_next(
         )
 
         # Topic hygiene — exactly one of skip / mark-as-retry / release:
-        #   - PipelineRejectedError: the EP scored the topic below
-        #     threshold — the topic content itself is the problem, skip
-        #     it permanently regardless of retry eligibility.
+        #   - The topic's own CONTENT/plan is the problem (EP score below
+        #     threshold, QA rejection, Rights & Compliance rejection, or a
+        #     refused/infeasible/corrupted backward plan specifically):
+        #     skip permanently. Deliberately an explicit isinstance tuple
+        #     (plus a message-scoped check for the one GatedExecutionRefused
+        #     sub-reason that is actually about this topic), not a blanket
+        #     "any TERMINAL failure_policy" check -- TERMINAL is ALSO used
+        #     for exceptions where the topic is fine and only the immediate
+        #     auto-retry is unwanted: FinanceBudgetBlockedError ("an
+        #     infrastructure constraint, not a topic fault", its own test's
+        #     words), and GatedExecutionRefused's OTHER sub-reasons
+        #     (operator_enabled/production_enabled/unattended_operation_
+        #     enabled False, an invalid privacy config, an admission/
+        #     reservation denial) -- channel-level config or budget state,
+        #     not a judgment on this content, so a later plain release can
+        #     legitimately succeed once that state changes. All of those
+        #     still fall to the plain-release branch below, unchanged.
+        #     (fixed 2026-09-04: found live-tracing ep_90382de2, a
+        #     QARejectedError release()d back to plain backlog every ~2-4
+        #     min for 90+ minutes -- ~20 real, paid MUAPI attempts on an
+        #     episode a human needed to look at once; a channel's
+        #     backward-plan-infeasible topic was found looping the same
+        #     way, both via release_topic()'s "topic is fine, try again"
+        #     contract applied to a topic that provably is not.)
         #   - Retry-eligible: reuse this SAME row as the one and only
         #     retry identity (mark_topic_retry) — never a second,
         #     separately-enqueued row.
-        #   - Otherwise (terminal failure, or retry budget exhausted):
-        #     plain release back to the ordinary backlog.
+        #   - Retry budget exhausted on an otherwise-TRANSIENT exception:
+        #     ALSO skip, not release -- release_topic() puts the row back
+        #     in plain backlog, where the next scheduler tick claims it
+        #     into a BRAND NEW run_queue row whose own retry_count starts
+        #     at 0, silently resetting the cap this branch exists to
+        #     enforce and reproducing the same failure forever. A human
+        #     needs to look at this one too; nothing left in this process
+        #     can distinguish "still worth an automatic retry" from "stuck".
+        #     A config whose QUEUE_MAX_AUTO_RETRIES can't be read as an int
+        #     (missing, or a MagicMock in a test) can't safely decide this
+        #     either way, so it falls through to plain release -- the same
+        #     "cannot safely decide" default _retry_eligible() itself uses.
+        #   - Any other reason retry_eligible is False (missing channel_id/
+        #     episode_id/topic_text, or _retry_eligible()'s own defensive
+        #     except-swallow): plain release back to the ordinary backlog —
+        #     the original, narrower fallback, unchanged.
         if topic_id is not None and using_backlog:
             try:
+                from hypogeum.topics import mark_topic_retry, release_topic, skip_topic
+
+                # PipelineRejectedError keeps its original, separately-documented
+                # reason="ep_rejected" (hypogeum.topics's own module docstring,
+                # tests/test_topics.py) unchanged -- only the newly-added
+                # classes below get the new reason string.
+                _also_unrecoverable = (_pipeline_module.QARejectedError, _pipeline_module.ComplianceRejectedError)
+
+                # GatedExecutionRefused is ONE class covering several distinct
+                # gate reasons via a free-text message -- operator_enabled/
+                # production_enabled/unattended_operation_enabled False, a
+                # missing/invalid privacy config, an admission/reservation
+                # denial, and a refused/infeasible/corrupted backward plan.
+                # Only the LAST of those is actually about this topic's own
+                # content/target -- the others are channel-level config or
+                # budget state that can (and should) resolve on a later plain
+                # release, exactly like FinanceBudgetBlockedError, so this
+                # narrows to the backward-plan message specifically rather
+                # than treating the whole class as unrecoverable (confirmed
+                # via tests/test_worker_integration.py's own
+                # test_terminal_gate_failure_marks_queue_item_failed_and_releases_topic,
+                # which exercises operator_enabled=False and asserts plain
+                # release is correct there).
+                _content_is_gate_refused = False
+                try:
+                    from hypogeum.worker_integration import GatedExecutionRefused
+                    if isinstance(exc, GatedExecutionRefused) and "backward plan" in str(exc).lower():
+                        _content_is_gate_refused = True
+                except Exception:
+                    pass  # worker_integration unavailable in this environment -- narrower check still correct
+
+                try:
+                    _max_retries = int(getattr(config, "QUEUE_MAX_AUTO_RETRIES", 2)) if config is not None else 2
+                except Exception:
+                    _max_retries = None  # cannot safely decide -- see comment above
+                _retry_count = claimed.get("retry_count") or 0
+
                 if isinstance(exc, _pipeline_module.PipelineRejectedError):
-                    from hypogeum.topics import skip_topic
                     skip_topic(topic_id, reason="ep_rejected", db_path=db_path)
+                elif isinstance(exc, _also_unrecoverable) or _content_is_gate_refused:
+                    skip_topic(topic_id, reason=f"unrecoverable:{type(exc).__name__}", db_path=db_path)
                 elif retry_eligible:
-                    from hypogeum.topics import mark_topic_retry
                     mark_topic_retry(topic_id, db_path=db_path)
+                elif _max_retries is not None and _retry_count >= _max_retries:
+                    skip_topic(topic_id, reason="retry_budget_exhausted", db_path=db_path)
                 else:
-                    from hypogeum.topics import release_topic
                     release_topic(topic_id, db_path=db_path)
             except Exception:
                 pass  # never let cleanup block the result

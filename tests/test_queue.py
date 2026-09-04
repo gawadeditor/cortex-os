@@ -2194,8 +2194,13 @@ class TestConsumerHygiene:
 
       Path 2 — topic backlog: process_next must release or skip the claimed
         topic after a pipeline exception, so the topic never stays 'claimed':
-          PipelineRejectedError → topic 'skipped' (EP rejection is permanent)
-          Any other exception   → topic 'queued' (infrastructure error; retry)
+          PipelineRejectedError, QARejectedError, ComplianceRejectedError,
+          GatedExecutionRefused → topic 'skipped' (the content/plan itself
+            is the problem — permanent, not retried)
+          Retry budget exhausted (any exception) → topic 'skipped' (a plain
+            release would silently reset the cap on the next fresh claim)
+          Any other exception (genuine infrastructure error, still within
+            retry budget) → topic 'queued' or reused as the retry identity
 
     run_pipeline is always patched — no providers, no content generation.
     """
@@ -2397,6 +2402,107 @@ class TestConsumerHygiene:
         topic = get_topic(topic_id, db_path=db_path)
         assert topic["status"] == "queued", (
             f"expected 'queued' after budget block; got {topic['status']!r}"
+        )
+
+    def test_topic_skipped_on_qa_rejected_error(self, db_path):
+        """
+        QARejectedError means the episode itself failed QA at the end of a
+        full run -- the topic/plan is the problem, same as an EP rejection,
+        not an infrastructure hiccup. Before this fix it was release_topic()'d
+        like a transient error, so the very next scheduler tick re-claimed
+        the same topic and reproduced the identical QA failure forever
+        (observed live 2026-09-04: ep_90382de2, ~20 retries / ~90 minutes,
+        each one a real paid MUAPI attempt) -- must be 'skipped', not 'queued'.
+        """
+        import hypogeum.pipeline as pl_mod
+
+        topic_id, _ = self._setup(db_path, channel_id="ch_qa_rejected")
+
+        rejected = pl_mod.QARejectedError(
+            episode_id="ep_qa", report={"failures": ["render_package: production_ready=False"]},
+        )
+        with patch("hypogeum.pipeline.run_pipeline", side_effect=rejected):
+            result = process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
+            )
+
+        assert result.status == "failed"
+        topic = get_topic(topic_id, db_path=db_path)
+        assert topic["status"] == "skipped", (
+            f"expected 'skipped' after QA rejection; got {topic['status']!r}"
+        )
+
+    def test_topic_skipped_on_compliance_rejected_error(self, db_path):
+        """Same reasoning as QARejectedError -- Rights & Compliance rejection
+        is a judgment on this exact content, not infrastructure."""
+        import hypogeum.pipeline as pl_mod
+
+        topic_id, _ = self._setup(db_path, channel_id="ch_compliance_rejected")
+
+        rejected = pl_mod.ComplianceRejectedError(
+            episode_id="ep_compliance", report={"failures": ["unlicensed source footage"]},
+        )
+        with patch("hypogeum.pipeline.run_pipeline", side_effect=rejected):
+            result = process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
+            )
+
+        assert result.status == "failed"
+        topic = get_topic(topic_id, db_path=db_path)
+        assert topic["status"] == "skipped", (
+            f"expected 'skipped' after compliance rejection; got {topic['status']!r}"
+        )
+
+    def test_topic_skipped_on_gated_execution_refused(self, db_path):
+        """
+        GatedExecutionRefused (worker_integration.py) covers a profile
+        misconfig or a refused/infeasible/corrupted backward plan -- release
+        would put the topic straight back to backlog with the SAME broken
+        target_publish_at / config, guaranteeing the identical refusal on
+        the very next claim (observed live 2026-09-04: a channel's topic
+        looping on "backward plan infeasible" every scheduler tick).
+        """
+        from hypogeum.worker_integration import GatedExecutionRefused
+
+        topic_id, _ = self._setup(db_path, channel_id="ch_gate_refused")
+
+        refused = GatedExecutionRefused("backward plan infeasible: required_lead_time_seconds=130830")
+        with patch("hypogeum.pipeline.run_pipeline", side_effect=refused):
+            result = process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0),
+            )
+
+        assert result.status == "failed"
+        topic = get_topic(topic_id, db_path=db_path)
+        assert topic["status"] == "skipped", (
+            f"expected 'skipped' after a terminal gate refusal; got {topic['status']!r}"
+        )
+
+    def test_topic_skipped_when_retry_budget_exhausted_not_released_forever(self, db_path):
+        """
+        A TRANSIENT exception (RuntimeError, no failure_policy) that has
+        already used up its bounded auto-retry budget must be skipped, not
+        plain-released -- release_topic() puts the row back in ordinary
+        backlog, where the next scheduler tick claims it into a BRAND NEW
+        run_queue row whose own retry_count starts at 0, silently resetting
+        the cap this test is protecting and reproducing the same failure
+        forever, exactly like the QA-rejection and gate-refusal cases above.
+        """
+        topic_id, _ = self._setup(db_path, channel_id="ch_retry_exhausted")
+
+        with patch("hypogeum.pipeline.run_pipeline", side_effect=RuntimeError("provider timeout")):
+            result = process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0, QUEUE_MAX_AUTO_RETRIES=0),
+            )
+
+        assert result.status == "failed"
+        topic = get_topic(topic_id, db_path=db_path)
+        assert topic["status"] == "skipped", (
+            f"expected 'skipped' once the retry budget is exhausted; got {topic['status']!r}"
         )
 
     def test_topic_not_touched_on_dry_run(self, db_path):

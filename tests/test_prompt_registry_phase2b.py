@@ -112,8 +112,8 @@ class TestPromptRegistryMetadata:
         from hypogeum.prompt_registry import get_prompt
         r = get_prompt(name)
         assert r is not None
-        assert r.prompt_version in ("v1", "v2", "v3"), (
-            f"{name}: prompt_version={r.prompt_version!r} (must be v1, v2, or v3)"
+        assert r.prompt_version in ("v1", "v2", "v3", "v4"), (
+            f"{name}: prompt_version={r.prompt_version!r} (must be v1, v2, v3, or v4)"
         )
 
     @pytest.mark.parametrize("name", sorted(_EXPECTED_NAMES))
@@ -380,8 +380,8 @@ class TestPromptApiList:
         resp = client.get("/api/prompts")
         data = resp.get_json()
         for record in data["prompts"]:
-            assert record["prompt_version"] in ("v1", "v2", "v3"), (
-                f"{record['name']}: prompt_version={record['prompt_version']!r} (must be v1, v2, or v3)"
+            assert record["prompt_version"] in ("v1", "v2", "v3", "v4"), (
+                f"{record['name']}: prompt_version={record['prompt_version']!r} (must be v1, v2, v3, or v4)"
             )
 
     def test_api_prompts_char_count_is_positive_int(self, client):

@@ -136,6 +136,23 @@ def run_clip_repair(
     # Build scene_id → scene dict for fast lookup
     scene_by_id: Dict[str, dict] = {s["scene_id"]: s for s in scenes}
 
+    # scene_id → asset_manifest entry (dict, mutated in place on a successful
+    # Strategy B repair below) — this is the ONLY thing that makes a repair
+    # visible to anything that reads the manifest afterwards (the production
+    # output gate's _evaluate_all_clips(), a resumed pipeline's checkpoint
+    # loader, a future fill_coverage_deficits() call's represented_shot_ids
+    # bookkeeping). Confirmed live 2026-09-05 (ep_3dee01a9): three scenes
+    # Strategy B successfully regenerated (real portrait clips on disk,
+    # paid, qualified) still carried their ORIGINAL "generation_failed"/
+    # asset_id=None manifest entry, so the gate's asset lookup fell through
+    # to (model=None, width=0, height=0) and hard-failed A_VIDEO/
+    # F_ARTIFACT_COMPATIBILITY for an episode that was actually complete.
+    asset_by_scene: Dict[str, dict] = {
+        a.get("scene_id"): a
+        for a in visual_package.get("asset_manifest", {}).get("assets", [])
+        if isinstance(a, dict)
+    }
+
     result = ClipRepairResult()
     still_missing = list(missing_scene_ids)
 
@@ -266,12 +283,25 @@ def run_clip_repair(
                 if status in ("generated", "reused", "dry_run") and target_path.exists():
                     result.repaired_by_generation.append(missing_sid)
                     still_missing.remove(missing_sid)
+                    # Update the manifest in place so this repair is visible
+                    # to the production output gate / a future resume — see
+                    # the asset_by_scene docstring above.
+                    manifest_entry = asset_by_scene.get(missing_sid)
+                    if manifest_entry is not None:
+                        manifest_entry["asset_id"] = asset_result.get("asset_id")
+                        manifest_entry["generation_status"] = status
+                        manifest_entry["provider"] = asset_result.get("provider", "muapi")
+                        manifest_entry["tier_used"] = asset_result.get("tier_used")
+                        manifest_entry["model"] = asset_result.get("model_used")
+                        manifest_entry["prompt_used"] = asset_result.get("prompt_used")
+                        manifest_entry["fallback_used"] = asset_result.get("fallback_used", False)
                     log.info(
                         "clip_repair_strategy_b_clip",
                         episode_id=episode_id,
                         scene_id=missing_sid,
                         generation_status=status,
                         target_path=str(target_path),
+                        manifest_updated=manifest_entry is not None,
                     )
                 else:
                     log.warn(

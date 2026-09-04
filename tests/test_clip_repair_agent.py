@@ -312,6 +312,63 @@ class TestStrategyB:
         assert "sc_002" in result.repaired_by_generation
         assert result.still_missing == []
 
+    def test_successful_repair_updates_manifest_entry_in_place(self, tmp_path):
+        """A successful Strategy B repair must mutate the scene's own
+        asset_manifest entry (asset_id/generation_status/model/...), not just
+        ClipRepairResult.repaired_by_generation. Regression for a real bug
+        (ep_3dee01a9, 2026-09-05): three scenes were successfully regenerated
+        on disk but their manifest entries stayed frozen at asset_id=None /
+        generation_status="generation_failed" — production_output_gate's
+        _evaluate_all_clips() reads the manifest, not the filesystem, so it
+        reported model=None/0x0 and hard-failed A_VIDEO/F_ARTIFACT_
+        COMPATIBILITY for an episode that was actually complete."""
+        assets_root = tmp_path / "assets"
+        assets_root.mkdir()
+
+        scenes = [_make_scene("sc_broken", scene_index=0, description="a scene")]
+        vp = {
+            "scenes": scenes,
+            "asset_manifest": {"assets": [
+                {
+                    "scene_id": "sc_broken", "asset_id": None,
+                    "generation_status": "generation_failed",
+                    "provider": "muapi", "tier_used": None, "model": None,
+                    "prompt_used": None, "fallback_used": False,
+                },
+            ]},
+        }
+        cfg = _make_config(max_generated=5)
+        log = MagicMock()
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent):
+            _write_generated_clip(output_dir, scene_spec)
+            return {
+                "asset_id": "episodes/ep_x/video/sc_sc_broken",
+                "generation_status": "generated", "provider": "muapi",
+                "tier_used": 2, "model_used": "veo3.1-lite-text-to-video",
+                "prompt_used": "a prompt", "fallback_used": False,
+            }
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit):
+            result = run_clip_repair(
+                visual_package=vp,
+                missing_scene_ids=["sc_broken"],
+                present_clip_ids=[],
+                assets_root=assets_root,
+                config=cfg,
+                episode_id="ep_x",
+                log=log,
+            )
+
+        assert "sc_broken" in result.repaired_by_generation
+        entry = vp["asset_manifest"]["assets"][0]
+        assert entry["asset_id"] == "episodes/ep_x/video/sc_sc_broken"
+        assert entry["generation_status"] == "generated"
+        assert entry["model"] == "veo3.1-lite-text-to-video"
+        assert entry["tier_used"] == 2
+        assert entry["prompt_used"] == "a prompt"
+        assert entry["fallback_used"] is False
+
     def test_generation_capped_at_max_generated(self, tmp_path):
         """Strategy B generates at most CLIP_REPAIR_MAX_GENERATED clips."""
         assets_root = tmp_path / "assets"

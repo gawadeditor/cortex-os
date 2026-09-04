@@ -525,6 +525,55 @@ def tick(
                 updated_at=now_iso,
             )
 
+        # Reactive buffer top-up (2026-09-04). The block above only re-checks
+        # a channel's buffer at its own next_run_at — a schedule that isn't
+        # due yet is invisible to it. So an episode invalidated mid-day
+        # (e.g. superseded as unpublishable) drops the buffer below target
+        # and NOTHING notices until tomorrow's tick, even though the whole
+        # point of the buffer/catch-up guard is "never leave the channel
+        # short." This pass re-checks every active channel schedule NOT
+        # already handled above, regardless of next_run_at, and tops the
+        # buffer up immediately — without touching next_run_at/last_run_at,
+        # so the channel's own cadence timer is untouched; this is a
+        # same-day supplement, not a new cycle. Self-limiting: each
+        # scheduled_run created here immediately counts toward
+        # channel_buffer_depth, so a channel that is topped up this tick
+        # reads depth >= target on the very next tick and stops firing.
+        if buffer_target:
+            handled_schedule_ids = {row["schedule_id"] for row in due}
+            other_active = conn.execute(
+                "SELECT * FROM schedules WHERE status = 'active' AND channel_id IS NOT NULL"
+            ).fetchall()
+            for row in other_active:
+                if row["schedule_id"] in handled_schedule_ids:
+                    continue
+                channel_id_r = row["channel_id"]
+                depth = channel_buffer_depth(channel_id_r, conn)
+                if depth >= buffer_target:
+                    continue
+                gap = buffer_target - depth
+                n_runs = min(max(1, gap), catchup_max)
+                from hypogeum.logger import get_logger
+                get_logger(agent="scheduler").info(
+                    "scheduled_tick_reactive_topup",
+                    schedule_id=row["schedule_id"], channel_id=channel_id_r,
+                    buffer_depth=depth, buffer_target=buffer_target,
+                    runs_created=n_runs,
+                )
+                for _ in range(n_runs):
+                    scheduled_run_id = _new_id()
+                    insert_scheduled_run(
+                        conn,
+                        scheduled_run_id=scheduled_run_id,
+                        schedule_id=row["schedule_id"],
+                        channel_id=channel_id_r,
+                        episode_id=None,
+                        scheduled_for=now_iso,
+                        status="pending",
+                        created_at=now_iso,
+                    )
+                    created_ids.append(scheduled_run_id)
+
         conn.commit()
     finally:
         conn.close()

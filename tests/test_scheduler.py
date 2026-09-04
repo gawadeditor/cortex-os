@@ -1035,3 +1035,56 @@ class TestProduceAheadBufferGuard:
         self._seed_run_queue(db_path, "ch_b", 5)              # buffer on a DIFFERENT channel
         result = tick(db_path=db_path, now=_now())
         assert len(result) == 1
+
+    def test_reactive_topup_fires_for_a_not_yet_due_schedule(self, db_path, monkeypatch):
+        """A schedule that already ticked today and rolled next_run_at
+        forward (e.g. it saw the buffer full) must still get topped up the
+        same day if the buffer later drops below target — e.g. a 'safety'
+        episode turns out unpublishable and is superseded. Regression for
+        the exact gap: nothing re-checked the buffer until tomorrow."""
+        import hypogeum.scheduler as sch
+        monkeypatch.setattr(sch, "_PRODUCTION_BUFFER_TARGET", 2)
+        monkeypatch.setattr(sch, "_PRODUCTION_CATCHUP_MAX", 2)
+        future = _now() + timedelta(hours=20)   # not due — already ticked today
+        sid = create_schedule(db_path=db_path, scope="channel", channel_id="ch_topup",
+                              cadence="daily", next_run_at=future)
+        # buffer depth 0 (nothing queued) — below target of 2
+        result = tick(db_path=db_path, now=_now())
+        assert len(result) == 2
+        assert {_sched_run_row(db_path, r)["channel_id"] for r in result} == {"ch_topup"}
+        # next_run_at is untouched — this was a same-day supplement, not a new cycle
+        row = _schedule_row(db_path, sid)
+        assert row["next_run_at"] == future.isoformat()
+
+    def test_reactive_topup_self_limits_once_buffer_is_full(self, db_path, monkeypatch):
+        """Once the top-up closes the gap, the very next tick sees
+        depth >= target and creates nothing more — no runaway enqueue loop."""
+        import hypogeum.scheduler as sch
+        monkeypatch.setattr(sch, "_PRODUCTION_BUFFER_TARGET", 2)
+        monkeypatch.setattr(sch, "_PRODUCTION_CATCHUP_MAX", 2)
+        future = _now() + timedelta(hours=20)
+        create_schedule(db_path=db_path, scope="channel", channel_id="ch_selflimit",
+                        cadence="daily", next_run_at=future)
+        first = tick(db_path=db_path, now=_now())
+        assert len(first) == 2
+        second = tick(db_path=db_path, now=_now())
+        assert second == []
+
+    def test_reactive_topup_skips_a_channel_already_at_target(self, db_path, monkeypatch):
+        import hypogeum.scheduler as sch
+        monkeypatch.setattr(sch, "_PRODUCTION_BUFFER_TARGET", 2)
+        future = _now() + timedelta(hours=20)
+        create_schedule(db_path=db_path, scope="channel", channel_id="ch_ok",
+                        cadence="daily", next_run_at=future)
+        self._seed_run_queue(db_path, "ch_ok", 2)   # already at target
+        result = tick(db_path=db_path, now=_now())
+        assert result == []
+
+    def test_reactive_topup_disabled_with_target_zero(self, db_path, monkeypatch):
+        import hypogeum.scheduler as sch
+        monkeypatch.setattr(sch, "_PRODUCTION_BUFFER_TARGET", 0)
+        future = _now() + timedelta(hours=20)
+        create_schedule(db_path=db_path, scope="channel", channel_id="ch_notarget",
+                        cadence="daily", next_run_at=future)
+        result = tick(db_path=db_path, now=_now())
+        assert result == []

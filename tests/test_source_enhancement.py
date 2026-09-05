@@ -50,7 +50,15 @@ from hypogeum.providers.enhancement import (
     get_enhancement_provider,
     register_provider,
 )
-from hypogeum.source_enhancement import _clip_has_black_tail, qualify_asset, run_source_enhancement
+from hypogeum.source_enhancement import (
+    _clip_has_black_tail,
+    _detect_reference_frame_leak_seconds,
+    _trim_leading_seconds,
+    _REF_LEAK_MIN_LEAK_SECONDS,
+    check_and_trim_reference_frame_leak,
+    qualify_asset,
+    run_source_enhancement,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +86,25 @@ def _make_black_tail_clip(
         ["ffmpeg", "-y",
          "-f", "lavfi", "-i", f"testsrc=s={width}x{height}:r=24:d={real_seconds}",
          "-f", "lavfi", "-i", f"color=c=black:s={width}x{height}:r=24:d={black_seconds}",
+         "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]",
+         "-map", "[v]", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path)],
+        capture_output=True, timeout=30,
+    )
+
+
+def _make_reference_leak_clip(
+    path: Path, width: int, height: int, leak_seconds: float, real_seconds: float,
+) -> None:
+    """A clip that opens on a static solid-color frame (standing in for
+    the I2V conditioning reference sheet) for `leak_seconds`, then hard-
+    cuts to real moving (testsrc) content for `real_seconds` -- the real
+    ep_5f72565c ("Pip the Hedgehog") defect shape confirmed live
+    2026-09-05 via direct frame inspection."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["ffmpeg", "-y",
+         "-f", "lavfi", "-i", f"color=c=white:s={width}x{height}:r=24:d={leak_seconds}",
+         "-f", "lavfi", "-i", f"testsrc=s={width}x{height}:r=24:d={real_seconds}",
          "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]",
          "-map", "[v]", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path)],
         capture_output=True, timeout=30,
@@ -1066,3 +1093,136 @@ class TestQualifyAssetRejectsBlackTail:
         assert changed is True
         se = asset["source_enhancement"]
         assert se["validation_result"] == "skipped_native_resolution"
+
+
+class TestReferenceFrameLeakDetection:
+    """Regression for the 2026-09-05 ep_5f72565c ("Pip the Hedgehog")
+    defect: wan2.7-image-to-video's raw output opens with several frames
+    that are the entity's own multi-angle reference sheet, confirmed live
+    via direct frame inspection (see hypogeum/source_enhancement.py's own
+    docstrings for the full story)."""
+
+    def test_detects_genuine_leak(self, tmp_path):
+        clip_path = tmp_path / "leak.mp4"
+        _make_reference_leak_clip(clip_path, 640, 360, leak_seconds=0.3, real_seconds=1.5)
+
+        leak_seconds = _detect_reference_frame_leak_seconds(clip_path)
+
+        assert leak_seconds >= _REF_LEAK_MIN_LEAK_SECONDS
+        assert leak_seconds < 0.6  # must land near the real 0.3s cut, not drift into real content
+
+    def test_clean_clip_has_no_leak(self, tmp_path):
+        clip_path = tmp_path / "clean.mp4"
+        _make_clip(clip_path, 640, 360, duration=2.0)
+
+        assert _detect_reference_frame_leak_seconds(clip_path) == 0.0
+
+    def test_corrupt_clip_is_not_flagged(self, tmp_path):
+        """Must not raise -- deliberately conservative, never trims on
+        uncertainty."""
+        clip_path = tmp_path / "corrupt.mp4"
+        clip_path.parent.mkdir(parents=True, exist_ok=True)
+        clip_path.write_bytes(b"not a real video file")
+
+        assert _detect_reference_frame_leak_seconds(clip_path) == 0.0
+
+    def test_trim_leading_seconds_shortens_clip(self, tmp_path):
+        clip_path = tmp_path / "leak.mp4"
+        _make_reference_leak_clip(clip_path, 640, 360, leak_seconds=0.3, real_seconds=1.5)
+        before = _probe_video_stream_duration(clip_path)
+
+        trimmed = _trim_leading_seconds(clip_path, 0.3, MagicMock())
+
+        assert trimmed is True
+        after = _probe_video_stream_duration(clip_path)
+        assert after < before
+        assert before - after == pytest.approx(0.3, abs=0.15)
+
+    def test_trim_leading_seconds_below_min_is_noop(self, tmp_path):
+        clip_path = tmp_path / "clean.mp4"
+        _make_clip(clip_path, 640, 360, duration=1.0)
+        before_bytes = clip_path.read_bytes()
+
+        trimmed = _trim_leading_seconds(clip_path, _REF_LEAK_MIN_LEAK_SECONDS / 2, MagicMock())
+
+        assert trimmed is False
+        assert clip_path.read_bytes() == before_bytes
+
+    def test_trim_leading_seconds_failure_leaves_original_untouched(self, tmp_path):
+        clip_path = tmp_path / "corrupt.mp4"
+        clip_path.write_bytes(b"not a real video file")
+        before_bytes = clip_path.read_bytes()
+
+        trimmed = _trim_leading_seconds(clip_path, 0.3, MagicMock())
+
+        assert trimmed is False
+        assert clip_path.read_bytes() == before_bytes
+        # no leftover temp file from the failed re-encode
+        assert not clip_path.with_suffix(".leaktrim.tmp.mp4").exists()
+
+    def test_check_and_trim_detects_and_trims_i2v_clip(self, tmp_path):
+        clip_path = tmp_path / "sc_i2v.mp4"
+        _make_reference_leak_clip(clip_path, 640, 360, leak_seconds=0.3, real_seconds=1.5)
+        before = _probe_video_stream_duration(clip_path)
+        asset = {"scene_id": "s01", "model": "wan2.7-image-to-video"}
+
+        changed = check_and_trim_reference_frame_leak(asset, clip_path, MagicMock())
+
+        assert changed is True
+        rfl = asset["reference_frame_leak"]
+        assert rfl["trimmed"] is True
+        assert rfl["detected_seconds"] >= _REF_LEAK_MIN_LEAK_SECONDS
+        assert _probe_video_stream_duration(clip_path) < before
+
+    def test_check_and_trim_leaves_clean_clip_untouched(self, tmp_path):
+        clip_path = tmp_path / "sc_clean.mp4"
+        _make_clip(clip_path, 640, 360, duration=2.0)
+        before_bytes = clip_path.read_bytes()
+        asset = {"scene_id": "s02", "model": "wan2.7-image-to-video"}
+
+        changed = check_and_trim_reference_frame_leak(asset, clip_path, MagicMock())
+
+        assert changed is True
+        rfl = asset["reference_frame_leak"]
+        assert rfl["detected_seconds"] == 0.0
+        assert rfl["trimmed"] is False
+        assert clip_path.read_bytes() == before_bytes
+
+    def test_gate_skips_text_to_video_model(self, tmp_path):
+        """The artifact is specific to I2V conditioning-frame leakage --
+        a T2V clip (even one shaped like a leak) must never be touched or
+        recorded, per this function's own documented model-name gate."""
+        clip_path = tmp_path / "sc_t2v.mp4"
+        _make_reference_leak_clip(clip_path, 640, 360, leak_seconds=0.3, real_seconds=1.5)
+        before_bytes = clip_path.read_bytes()
+        asset = {"scene_id": "s03", "model": "veo3.1-lite-text-to-video"}
+
+        changed = check_and_trim_reference_frame_leak(asset, clip_path, MagicMock())
+
+        assert changed is False
+        assert "reference_frame_leak" not in asset
+        assert clip_path.read_bytes() == before_bytes
+
+    def test_idempotent_second_call_is_noop(self, tmp_path):
+        """A resumed run must never re-sample a clip already checked --
+        the asset dict is the only source of truth for that."""
+        clip_path = tmp_path / "sc_i2v.mp4"
+        _make_reference_leak_clip(clip_path, 640, 360, leak_seconds=0.3, real_seconds=1.5)
+        asset = {"scene_id": "s04", "model": "wan2.7-image-to-video"}
+
+        first = check_and_trim_reference_frame_leak(asset, clip_path, MagicMock())
+        recorded = dict(asset["reference_frame_leak"])
+        after_first_bytes = clip_path.read_bytes()
+
+        second = check_and_trim_reference_frame_leak(asset, clip_path, MagicMock())
+
+        assert first is True
+        assert second is False
+        assert asset["reference_frame_leak"] == recorded
+        assert clip_path.read_bytes() == after_first_bytes
+
+
+def _probe_video_stream_duration(path: Path) -> float:
+    from hypogeum.source_enhancement import _probe_video_stream
+    probe = _probe_video_stream(path)
+    return probe["duration"] if probe else 0.0

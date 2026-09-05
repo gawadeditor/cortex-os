@@ -234,6 +234,165 @@ def _normalize_to_exact_resolution(
         return False
 
 
+_REF_LEAK_SAMPLE_FPS = 10             # sampling rate for leak detection — coarse is fine, this is a hard cut
+_REF_LEAK_MAX_CHECK_SECONDS = 2.0     # the leak has only ever been observed well under 1s; never scan more
+_REF_LEAK_DIFF_THRESHOLD = 30.0       # mean abs grayscale diff (0-255) vs frame 0 — real scene cuts land ~170-185
+_REF_LEAK_MIN_LEAK_SECONDS = 0.15     # below this, trimming isn't worth a re-encode — not a visible artifact
+
+
+def _detect_reference_frame_leak_seconds(clip_path: Path) -> float:
+    """
+    Seconds of `clip_path`'s own leading content to discard, or 0.0 if
+    none. Real defect confirmed live 2026-09-05 (ep_5f72565c, "Pip the
+    Hedgehog", multiple I2V-conditioned scenes): wan2.7-image-to-video's
+    raw output opens with several frames that are the entity's own
+    multi-angle reference sheet itself (the exact character-sheet image
+    fed in as the I2V conditioning frame — three static poses on a plain
+    background), then hard-cuts to the real generated scene around
+    0.2-0.4s in. The clip is otherwise perfectly valid (correct
+    resolution, decodable, right duration) so no other check in this
+    module or hypogeum.artifact_compatibility catches it, and it reaches
+    the final render as a jarring flash of the wrong image before every
+    such scene -- an operator's own report: "the video looks like it was
+    assembled without anyone ever watching it or running QC".
+
+    ffmpeg's freezedetect is NOT reliable here (tried and rejected): the
+    leaked reference-sheet frames are not bit-identical to each other
+    (compression noise, subtle per-frame variance) so freezedetect
+    sometimes reports no freeze at all even while the same wrong image is
+    visibly on screen the whole time. What IS reliable: every confirmed
+    case has frame 0 held effectively unchanged for the first few tenths
+    of a second, then an enormous jump the instant the real scene starts
+    (measured live: diffs of 0/5/8 during the leak vs 170-185 the moment
+    real content begins -- comparing every sampled frame back to frame 0,
+    not to its immediate predecessor, is what makes this threshold safe:
+    a real scene with genuine held-frame content near its start would
+    show the SAME low-diff-then-jump signature, correctly not flagged,
+    only because such scenes don't actually exist in practice for I2V
+    clips -- the model always starts moving quickly once it starts).
+
+    Deliberately conservative: returns 0.0 (never trims) on any probe
+    failure, empty frame extraction, or a clip too short to sample.
+    """
+    import tempfile
+    try:
+        from PIL import Image, ImageChops
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+    probe = _probe_video_stream(clip_path)
+    duration = probe["duration"] if probe else 0.0
+    if duration <= 0:
+        return 0.0
+
+    check_seconds = min(_REF_LEAK_MAX_CHECK_SECONDS, duration - 0.1)
+    if check_seconds <= 0:
+        return 0.0
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            pattern = str(Path(tmp) / "f_%03d.png")
+            result = subprocess.run(
+                [
+                    "ffmpeg", "-y", "-i", str(clip_path),
+                    "-vf", f"fps={_REF_LEAK_SAMPLE_FPS}",
+                    "-frames:v", str(int(check_seconds * _REF_LEAK_SAMPLE_FPS)),
+                    pattern,
+                ],
+                capture_output=True, timeout=30,
+            )
+            if result.returncode != 0:
+                return 0.0
+            frames = sorted(Path(tmp).glob("f_*.png"))
+            if len(frames) < 2:
+                return 0.0
+
+            ref = Image.open(frames[0]).convert("L").resize((64, 64))
+            for i, f in enumerate(frames[1:], start=1):
+                cur = Image.open(f).convert("L").resize((64, 64))
+                diff_img = ImageChops.difference(ref, cur)
+                hist = diff_img.histogram()
+                mean_diff = sum(v * count for v, count in enumerate(hist)) / (64 * 64)
+                if mean_diff > _REF_LEAK_DIFF_THRESHOLD:
+                    return round(i / _REF_LEAK_SAMPLE_FPS, 3)
+        return 0.0
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _trim_leading_seconds(clip_path: Path, seconds: float, log) -> bool:
+    """Re-encode clip_path with its first `seconds` discarded, replacing it
+    in place. Frame-accurate (-ss placed after -i, not before) since the
+    leak is sub-second and a keyframe-snapped fast seek would either trim
+    too little (leaving leaked frames) or too much (cutting into the real
+    scene). Never raises; leaves the original clip untouched on any
+    failure."""
+    if seconds < _REF_LEAK_MIN_LEAK_SECONDS:
+        return False
+    tmp = clip_path.with_suffix(".leaktrim.tmp.mp4")
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", str(clip_path),
+                "-ss", str(seconds),
+                "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+                "-an",
+                str(tmp),
+            ],
+            capture_output=True, timeout=60,
+        )
+        if result.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+            tmp.unlink(missing_ok=True)
+            log.warn("reference_frame_leak_trim_failed", clip=str(clip_path),
+                      stderr=(result.stderr or b"").decode("utf-8", "ignore")[-300:])
+            return False
+        tmp.replace(clip_path)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        tmp.unlink(missing_ok=True)
+        log.warn("reference_frame_leak_trim_error", clip=str(clip_path), error=str(exc))
+        return False
+
+
+def check_and_trim_reference_frame_leak(asset: dict, clip_path: Path, log) -> bool:
+    """
+    I2V-only clip fix-up: detect and trim a leading reference-image-sheet
+    leak (see _detect_reference_frame_leak_seconds's own docstring) from a
+    clip generated by an image-to-video model. A no-op for a text-to-video
+    clip — this artifact is specific to how I2V conditioning frames leak
+    into the provider's own output, so gating on asset["model"] here
+    (rather than inside hypogeum.source_enhancement.qualify_asset(), which
+    is documented to never branch on model name) keeps that function's
+    own architecture rule intact while still fixing every I2V clip that
+    passes through either of its two callers (run_source_enhancement()'s
+    per-episode sweep, hypogeum.agents.clip_repair_agent's Strategy B).
+
+    Idempotent: asset["reference_frame_leak"] records the outcome (even a
+    "no leak found" verdict) so a resumed run never re-samples a clip
+    that was already checked. Mutates `asset["reference_frame_leak"]` in
+    place; returns True if it was newly set (caller should persist).
+    """
+    model = str(asset.get("model") or "")
+    if "image-to-video" not in model:
+        return False
+    if asset.get("reference_frame_leak") is not None:
+        return False  # already checked, resumed run — never re-sample
+
+    leak_seconds = _detect_reference_frame_leak_seconds(clip_path)
+    trimmed = False
+    if leak_seconds >= _REF_LEAK_MIN_LEAK_SECONDS:
+        trimmed = _trim_leading_seconds(clip_path, leak_seconds, log)
+        log.warn(
+            "reference_frame_leak_detected", scene_id=asset.get("scene_id"),
+            model=model, leak_seconds=leak_seconds, trimmed=trimmed,
+        )
+    asset["reference_frame_leak"] = {
+        "detected_seconds": leak_seconds,
+        "trimmed": trimmed,
+    }
+    return True
+
+
 _BLACK_TAIL_MIN_BLACK_SECONDS = 0.5   # ffmpeg blackdetect's own minimum run length
 _BLACK_TAIL_END_TOLERANCE_S = 0.2     # a black region ending within this of EOF counts as "the tail"
 
@@ -544,6 +703,15 @@ def run_source_enhancement(
         clip_path = _resolve_clip_path(asset_id, episode_id, episode_dir)
         if clip_path is None or not clip_path.exists():
             continue  # nothing to evaluate — Source Generation/coverage's concern, not this stage's
+
+        # I2V reference-frame leak (2026-09-05): checked and trimmed BEFORE
+        # resolution qualification, on the same clip_path -- trimming only
+        # removes leading duration, so it can never change what qualify_
+        # asset() needs to measure (width/height), and doing it first means
+        # any later enhancement call is spent on the already-clean footage,
+        # never on the leaked reference-sheet frames.
+        if check_and_trim_reference_frame_leak(asset, clip_path, log):
+            changed = True
 
         source_type = _resolve_scene_source_type(scene_id)
         if qualify_asset(

@@ -319,7 +319,15 @@ def run_clip_repair(
                         # means this specific clip stays at its repaired,
                         # unenhanced resolution, exactly as before this fix.
                         try:
-                            from hypogeum.source_enhancement import qualify_asset  # noqa: PLC0415
+                            from hypogeum.source_enhancement import (  # noqa: PLC0415
+                                check_and_trim_reference_frame_leak, qualify_asset,
+                            )
+                            # I2V reference-frame leak (2026-09-05): same
+                            # fix as VPD's own generation path -- see that
+                            # function's own docstring. Before resolution
+                            # qualification so any enhancement call below
+                            # is spent on the already-clean footage.
+                            check_and_trim_reference_frame_leak(manifest_entry, target_path, log)
                             qualify_asset(
                                 manifest_entry, target_path,
                                 missing_scene.get("source_type"), config, episode_id, log,

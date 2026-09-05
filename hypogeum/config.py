@@ -277,6 +277,8 @@ class Config:
     CINEMATIC_DIRECTOR_MAX_RETRIES: int       # default: 2 (bounded transient-retry allowance for automatic batched cinematic planning; exhausted retries fail closed -- never a duration-blind fallback plan)
     MUAPI_WEBHOOK_URL: Optional[str]
     MUAPI_CREDIT_WARNING_THRESHOLD: Optional[float]  # USD; default: None (off)
+    MUAPI_HOURLY_SPEND_LIMIT_USD: Optional[float]  # USD/hour; default 45.0 — runaway-spend breaker (0/None = off)
+    MUAPI_CONSECUTIVE_FAILURE_LIMIT: int  # default 3 — consecutive failed runs before the breaker trips (0 = off)
 
     # ------------------------------------------------------------------
     # Source Enhancement Stage (2026-08-02) — provider-agnostic. Never
@@ -524,6 +526,17 @@ class Config:
         self.CINEMATIC_DIRECTOR_MAX_RETRIES = _get_int("CINEMATIC_DIRECTOR_MAX_RETRIES", default=2)
         self.MUAPI_WEBHOOK_URL = _get_optional("MUAPI_WEBHOOK_URL")
         self.MUAPI_CREDIT_WARNING_THRESHOLD = _get_float("MUAPI_CREDIT_WARNING_THRESHOLD")
+        # Runaway-spend circuit breaker (hypogeum.muapi_spend_breaker): the
+        # worker auto-pauses NEW production (queue_paused=1, publishing
+        # continues) when EITHER rolling-hour MUAPI spend crosses the limit
+        # OR that many episode runs fail consecutively — so a failure cascade
+        # can't drain the vendor account. 0/None disables that check.
+        self.MUAPI_HOURLY_SPEND_LIMIT_USD = _get_float(
+            "MUAPI_HOURLY_SPEND_LIMIT_USD", default=45.0,
+        )
+        self.MUAPI_CONSECUTIVE_FAILURE_LIMIT = _get_int(
+            "MUAPI_CONSECUTIVE_FAILURE_LIMIT", default=3,
+        )
 
         # --- Source Enhancement Stage (provider-agnostic) ---
         self.ENHANCEMENT_ENABLED = _get_bool("ENHANCEMENT_ENABLED", default=True)

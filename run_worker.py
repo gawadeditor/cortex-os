@@ -1113,7 +1113,11 @@ def run_iteration(
         )
     if (queue_paused and not bypass_pause_for_bounded_run) or not clearance.cleared:
         if queue_paused:
-            log.info("poll queue_paused skipping_claim")
+            _pause_reason = _wc_get("queue_paused_reason", "", db_path)
+            log.info(
+                "poll queue_paused skipping_claim%s",
+                f" reason={_pause_reason}" if _pause_reason else "",
+            )
         else:
             log.warning("poll not_cleared skipping_claim reason=%s", clearance.reason)
         from hypogeum.queue import PollResult
@@ -1502,6 +1506,26 @@ def run_worker(
                 log.warning("weekly_reservation_reaper_failed error=%s", _reap.get("error"))
         except Exception as exc:  # noqa: BLE001
             log.warning("weekly_reservation_reaper_error error=%s", exc)
+
+        # Runaway-spend circuit breaker: auto-pause NEW production (publishing
+        # keeps running) when rolling-hour MUAPI spend or the consecutive-
+        # failure streak crosses its limit, so a failure cascade cannot drain
+        # the vendor account. Deliberately does not auto-recover — once
+        # tripped, the operator clears queue_paused after fixing the cause.
+        try:
+            from hypogeum.muapi_spend_breaker import check_muapi_spend_breaker
+            _br = check_muapi_spend_breaker(config=config, db_path=db_path, log=log)
+            if _br.get("tripped_now"):
+                log.error(
+                    "muapi_spend_breaker TRIPPED — production paused. hour_spend=$%.2f "
+                    "consecutive_failures=%d reason=%s",
+                    _br.get("hour_spend_usd", 0.0), _br.get("consecutive_failures", 0),
+                    _br.get("reason"),
+                )
+            elif not _br.get("checked") and _br.get("error"):
+                log.warning("muapi_spend_breaker_error error=%s", _br.get("error"))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("muapi_spend_breaker_wire_error error=%s", exc)
 
         # Publish-attempt reconciliation: a process that died between the
         # submission_ledger 'submitting' transition and recording the

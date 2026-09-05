@@ -1040,6 +1040,50 @@ def run_assembly_agent(
     render_status = render_manifest["render_status"]
 
     # ------------------------------------------------------------------
+    # E0.5. Script Package text_overlays burn-in (2026-09-05) — see
+    # _burn_text_overlays()'s own docstring for why this exists. Runs
+    # before the channel outro append so beat timing is computed against
+    # the pre-outro narration timeline (the outro is purely appended
+    # afterwards and never shifts an earlier timestamp anyway, but this
+    # keeps the two steps independent). Best-effort: a missing ffmpeg
+    # capability or any failure ships the episode without its on-screen
+    # text, same fail-open posture as the outro and caption burn.
+    # ------------------------------------------------------------------
+    if render_manifest.get("main_render", {}).get("file_exists"):
+        try:
+            _text_overlays = (script_package or {}).get("text_overlays") or []
+        except Exception:  # noqa: BLE001
+            _text_overlays = []
+        if _text_overlays:
+            _ffb_ov = config.FFMPEG_BINARY if isinstance(getattr(config, "FFMPEG_BINARY", None), str) else "ffmpeg"
+            try:
+                from hypogeum.agents.video_renderer import _probe_drawtext_filter_available  # noqa: PLC0415
+                if not _probe_drawtext_filter_available(_ffb_ov):
+                    log.warn("text_overlay_burn_skipped_no_drawtext", episode_id=episode_id,
+                             channel_id=channel_id, ffmpeg=_ffb_ov)
+                else:
+                    try:
+                        _res_ov = str(render_manifest.get("main_resolution") or "1920x1080").lower().split("x")
+                        _w_ov, _h_ov = int(_res_ov[0]), int(_res_ov[1])
+                    except Exception:  # noqa: BLE001
+                        _w_ov, _h_ov = 1920, 1080
+                    _beat_starts = _compute_beat_start_seconds(
+                        (script_package or {}).get("sections", []),
+                        narration_package.get("narration_segments", []),
+                    )
+                    _burned = _burn_text_overlays(
+                        Path(render_manifest["main_render"]["file_path"]),
+                        _text_overlays, _beat_starts, _w_ov, _h_ov, _ffb_ov, log,
+                    )
+                    if _burned:
+                        render_manifest["main_render"]["file_size_bytes"] = (
+                            Path(render_manifest["main_render"]["file_path"]).stat().st_size
+                        )
+                        render_manifest["text_overlays_burned"] = _burned
+            except Exception as exc:  # noqa: BLE001 - never block the render
+                log.warn("text_overlay_burn_resolve_failed", episode_id=episode_id, error=str(exc))
+
+    # ------------------------------------------------------------------
     # E1. Channel branded outro (2026-09-01) — append the channel's fixed
     # sign-off clip (channel_packages/<channel_id>/outro.mp4) to the main
     # render, if it has one. Branding, not narrated content: this runs
@@ -1716,6 +1760,132 @@ def _compute_chapter_timestamps(
             cursor += beat_durations.get(beat_id, 0.0)
 
     return result
+
+
+def _compute_beat_start_seconds(
+    script_sections: list,
+    narration_segments: list,
+) -> dict:
+    """
+    Per-beat counterpart to _compute_chapter_timestamps: the cumulative
+    start-time (seconds) of every narration beat in the final mixed
+    narration timeline, keyed by beat_id.
+
+    Used to place Script Package text_overlays[] (opening_hook /
+    key_information / payoff on-screen cards) at the moment their own
+    beat_reference actually starts playing -- see _burn_text_overlays().
+    """
+    beat_durations: dict[str, float] = {}
+    for seg in narration_segments:
+        beat_ref = seg.get("beat_reference", "")
+        if beat_ref:
+            beat_durations[beat_ref] = float(seg.get("duration_seconds", 0.0) or 0.0)
+
+    starts: dict[str, float] = {}
+    cursor = 0.0
+    for sec in script_sections:
+        for beat in sec.get("narration_beats", []):
+            beat_id = beat.get("beat_id", "")
+            if beat_id:
+                starts[beat_id] = cursor
+            cursor += beat_durations.get(beat_id, 0.0)
+    return starts
+
+
+def _escape_drawtext(text: str) -> str:
+    """Escape a literal string for safe use inside an ffmpeg drawtext
+    `text=` filter argument. Order matters: backslash first (or later
+    escapes would double-escape), then the filter-graph-special chars."""
+    out = text.replace("\\", "\\\\")
+    for ch in (":", "'", "%", ",", "["):
+        out = out.replace(ch, "\\" + ch)
+    return out
+
+
+def _burn_text_overlays(
+    main_render_path: Path,
+    text_overlays: list,
+    beat_starts: dict,
+    width: int,
+    height: int,
+    ffmpeg_binary: str,
+    log,
+) -> int:
+    """
+    Burn Script Package text_overlays[] (opening_hook / key_information /
+    payoff on-screen cards) onto the finished main render via ffmpeg's
+    drawtext filter -- the renderer these have needed since Script Engine
+    started producing them. TimelineEntry carried this data all the way to
+    the timeline stage (hypogeum.agents.timeline_builder) and nothing ever
+    read it: an episode's script could design a closing "Follow for more"
+    card and it would never reach a single pixel (found 2026-09-05
+    investigating ep_19c9fc5f's "no closing/CTA" report).
+
+    Each overlay is shown for its own display_duration_seconds starting at
+    its beat_reference's actual narration start time (from
+    _compute_beat_start_seconds) -- gated with drawtext's own `enable`
+    expression so a single re-encode pass burns every card. An overlay
+    whose beat_reference has no resolved start time is skipped (never
+    guessed at 0.0 -- a wrongly-timed card is worse than a missing one).
+
+    Fails open like _append_channel_outro: returns 0 (original untouched)
+    on missing input, no resolvable overlays, or any ffmpeg failure -- an
+    episode ships without its on-screen text rather than not at all.
+    Caller must gate this on hypogeum.agents.video_renderer.
+    _probe_drawtext_filter_available(ffmpeg_binary) (libfreetype) the same
+    way caption burn-in gates on libass, since a build lacking it would
+    otherwise fail every call here.
+    """
+    import subprocess  # noqa: PLC0415
+
+    if not main_render_path.exists() or not text_overlays:
+        return 0
+
+    font_size = max(24, round(width * 0.045))
+    box_border = max(8, round(font_size * 0.35))
+    drawtext_filters = []
+    for ov in text_overlays:
+        text = str(ov.get("text") or "").strip()
+        beat_ref = ov.get("beat_reference") or ""
+        start = beat_starts.get(beat_ref)
+        duration = float(ov.get("display_duration_seconds") or 0.0)
+        if not text or start is None or duration <= 0:
+            continue
+        end = start + duration
+        escaped = _escape_drawtext(text)
+        drawtext_filters.append(
+            f"drawtext=text='{escaped}':fontsize={font_size}:fontcolor=white:"
+            f"box=1:boxcolor=black@0.55:boxborderw={box_border}:"
+            f"x=(w-text_w)/2:y=h*0.78-(text_h/2):"
+            f"enable='between(t,{start:.3f},{end:.3f})'"
+        )
+    if not drawtext_filters:
+        return 0
+
+    tmp = main_render_path.with_suffix(".with_overlays.tmp.mp4")
+    cmd = [
+        ffmpeg_binary, "-y", "-i", str(main_render_path),
+        "-vf", ",".join(drawtext_filters),
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-c:a", "copy",
+        "-movflags", "+faststart", str(tmp),
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if r.returncode != 0 or not tmp.exists():
+            log.warn("assembly_text_overlay_burn_failed", stderr=(r.stderr or "")[-300:])
+            tmp.unlink(missing_ok=True)
+            return 0
+        tmp.replace(main_render_path)
+        log.info("assembly_text_overlays_burned", count=len(drawtext_filters))
+        return len(drawtext_filters)
+    except Exception as exc:  # noqa: BLE001
+        log.warn("assembly_text_overlay_burn_error", error=str(exc))
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+        return 0
 
 
 def _format_sources(source_registry: list) -> list:

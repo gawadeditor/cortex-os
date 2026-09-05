@@ -1423,7 +1423,7 @@ def reconcile_stuck_scene_authorization(
                     episode_id=episode_id, scene_id=scene_id, provider_job_id=provider_job_id,
                 )
                 return "still_unresolved"
-            if poll_reason not in ("job_status_failed", "job_status_cancelled"):
+            if not str(poll_reason).startswith(("job_status_failed", "job_status_cancelled")):
                 return "still_unresolved"
             proof = (
                 f"MUAPI confirmed this job will never deliver a result on reconciliation "
@@ -4145,6 +4145,29 @@ def _poll_until_complete(
                 consecutive_400s=consecutive_400s,
                 response_body=resp.text[:500],
             )
+            # A 400 whose body carries a TERMINAL job status (e.g. MUAPI
+            # returns {"detail":{"status":"failed","error":"Insufficient
+            # credits..."}}) is a DEFINITIVE provider failure, not an
+            # ambiguous transport error — surface it as job_status_<status>
+            # (same contract as the 200-path terminal handling below) so the
+            # adapter can cleanly reject it (releasing grant/budget capacity
+            # that was never charged) instead of stranding it as
+            # unknown-acceptance. The provider's own error text is carried
+            # through so clip_repair_agent._is_billing_contradiction() can
+            # still detect a systemic account/billing wall and stop the batch.
+            try:
+                _detail = resp.json().get("detail") or {}
+                _term = str(_detail.get("status", "")).lower()
+            except Exception:  # noqa: BLE001
+                _detail, _term = {}, ""
+            if _term in (_JOB_STATUS_FAILED, _JOB_STATUS_CANCELLED):
+                log.warn(
+                    "muapi_job_failed",
+                    scene_id=scene_id, request_id=request_id,
+                    job_status=_term, poll_attempt=attempt + 1, http_status=400,
+                )
+                _err = str(_detail.get("error", ""))[:200]
+                return None, f"job_status_{_term}: {_err}" if _err else f"job_status_{_term}"
             if consecutive_400s >= _POLL_400_ABORT_THRESHOLD:
                 log.warn(
                     "muapi_poll_400_early_abort",

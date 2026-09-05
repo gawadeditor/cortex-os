@@ -2173,6 +2173,106 @@ class TestPoll400ResponseBodyLogged:
         assert len(status_calls[0][1]["response_body"]) <= 500
 
 
+class TestPoll400TerminalStatusIsDefinitiveFailure:
+    """A 400 whose body carries {"detail":{"status":"failed",...}} (e.g. MUAPI
+    'Insufficient credits') is a DEFINITIVE provider failure — surfaced as
+    job_status_failed on the FIRST such response (no waiting for the abort
+    threshold), carrying the provider error text through. Regression for the
+    2026-09-05 MUAPI-out-of-credits incident where every scene stranded as
+    unknown-acceptance."""
+
+    def _poll(self, body_json: str):
+        from hypogeum.muapi import _poll_until_complete
+        from unittest.mock import MagicMock
+
+        resp = MagicMock()
+        resp.status_code = 400
+        resp.text = body_json
+        resp.json.return_value = __import__("json").loads(body_json)
+
+        cfg = make_config()
+        cfg.MUAPI_MAX_POLL_ATTEMPTS = 10
+        cfg.MUAPI_POLL_INTERVAL_SECONDS = 0
+        with patch("hypogeum.muapi.requests.get", return_value=resp), \
+             patch("hypogeum.muapi.time.sleep"):
+            return _poll_until_complete(request_id="r1", config=cfg, scene_id="s01", log=MagicMock())
+
+    def test_insufficient_credits_400_is_job_status_failed_first_try(self):
+        result, reason = self._poll(
+            '{"detail":{"id":"j1","status":"failed","error":"Insufficient credits. Please top up your account to continue."}}'
+        )
+        assert result is None
+        assert reason.startswith("job_status_failed")
+        assert "insufficient credits" in reason.lower()  # billing text preserved
+
+    def test_cancelled_status_in_400_body(self):
+        result, reason = self._poll('{"detail":{"status":"cancelled"}}')
+        assert result is None
+        assert reason.startswith("job_status_cancelled")
+
+    def test_400_without_terminal_status_still_aborts_on_threshold(self):
+        # a plain 400 with no job status -> unchanged behaviour (http_400_persistent)
+        result, reason = self._poll('{"error":"malformed_request"}')
+        assert result is None
+        assert reason.startswith("http_400_persistent")
+
+
+class TestVideoAdapterDefinitiveFailureRejectsCleanly:
+    """muapi_video_adapter: a provider-reported terminal failure returns
+    outcome='rejected' (so submission_gate releases grant/budget capacity)
+    instead of raising (which submission_gate treats as unknown-acceptance
+    and never releases). A genuine ambiguous timeout still raises."""
+
+    def _make_capability(self):
+        import hashlib
+        from decimal import Decimal
+        from hypogeum.providers.fake_provider_adapter import (
+            AdapterInvocationCapability, compute_capability_checksum,
+        )
+        from hypogeum.providers.muapi_video_adapter import encode_video_payload
+
+        payload_bytes = encode_video_payload(
+            prompt="an assembled prompt", model="veo3.1-lite-text-to-video", aspect_ratio="9:16",
+            duration_seconds=8.0, reference_image_url=None, scene_id="s01", short_id=None,
+            episode_id="ep_credit_test", output_dir="/tmp/does-not-exist",
+        )
+        fields = dict(
+            capability_id="cap_c1", envelope_id="env_c1", envelope_version=1,
+            attempt_id="att_c1", idempotency_key="idem_c1",
+            lease_owner_id="w_c1", lease_fencing_token=1,
+            provider="muapi", model="veo3.1-lite-text-to-video", provider_operation="video.text_to_video",
+            operation_payload_bytes=payload_bytes,
+            operation_payload_sha256=hashlib.sha256(payload_bytes).hexdigest(),
+            operation_payload_schema_version="video.text_to_video/1.0",
+            max_cost_per_call=Decimal("0.39"), currency="USD",
+            budget_reservation_ids=("resv_c1",), issued_at="2026-09-05T00:00:00+00:00",
+            expires_at="2026-09-05T00:05:00+00:00",
+        )
+        cs = compute_capability_checksum(AdapterInvocationCapability(capability_checksum="", **fields))
+        return AdapterInvocationCapability(capability_checksum=cs, **fields)
+
+    def _invoke(self, monkeypatch, poll_return):
+        import hypogeum.muapi as muapi_module
+        from hypogeum.providers.muapi_video_adapter import MuapiVideoAdapter
+        from tests._capability_boundary_stub import install_passthrough
+
+        install_passthrough(monkeypatch)
+        monkeypatch.setattr(muapi_module, "_submit_http", lambda *a, **k: ("req_c1", None))
+        monkeypatch.setattr(muapi_module, "_poll_until_complete", lambda *a, **k: (None, poll_return))
+        return MuapiVideoAdapter().invoke(
+            self._make_capability(), mode="real", on_provider_acknowledged=lambda **k: None,
+        )
+
+    def test_insufficient_credits_failure_returns_rejected(self, monkeypatch):
+        res = self._invoke(monkeypatch, "job_status_failed: Insufficient credits. Please top up.")
+        assert res.outcome == "rejected"
+        assert res.charged_amount is None
+
+    def test_ambiguous_timeout_still_raises(self, monkeypatch):
+        with pytest.raises(RuntimeError, match="did not reach a terminal state"):
+            self._invoke(monkeypatch, "timeout")
+
+
 # ---------------------------------------------------------------------------
 # TestNormalizeThumbnail — _normalize_thumbnail() unit tests
 # ---------------------------------------------------------------------------

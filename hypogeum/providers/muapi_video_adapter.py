@@ -187,13 +187,22 @@ class MuapiVideoAdapter:
 
         result, failure_reason = _poll_until_complete(request_id, config, payload["scene_id"], log)
         if result is None:
-            # A poll timeout/failure after a successful submission is
-            # exactly "possible acceptance, no definitive ack" --
-            # submission_gate.submit() already treats any exception
-            # raised here as unknown_acceptance; we raise rather than
-            # return "rejected" so that safety property applies (never
-            # silently release budget/grant capacity for a call whose
-            # provider-side outcome is genuinely unknown).
+            # A DEFINITIVE terminal failure the provider itself reported
+            # (job_status_failed / job_status_cancelled -- including a 400
+            # body carrying that status, e.g. "Insufficient credits") is a
+            # clean rejection: the job will never deliver and was never
+            # charged, so release grant/budget capacity rather than stranding
+            # it as unknown-acceptance. Only a GENUINELY AMBIGUOUS outcome
+            # (poll timeout, transport error) still raises -- for that the
+            # "possible acceptance, no definitive ack" safety property holds
+            # (submission_gate.submit() treats the raise as unknown_acceptance
+            # and never silently releases a call whose outcome is unknown).
+            if str(failure_reason).startswith(("job_status_failed", "job_status_cancelled")):
+                return AdapterResult(
+                    outcome="rejected", provider_job_id=request_id, provider_request_id=request_id,
+                    charged_amount=None, response_checksum=None,
+                    evidence={"failure_reason": failure_reason},
+                )
             raise RuntimeError(f"MUAPI poll did not reach a terminal state: {failure_reason}")
 
         outputs = result.get("outputs", [])

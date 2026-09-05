@@ -597,6 +597,16 @@ def generate_cadence_recommendation(
             "channel_id": channel_id,
             "avg_view_pct": round(avg, 4),
             "n_snapshots": len(retentions),
+            # avg_signal_strength (2026-09-05 fix): every OTHER action's
+            # evidence carries this key (see generate_actions() above) --
+            # learning.html's insight-foot block reads it unconditionally
+            # (_ev.avg_signal_strength | signal_words) for every pending
+            # action, this function's own being the one exception. Dormant
+            # since this function requires >= 3 real-analytics episodes
+            # (_CADENCE_MIN_EPISODES) and no channel had that many until
+            # today -- the first real content_volume action this system
+            # ever generated 500'd /intelligence/learning outright.
+            "avg_signal_strength": strength,
         }),
         "status":     "pending",
         "created_at": _now_iso(),

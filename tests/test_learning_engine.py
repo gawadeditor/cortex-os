@@ -501,6 +501,15 @@ class TestContentVolumeRecommendation:
         rec = generate_cadence_recommendation(_CV_CH, db_path=db_path)
         assert rec is not None and rec["dimension"] == "content_volume"
         assert rec["action_type"] == "increase"
+        # Regression (2026-09-05): this evidence dict was the one action
+        # type in the whole system missing avg_signal_strength -- every
+        # other action already carries it (see TestGenerateActions below)
+        # and hypogeum.templates.learning.html reads it unconditionally
+        # for every pending action, so the first real content_volume
+        # action this system ever generated 500'd /intelligence/learning
+        # outright the moment a channel crossed 3 real-analytics episodes.
+        assert "avg_signal_strength" in rec["evidence"]
+        assert isinstance(rec["evidence"]["avg_signal_strength"], float)
 
     def test_low_retention_recommends_decrease(self, db_path):
         _cv_channel(db_path, {"shorts_per_week": 7})

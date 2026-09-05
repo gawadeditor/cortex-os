@@ -897,7 +897,16 @@ def signal_strength_words(value) -> dict:
     """avg_signal_strength (−1..1) → {label, level 0-3, direction}."""
     try:
         v = float(value)
-    except (TypeError, ValueError):
+    except Exception:  # noqa: BLE001 — a missing/undefined evidence field
+        # (Jinja's Undefined raises its OWN UndefinedError from __float__,
+        # never TypeError/ValueError -- confirmed live 2026-09-05: the
+        # first real "content_volume" action ever generated,
+        # hypogeum.learning_engine.generate_cadence_recommendation()'s
+        # evidence_json, has never carried an avg_signal_strength key at
+        # all, so /intelligence/learning 500'd the moment a real one
+        # existed, having rendered an always-empty pending list until
+        # then) must render as "no signal shown", not crash the page —
+        # this filter's whole job is to be safe against exactly that.
         return {"label": "", "level": 0, "direction": "flat"}
     mag = abs(v)
     if mag >= 0.35:

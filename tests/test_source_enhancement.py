@@ -55,6 +55,7 @@ from hypogeum.source_enhancement import (
     _detect_reference_frame_leak_seconds,
     _trim_leading_seconds,
     _REF_LEAK_MIN_LEAK_SECONDS,
+    _REF_LEAK_TRIM_SAFETY_MARGIN_SECONDS,
     check_and_trim_reference_frame_leak,
     qualify_asset,
     run_source_enhancement,
@@ -1136,7 +1137,27 @@ class TestReferenceFrameLeakDetection:
         assert trimmed is True
         after = _probe_video_stream_duration(clip_path)
         assert after < before
-        assert before - after == pytest.approx(0.3, abs=0.15)
+        # Requested 0.3s + _REF_LEAK_TRIM_SAFETY_MARGIN_SECONDS (see that
+        # constant's own docstring: ffmpeg's -ss was verified live to
+        # sometimes round down to the source's own frame boundary,
+        # leaving one leaked frame -- the margin guarantees the cut lands
+        # strictly after it).
+        assert before - after == pytest.approx(0.3 + _REF_LEAK_TRIM_SAFETY_MARGIN_SECONDS, abs=0.15)
+
+    def test_trim_leading_seconds_applies_safety_margin(self, tmp_path):
+        """Regression for the 2026-09-05 finding (ep_5f72565c sc_s01/sc_s10/
+        sc_s11): a bare requested cut point sometimes leaves exactly one
+        leaked frame at the front. The actual ffmpeg cut point must be
+        padded past the requested `seconds`, not exactly at it."""
+        clip_path = tmp_path / "leak.mp4"
+        _make_reference_leak_clip(clip_path, 640, 360, leak_seconds=0.5, real_seconds=1.5)
+        before = _probe_video_stream_duration(clip_path)
+
+        _trim_leading_seconds(clip_path, 0.2, MagicMock())
+
+        after = _probe_video_stream_duration(clip_path)
+        cut = before - after
+        assert cut > 0.2, "the actual cut must exceed the bare requested seconds by the safety margin"
 
     def test_trim_leading_seconds_below_min_is_noop(self, tmp_path):
         clip_path = tmp_path / "clean.mp4"

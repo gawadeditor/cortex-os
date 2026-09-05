@@ -238,6 +238,16 @@ _REF_LEAK_SAMPLE_FPS = 10             # sampling rate for leak detection — coa
 _REF_LEAK_MAX_CHECK_SECONDS = 2.0     # the leak has only ever been observed well under 1s; never scan more
 _REF_LEAK_DIFF_THRESHOLD = 30.0       # mean abs grayscale diff (0-255) vs frame 0 — real scene cuts land ~170-185
 _REF_LEAK_MIN_LEAK_SECONDS = 0.15     # below this, trimming isn't worth a re-encode — not a visible artifact
+_REF_LEAK_TRIM_SAFETY_MARGIN_SECONDS = 0.1  # ffmpeg's -ss (even after -i) was verified live (2026-09-05,
+# ep_5f72565c sc_s01/sc_s10/sc_s11) to sometimes round DOWN to the source
+# video's own frame boundary at-or-before the requested timestamp rather
+# than after it, leaving exactly one leaked reference-sheet frame at the
+# very front of an otherwise-correctly-trimmed clip (confirmed via direct
+# frame extraction: frame 0 of the "trimmed" output was still the sheet,
+# frame 1 already real content). Padding the actual cut point by one
+# generous frame-and-a-bit is cheap (real content lost is imperceptible at
+# 0.1s) and guarantees the boundary lands strictly after the source's own
+# frame-rounding, never before it.
 
 
 def _detect_reference_frame_leak_seconds(clip_path: Path) -> float:
@@ -329,12 +339,13 @@ def _trim_leading_seconds(clip_path: Path, seconds: float, log) -> bool:
     failure."""
     if seconds < _REF_LEAK_MIN_LEAK_SECONDS:
         return False
+    cut_at = seconds + _REF_LEAK_TRIM_SAFETY_MARGIN_SECONDS
     tmp = clip_path.with_suffix(".leaktrim.tmp.mp4")
     try:
         result = subprocess.run(
             [
                 "ffmpeg", "-y", "-i", str(clip_path),
-                "-ss", str(seconds),
+                "-ss", str(cut_at),
                 "-c:v", "libx264", "-preset", "medium", "-crf", "18",
                 "-an",
                 str(tmp),

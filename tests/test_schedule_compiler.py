@@ -182,6 +182,51 @@ class TestPerDeliverableSchedulePolicy:
         slots = {d.scheduled_for for d in result.schedule_plan.entries.values()}
         assert len(slots) == 1
 
+    def test_per_weekday_policy_entry_resolves_not_blocked(self, db_path):
+        """Regression (2026-09-05): a deliverable_schedule_policy entry
+        using the per-weekday shape (weekday_time_of_day +
+        default_time_of_day -- see hypogeum.scheduler.compute_next_publish_
+        slot's own docstring) always failed closed here, even though the
+        exact same entry resolves correctly wherever
+        compute_next_publish_slot() is called with it directly. Root
+        cause: this module reconstructed its own schedule dict from the
+        policy entry using only day_of_week/time_of_day, silently
+        dropping weekday_time_of_day/default_time_of_day -- every
+        autonomous release attempt for a channel using this shape (e.g.
+        hypogeum, applied live the same day) failed every single cycle
+        with 'invalid or incomplete', forever, with no exception raised
+        anywhere (compile_schedule_plan_from_channel_package() is a pure,
+        read-only, fails-closed function -- exactly the failure mode this
+        function's own docstring says it should have for a genuinely
+        invalid entry, which this entry never was)."""
+        brand = create_brand_profile(name="Z Brand", db_path=db_path)
+        model = create_model_profile(name="Z Model", db_path=db_path)
+        pub = create_publishing_profile(name="Z Publishing", db_path=db_path)
+        create_channel_profile(
+            channel_id="channel_z", name="channel_z",
+            brand_profile_id=brand.brand_profile_id, model_profile_id=model.model_profile_id,
+            publishing_profile_id=pub.publishing_profile_id, db_path=db_path,
+        )
+        create_channel_operations_profile(
+            channel_id="channel_z", channel_name="channel_z", timezone="UTC",
+            publishing_schedule={"day_of_week": "thursday", "time_of_day": "18:00"},
+            deliverable_schedule_policy={
+                "main_episode": {
+                    "weekday_time_of_day": {"monday": "10:00", "wednesday": "18:00"},
+                    "default_time_of_day": "18:00",
+                },
+            },
+            db_path=db_path,
+        )
+        now = datetime(2026, 9, 5, 0, 0, tzinfo=timezone.utc)  # a Saturday -> default_time_of_day
+        result = compile_schedule_plan_from_channel_package(
+            "channel_z", ["main_episode"], db_path=db_path, now=now, require_explicit_policy=True,
+        )
+        assert result.blocked is False, result.blocked_reason
+        slot = result.schedule_plan.entries["main_episode"].scheduled_for
+        assert slot.hour == 18
+        assert slot.date().isoformat() == "2026-09-05"
+
 
 class TestRequireExplicitPolicy:
     """The autonomous publishing path (require_explicit_policy=True) must

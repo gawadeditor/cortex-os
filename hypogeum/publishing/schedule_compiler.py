@@ -237,7 +237,22 @@ def _compile_bundle_cycle(
 
     anchor_entry = deliverables_decl[anchor_id]
     anchor_tz = anchor_entry.get("timezone") or channel_timezone
-    anchor_schedule = {"day_of_week": anchor_entry.get("day_of_week"), "time_of_day": anchor_entry.get("time_of_day")}
+    anchor_schedule = {
+        "day_of_week": anchor_entry.get("day_of_week"),
+        "time_of_day": anchor_entry.get("time_of_day"),
+        # Per-weekday shape (2026-09-05 fix): this reconstruction used to
+        # drop weekday_time_of_day/default_time_of_day entirely, so a
+        # channel using the per-weekday schedule shape (see
+        # hypogeum.scheduler.compute_next_publish_slot's own docstring)
+        # always resolved to day_of_week=None/time_of_day=None here and
+        # got rejected as "invalid or incomplete", even though the exact
+        # same entry works correctly wherever compute_next_publish_slot()
+        # is called directly with it. compute_next_publish_slot() checks
+        # weekday_time_of_day first and only falls back to day_of_week/
+        # time_of_day, so passing both is always safe.
+        "weekday_time_of_day": anchor_entry.get("weekday_time_of_day"),
+        "default_time_of_day": anchor_entry.get("default_time_of_day"),
+    }
     anchor_slot = compute_next_publish_slot(anchor_schedule, anchor_tz, effective_now)
     if anchor_slot is None:
         raise _BundleCycleBlocked(
@@ -259,7 +274,13 @@ def _compile_bundle_cycle(
             continue
         member_entry = deliverables_decl[deliverable_id]
         member_tz = member_entry.get("timezone") or channel_timezone
-        member_schedule = {"day_of_week": member_entry.get("day_of_week"), "time_of_day": member_entry.get("time_of_day")}
+        # Per-weekday shape: see the matching comment on anchor_schedule above.
+        member_schedule = {
+            "day_of_week": member_entry.get("day_of_week"),
+            "time_of_day": member_entry.get("time_of_day"),
+            "weekday_time_of_day": member_entry.get("weekday_time_of_day"),
+            "default_time_of_day": member_entry.get("default_time_of_day"),
+        }
         relation = member_entry.get("anchor_relation", "after")
 
         if relation == "after":
@@ -442,9 +463,29 @@ def compile_schedule_plan_from_channel_package(
     for deliverable_id in deliverable_ids:
         policy_entry = per_deliverable_policy.get(deliverable_id)
         if policy_entry is not None:
+            # Per-weekday shape (2026-09-05 fix): this reconstruction used
+            # to only carry day_of_week/time_of_day, so a channel whose
+            # deliverable_schedule_policy uses the per-weekday shape (see
+            # hypogeum.scheduler.compute_next_publish_slot's own
+            # docstring) -- weekday_time_of_day + default_time_of_day --
+            # always resolved to day_of_week=None/time_of_day=None here
+            # and got rejected as "invalid or incomplete", even though the
+            # exact same entry works correctly wherever
+            # compute_next_publish_slot() is called directly with it.
+            # Confirmed live 2026-09-05 (hypogeum): every autonomous
+            # release attempt for every episode failed this way from the
+            # moment the per-weekday schedule was applied to the channel's
+            # profile, silently, since compile_schedule_plan_from_channel_
+            # package() is READ-ONLY on failure (no exception, no crash --
+            # just an unresolved blocked_schedule result every cycle,
+            # forever). compute_next_publish_slot() checks
+            # weekday_time_of_day first and only falls back to
+            # day_of_week/time_of_day, so passing both is always safe.
             entry_schedule = {
                 "day_of_week": policy_entry.get("day_of_week"),
                 "time_of_day": policy_entry.get("time_of_day"),
+                "weekday_time_of_day": policy_entry.get("weekday_time_of_day"),
+                "default_time_of_day": policy_entry.get("default_time_of_day"),
             }
             entry_tz = policy_entry.get("timezone") or profile.timezone
             slot_dt = compute_next_publish_slot(entry_schedule, entry_tz, effective_now)

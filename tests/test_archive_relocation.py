@@ -90,6 +90,89 @@ def test_relocates_whole_tree_and_repoints_catalog(dbp, tmp_path):
     assert row["published_at"] == "2026-08-02T12:00:00+00:00"
 
 
+def _seed_episode_row(dbp, episode_id, *, title=None, topic=None):
+    conn = get_connection(dbp)
+    try:
+        conn.execute(
+            "INSERT INTO episodes (episode_id, title, topic, created_at, status) "
+            "VALUES (?,?,?,?,?)",
+            (episode_id, title, topic, "2026-08-01T00:00:00+00:00", "complete"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+class TestArchiveFolderName:
+    """Regression: an operator's own report that an archived episode's
+    folder must be recognisable by its title, not just its opaque
+    episode_id (2026-09-05)."""
+
+    def test_uses_title_when_present(self, dbp):
+        from hypogeum.archive_relocation import _archive_folder_name
+        _seed_episode_row(dbp, "ep_x1", title="The Real Published Title", topic="working topic")
+        assert _archive_folder_name("ep_x1", dbp) == "ep_x1 - The Real Published Title"
+
+    def test_falls_back_to_topic_when_title_empty(self, dbp):
+        from hypogeum.archive_relocation import _archive_folder_name
+        _seed_episode_row(dbp, "ep_x2", title=None, topic="The Working Topic")
+        assert _archive_folder_name("ep_x2", dbp) == "ep_x2 - The Working Topic"
+
+    def test_falls_back_to_bare_id_when_no_episode_row(self, dbp):
+        from hypogeum.archive_relocation import _archive_folder_name
+        assert _archive_folder_name("ep_nowhere", dbp) == "ep_nowhere"
+
+    def test_falls_back_to_bare_id_when_title_and_topic_both_empty(self, dbp):
+        from hypogeum.archive_relocation import _archive_folder_name
+        _seed_episode_row(dbp, "ep_x3", title=None, topic=None)
+        assert _archive_folder_name("ep_x3", dbp) == "ep_x3"
+
+    def test_strips_path_unsafe_characters(self, dbp):
+        from hypogeum.archive_relocation import _archive_folder_name
+        _seed_episode_row(dbp, "ep_x4", title='A "Cursed" Tomb/Crypt: Part 2?')
+        name = _archive_folder_name("ep_x4", dbp)
+        assert "/" not in name and ":" not in name and '"' not in name and "?" not in name
+        assert name.startswith("ep_x4 - ")
+
+    def test_caps_length(self, dbp):
+        from hypogeum.archive_relocation import _archive_folder_name, _MAX_TITLE_SLUG_LEN
+        long_title = "A " * 100
+        _seed_episode_row(dbp, "ep_x5", title=long_title)
+        name = _archive_folder_name("ep_x5", dbp)
+        assert len(name) <= len("ep_x5 - ") + _MAX_TITLE_SLUG_LEN
+
+    def test_deterministic_across_repeated_calls(self, dbp):
+        """The recovery-detection branch in relocate_episode_assets()
+        recomputes this same name on a later sweep to find files a
+        previous sweep already moved -- it must never drift."""
+        from hypogeum.archive_relocation import _archive_folder_name
+        _seed_episode_row(dbp, "ep_x6", title="A Stable Title")
+        assert (_archive_folder_name("ep_x6", dbp)
+                == _archive_folder_name("ep_x6", dbp)
+                == "ep_x6 - A Stable Title")
+
+    def test_relocate_episode_assets_uses_titled_folder(self, dbp, tmp_path):
+        from hypogeum import archive_relocation as rl
+        episode_id = "ep_titled"
+        work = tmp_path / "episodes"
+        work.mkdir()
+        ep_dir = _seed_episode_dir(work, episode_id)
+        archive_root = tmp_path / "server-archive"
+        set_factory_setting("archive_root", str(archive_root), db_path=dbp)
+        _mark_published(dbp, episode_id)
+        _seed_episode_row(dbp, episode_id, title="The Real Published Title")
+
+        rec = rl.relocate_episode_assets(
+            episode_id, "hypogeum", db_path=dbp, output_dir=ep_dir,
+            catalog_dir=tmp_path / "catalogs",
+        )
+        assert rec["relocated"] is True
+        dst = archive_root / "hypogeum" / f"{episode_id} - The Real Published Title"
+        assert dst.exists()
+        assert (dst / "video" / "sc_s01.mp4").read_bytes() == b"x" * 100
+        assert rec["dest_dir"] == str(dst)
+
+
 def test_second_call_is_noop(dbp, tmp_path):
     from hypogeum import archive_relocation as rl
     episode_id = "ep_pub2"

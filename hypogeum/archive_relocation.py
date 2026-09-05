@@ -28,6 +28,7 @@ Public API:
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import uuid
 from datetime import datetime, timezone
@@ -260,6 +261,62 @@ def _repoint(loc: Optional[str], src_root: Path, dst_root: Path, episode_id: str
     return str(dst_root / p.name)
 
 
+_MAX_TITLE_SLUG_LEN = 60
+
+
+def _archive_folder_name(episode_id: str, db_path: Optional[Path]) -> str:
+    """'<episode_id> - <title>' — a human recognises an archived episode
+    by its title, not its opaque internal id (an operator's own report:
+    "the archive names must be right so I can tell what one is from the
+    name, instead of them being like ep_f3619022"). The id stays as a
+    prefix so two differently-titled episodes never collide and every
+    existing DB/JSONL lookup keyed by episode_id can still find its own
+    folder by prefix if ever needed; episodes.title (the real published
+    title, backfilled by _backfill_episode_title() below) takes priority
+    over episodes.topic (the working title, which can differ slightly
+    after script rewrites), falling back to topic when title is empty —
+    confirmed live 2026-09-05: title is None for most episodes at
+    relocation time, topic is always populated. Falls back to the bare
+    episode_id (the OLD, pre-2026-09-05 naming) when neither is set, so
+    an episode with no episodes row at all still relocates instead of
+    failing outright.
+
+    Deterministic given the same DB state — this is called again on
+    every later sweep (the recovery-detection branch in
+    relocate_episode_assets() needs the SAME folder name to find files a
+    previous sweep already moved), so it must never depend on wall-clock
+    time or randomness.
+    """
+    title = None
+    try:
+        from hypogeum.db import get_connection
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                "SELECT title, topic FROM episodes WHERE episode_id = ?", (episode_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row:
+            title = (row["title"] or row["topic"] or "").strip()
+    except Exception:  # noqa: BLE001
+        title = None
+
+    if not title:
+        return episode_id
+
+    # Strip characters that are unsafe (or reserved) in a path component on
+    # macOS/SMB/Windows-mounted shares alike; collapse repeated whitespace;
+    # cap length so channel/episode_id/title never approaches an SMB path-
+    # component limit.
+    safe = re.sub(r'[/\\:*?"<>|]', "", title)
+    safe = re.sub(r"\s+", " ", safe).strip()
+    safe = safe[:_MAX_TITLE_SLUG_LEN].rstrip()
+    if not safe:
+        return episode_id
+    return f"{episode_id} - {safe}"
+
+
 def _backfill_episode_title(episode_id: str, dst: Path, db_path: Optional[Path]) -> None:
     """If episodes.title is empty, lift the real published title out of the
     (now-relocated) final_render_package's metadata_source.episode_title."""
@@ -408,7 +465,7 @@ def relocate_episode_assets(
     src_has_files = src.exists() and any(p.is_file() for p in src.rglob("*"))
 
     root = resolve_archive_root(db_path)
-    dst = root / channel_id / episode_id
+    dst = root / channel_id / _archive_folder_name(episode_id, db_path)
     rec["dest_dir"] = str(dst)
 
     if not src_has_files:

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 import hypogeum.db as db
-from hypogeum.muapi_spend_breaker import check_muapi_spend_breaker
+from hypogeum.muapi_spend_breaker import check_muapi_spend_breaker, clear_breaker
 
 NOW = datetime(2026, 9, 6, 12, 0, tzinfo=timezone.utc)
 
@@ -153,6 +153,30 @@ def test_limits_of_zero_disable_each_check(dbp):
     out = check_muapi_spend_breaker(config=_cfg(spend=0, fails=0), db_path=dbp, now=NOW)
     assert not out["tripped_now"]
     assert _paused(dbp) == "0"
+
+
+def test_clear_breaker_gives_a_clean_slate(dbp):
+    conn = db.get_connection(dbp)
+    # 5 recent failures -> trips
+    for i in range(5):
+        _run(conn, f"ep_old{i}", "failed", minutes_ago=120 - i * 10)
+    assert check_muapi_spend_breaker(config=_cfg(fails=3), db_path=dbp, now=NOW)["tripped_now"]
+    assert _paused(dbp) == "1"
+
+    # operator resumes via clear_breaker(): the OLD failures no longer count
+    clear_breaker(db_path=dbp, now=NOW)
+    assert _paused(dbp) == "0"
+    out = check_muapi_spend_breaker(config=_cfg(fails=3), db_path=dbp, now=NOW + timedelta(seconds=1))
+    assert not out["tripped_now"]
+    assert out["consecutive_failures"] == 0
+
+    # but NEW failures that START after the resume DO count
+    _run(conn, "ep_new1", "failed", minutes_ago=-3)   # 3 min after NOW
+    _run(conn, "ep_new2", "failed", minutes_ago=-4)
+    _run(conn, "ep_new3", "failed", minutes_ago=-5)
+    out2 = check_muapi_spend_breaker(config=_cfg(fails=3), db_path=dbp, now=NOW + timedelta(minutes=10))
+    assert out2["tripped_now"]
+    assert out2["consecutive_failures"] == 3
 
 
 def test_no_raise_on_broken_db(tmp_path):

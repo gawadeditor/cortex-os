@@ -34,22 +34,42 @@ On a trip: set worker_control.queue_paused=1 (publishing keeps running —
 see run_worker.py) and worker_control.queue_paused_reason to the cause,
 and log muapi_spend_breaker_tripped loudly.
 
-DELIBERATELY DOES NOT AUTO-RECOVER. Once tripped the operator must clear
-it (set queue_paused=0) after fixing the underlying cause — a breaker that
-un-trips itself just re-enters the cascade. Idempotent: a no-op when
-production is already paused. No-raise contract — any failure here is
-logged and swallowed, never propagated into the worker loop.
+DELIBERATELY DOES NOT AUTO-RECOVER. Once tripped the operator resumes by
+calling clear_breaker() (or the dashboard's resume) after fixing the
+underlying cause — a breaker that un-trips itself just re-enters the
+cascade. clear_breaker() stamps breaker_cleared_at so the resume gets a
+clean slate: only runs that START after it count toward a new
+consecutive-failure streak. Idempotent: a no-op when production is
+already paused. No-raise contract — any failure here is logged and
+swallowed, never propagated into the worker loop.
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-__all__ = ["check_muapi_spend_breaker"]
+__all__ = ["check_muapi_spend_breaker", "clear_breaker"]
 
 _TERMINAL_FAIL = ("failed", "error")
 _RUNNING = ("running", "claimed", "queued")
 _STREAK_LOOKBACK_HOURS = 3  # only runs this recent count toward the failure streak
+
+
+def clear_breaker(*, db_path: Optional[object] = None,
+                  now: Optional[datetime] = None) -> None:
+    """Operator resume after a breaker trip: un-pause the queue, drop the
+    stored reason, and stamp breaker_cleared_at=now so the consecutive-
+    failure check starts from a clean slate (only runs that begin AFTER
+    this count toward a new streak). Use this instead of setting
+    queue_paused=0 by hand, or the breaker re-trips on the same failures."""
+    from hypogeum.db import set_worker_control
+
+    set_worker_control("queue_paused", "0", db_path=db_path)
+    set_worker_control("queue_paused_reason", "", db_path=db_path)
+    set_worker_control(
+        "breaker_cleared_at", (now or datetime.now(timezone.utc)).isoformat(),
+        db_path=db_path,
+    )
 
 
 def check_muapi_spend_breaker(
@@ -101,11 +121,18 @@ def check_muapi_spend_breaker(
             out["hour_spend_usd"] = round(hour_spend, 2)
 
             # (2) consecutive terminal-failed runs among RECENT runs only
-            # (skip a live run at the head). The recency window keeps stale
-            # failures from an already-resolved incident from re-tripping the
-            # breaker the moment an operator resumes — a current cascade is
-            # by definition recent.
+            # (skip a live run at the head). Two guards keep a since-resolved
+            # incident from immediately re-tripping the breaker after an
+            # operator resumes:
+            #   - a 3h recency window (a real cascade is by definition recent);
+            #   - worker_control.breaker_cleared_at — set to "now" whenever an
+            #     operator clears queue_paused after a breaker trip; only runs
+            #     that STARTED after it count, so the resume gets a clean slate
+            #     and the breaker only re-trips on genuinely NEW failures.
             streak_cutoff = (now - timedelta(hours=_STREAK_LOOKBACK_HOURS)).isoformat()
+            cleared_at = str(get_worker_control("breaker_cleared_at", "", db_path=db_path) or "")
+            if cleared_at > streak_cutoff:
+                streak_cutoff = cleared_at
             streak = 0
             for r in conn.execute(
                 "SELECT status FROM runs WHERE started_at >= ? ORDER BY started_at DESC LIMIT 40",

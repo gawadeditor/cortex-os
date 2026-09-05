@@ -1838,11 +1838,18 @@ def _burn_text_overlays(
     """
     import subprocess  # noqa: PLC0415
 
+    from hypogeum.vertical_master import SAFE_BOTTOM_FRAC  # noqa: PLC0415
+
     if not main_render_path.exists() or not text_overlays:
         return 0
 
     font_size = max(24, round(width * 0.045))
     box_border = max(8, round(font_size * 0.35))
+    # Sit just above the platform-UI/caption reserved bottom band (the same
+    # SAFE_BOTTOM_FRAC hypogeum.caption_style's burned captions respect) --
+    # not inside it, so an overlay card never overlaps a burned caption or
+    # gets covered by TikTok/IG/Shorts' own bottom UI chrome.
+    y_frac = 1.0 - SAFE_BOTTOM_FRAC - 0.10
     drawtext_filters = []
     for ov in text_overlays:
         text = str(ov.get("text") or "").strip()
@@ -1856,7 +1863,7 @@ def _burn_text_overlays(
         drawtext_filters.append(
             f"drawtext=text='{escaped}':fontsize={font_size}:fontcolor=white:"
             f"box=1:boxcolor=black@0.55:boxborderw={box_border}:"
-            f"x=(w-text_w)/2:y=h*0.78-(text_h/2):"
+            f"x=(w-text_w)/2:y=h*{y_frac:.4f}-(text_h/2):"
             f"enable='between(t,{start:.3f},{end:.3f})'"
         )
     if not drawtext_filters:

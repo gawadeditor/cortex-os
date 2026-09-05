@@ -56,6 +56,12 @@ VALID_DIMENSIONS = frozenset({
     "thumbnail", "title", "hook", "pacing", "topic",
     "publishing_time", "duration", "description",
     "content_volume",   # channel weekly-cadence recommendation (ADR-016 era)
+    # script/video (2026-09-05): the two comparative-only dimensions —
+    # see hypogeum.comparative_insights's own module docstring for why
+    # these never fit a single-episode absolute-threshold rule the way
+    # "hook"/"pacing" do, and only exist relative to another episode of
+    # the same channel.
+    "script", "video",
 })
 VALID_ACTION_TYPES = frozenset({"prefer", "avoid", "increase", "decrease", "test", "change"})
 

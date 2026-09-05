@@ -301,12 +301,75 @@ def run_platform_sync(
         _best[p] = max(_best.get(p, 0), r.get("records_imported", 0))
     total = sum(_best.values())
     has_error = any(r["status"] == "error" for r in results)
+
+    # Learning pipeline (2026-09-05 fix): extract_insights()/generate_
+    # actions() previously only ran from the manual /analytics/import
+    # dashboard path (mock/CSV/JSON) -- a real Zernio sync (this
+    # function, the one the worker calls hourly) never triggered them at
+    # all, so every episode with genuine synced performance data sat
+    # with zero insights/actions until an operator manually re-imported
+    # its own analytics as JSON. Re-running per real-analytics episode
+    # here is safe to call every sync (extract_insights()/
+    # generate_actions() are both dedup-safe -- INSERT OR IGNORE and
+    # _has_existing_pending_action() respectively) and cheap at today's
+    # data volume. hypogeum.comparative_insights.generate_comparative_
+    # insights() (per channel, not per episode -- it needs >=2 real-
+    # analytics episodes to compare) runs alongside it.
+    if total > 0:
+        try:
+            _refresh_learning_pipeline(channel_id, db_path)
+        except Exception:  # noqa: BLE001 — learning refresh must never fail a sync
+            pass
+
     return {
         "ok":            not has_error,
         "results":       results,
         "total_records": total,
         "synced_at":     _now(),
     }
+
+
+def _refresh_learning_pipeline(channel_id: Optional[str], db_path: Optional[Path]) -> None:
+    """Re-run insight/action extraction for every episode with real
+    (source='api') analytics, plus the cross-episode comparison, for
+    channel_id (or every channel when None). See the call site's own
+    comment for why this runs after every real sync."""
+    from hypogeum.learning_engine import extract_insights, generate_actions
+    from hypogeum.comparative_insights import generate_comparative_insights
+
+    # Comparative insights first (per channel) -- they write new rows
+    # into analytics_insights keyed by episode_id, which the per-episode
+    # loop below must then see when it calls generate_actions() for that
+    # same episode_id, or a comparative insight would sit un-actioned
+    # until the NEXT sync.
+    if channel_id is not None:
+        channel_ids = [channel_id]
+    else:
+        from hypogeum.channel_config import list_channel_profiles
+        channel_ids = [c.channel_id for c in list_channel_profiles(db_path=db_path)]
+
+    for cid in channel_ids:
+        try:
+            generate_comparative_insights(cid, db_path=db_path)
+        except Exception:  # noqa: BLE001
+            continue
+
+    db = _resolve(db_path) or _DEFAULT_DB_PATH
+    conn = get_connection(db)
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT episode_id FROM platform_analytics WHERE source='api'"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    for row in rows:
+        episode_id = row["episode_id"]
+        try:
+            extract_insights(episode_id, db_path=db_path)
+            generate_actions(episode_id, db_path=db_path)
+        except Exception:  # noqa: BLE001
+            continue
 
 
 def get_sync_log(

@@ -366,6 +366,18 @@ _ACTION_TEMPLATES: dict[str, dict[str, tuple[str, str]]] = {
         "negative": ("test",  "Test different publishing schedule — current timing may not maximise initial velocity"),
         "positive": ("prefer","Current publishing time driving good early traction"),
     },
+    # script/video (2026-09-05): comparative-only dimensions — populated
+    # by hypogeum.comparative_insights.generate_comparative_insights(),
+    # never by a single-episode INSIGHT_RULES threshold. See that
+    # module's own docstring.
+    "script": {
+        "negative": ("change",  "Review narration length/pacing against this channel's better-performing episode — word count diverges significantly"),
+        "positive": ("prefer",  "Current script length is validated by comparison against this channel's own episodes"),
+    },
+    "video": {
+        "negative": ("change",  "Review scene count/coverage against this channel's better-performing episode — scene count diverges significantly"),
+        "positive": ("prefer",  "Current scene count is validated by comparison against this channel's own episodes"),
+    },
 }
 
 

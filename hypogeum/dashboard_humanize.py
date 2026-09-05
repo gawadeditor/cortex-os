@@ -612,6 +612,9 @@ _DIMENSIONS = {
     "audio": "Audio",
     "structure": "Story structure",
     "length": "Length",
+    "publishing_time": "Publishing time",
+    "script": "Script",
+    "video": "Video",
 }
 
 

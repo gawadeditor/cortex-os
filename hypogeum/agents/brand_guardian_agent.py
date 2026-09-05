@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import Optional
 
 from hypogeum.config import Config
+from hypogeum.failure_policy import FailurePolicy
 from hypogeum.logger import get_logger
 from hypogeum.openrouter import call_claude
 from hypogeum.prompt_loader import load_prompt
@@ -106,11 +107,20 @@ class BGARejectedError(RuntimeError):
     Raised by run_bga_pass1() or run_bga_pass2() when the compliance report
     outcome is REJECTED.
 
+    failure_policy = TERMINAL: a BGA rejection is a verdict on this exact
+    visual_package's scene descriptions — an unchanged re-run produces the
+    identical verdict, so it must NOT be auto-retried (that was an infinite
+    loop, observed 2026-09-06 on ep_8a11b078). The topic is skipped and an
+    operator (or a future scene-description-rewrite pass) resolves it,
+    exactly as a QA rejection is handled.
+
     Attributes:
         episode_id:  Episode identifier.
         pass_number: 1 or 2.
         report:      The full bga_compliance_report dict attached for inspection.
     """
+
+    failure_policy = FailurePolicy.TERMINAL
 
     def __init__(self, episode_id: str, pass_number: int, report: dict) -> None:
         self.episode_id = episode_id

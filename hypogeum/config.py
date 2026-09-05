@@ -279,6 +279,7 @@ class Config:
     MUAPI_CREDIT_WARNING_THRESHOLD: Optional[float]  # USD; default: None (off)
     MUAPI_HOURLY_SPEND_LIMIT_USD: Optional[float]  # USD/hour; default 45.0 — runaway-spend breaker (0/None = off)
     MUAPI_CONSECUTIVE_FAILURE_LIMIT: int  # default 3 — consecutive failed runs before the breaker trips (0 = off)
+    MAX_EPISODE_TOTAL_FAILURES: int  # default 3 — hard per-episode attempt ceiling in queue.process_next (0 = off)
 
     # ------------------------------------------------------------------
     # Source Enhancement Stage (2026-08-02) — provider-agnostic. Never
@@ -515,6 +516,11 @@ class Config:
         self.THUMBNAIL_FALLBACK_MODEL = _get_optional("THUMBNAIL_FALLBACK_MODEL", default="flux-2-dev")
         self.MUAPI_DEFAULT_TIER = _get_int("MUAPI_DEFAULT_TIER", default=2)
         self.QUEUE_MAX_AUTO_RETRIES = _get_int("QUEUE_MAX_AUTO_RETRIES", default=2)
+        # Hard per-episode attempt ceiling (queue.process_next backstop): an
+        # episode with this many terminally-failed runs is abandoned (topic
+        # skipped, episode superseded) regardless of failure_policy or which
+        # queue path re-picked it — a deterministic failure must not loop.
+        self.MAX_EPISODE_TOTAL_FAILURES = _get_int("MAX_EPISODE_TOTAL_FAILURES", default=3)
         self.QUEUE_RETRY_BACKOFF_MINUTES = _get_optional(
             "QUEUE_RETRY_BACKOFF_MINUTES", default="5,20",
         )

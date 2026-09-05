@@ -1406,6 +1406,40 @@ def process_next(
             config=config,
         )
 
+        # HARD per-episode attempt ceiling — a backstop under every other
+        # retry gate, keyed on the immutable `runs` history rather than a
+        # queue row's retry_count (which resets whenever the scheduler
+        # re-picks a released topic into a fresh queue row). Any episode
+        # that has already produced this many terminally-failed runs is
+        # abandoned regardless of the exception's failure_policy: a
+        # deterministic failure (plan-hash drift on VPD re-run, a
+        # non-TERMINAL error class, a provider quirk that recurs) must not
+        # loop forever burning paid stages. Observed 2026-09-06:
+        # ep_8a11b078 (BGA) and ep_367a0d78 (plan-hash) each ran 4x.
+        _episode_hard_capped = False
+        if episode_id:
+            try:
+                _cap = int(getattr(config, "MAX_EPISODE_TOTAL_FAILURES", 3)) if config is not None else 3
+            except Exception:  # noqa: BLE001
+                _cap = 3
+            if _cap > 0:
+                try:
+                    from hypogeum.db import get_connection as _gc2
+                    _c2 = _gc2(db_path)
+                    try:
+                        _n_failed = _c2.execute(
+                            "SELECT COUNT(*) FROM runs WHERE episode_id = ? "
+                            "AND status IN ('failed', 'error')",
+                            (episode_id,),
+                        ).fetchone()[0]
+                    finally:
+                        _c2.close()
+                    if _n_failed >= _cap:
+                        _episode_hard_capped = True
+                        retry_eligible = False
+                except Exception:  # noqa: BLE001
+                    pass
+
         # Topic hygiene — exactly one of skip / mark-as-retry / release:
         #   - The topic's own CONTENT/plan is the problem (EP score below
         #     threshold, QA rejection, Rights & Compliance rejection, or a
@@ -1489,7 +1523,23 @@ def process_next(
                     _max_retries = None  # cannot safely decide -- see comment above
                 _retry_count = claimed.get("retry_count") or 0
 
-                if isinstance(exc, _pipeline_module.PipelineRejectedError):
+                if _episode_hard_capped:
+                    skip_topic(topic_id, reason="episode_failure_ceiling", db_path=db_path)
+                    try:
+                        from hypogeum.db import get_connection as _gc3
+                        _c3 = _gc3(db_path)
+                        try:
+                            _c3.execute(
+                                "UPDATE episodes SET status = 'superseded' WHERE episode_id = ? "
+                                "AND status NOT IN ('complete', 'superseded')",
+                                (episode_id,),
+                            )
+                            _c3.commit()
+                        finally:
+                            _c3.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                elif isinstance(exc, _pipeline_module.PipelineRejectedError):
                     skip_topic(topic_id, reason="ep_rejected", db_path=db_path)
                 elif isinstance(exc, _also_unrecoverable) or _content_is_gate_refused:
                     skip_topic(topic_id, reason=f"unrecoverable:{type(exc).__name__}", db_path=db_path)

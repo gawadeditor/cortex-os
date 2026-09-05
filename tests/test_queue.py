@@ -2505,6 +2505,73 @@ class TestConsumerHygiene:
             f"expected 'skipped' once the retry budget is exhausted; got {topic['status']!r}"
         )
 
+    def test_hard_episode_failure_ceiling_skips_topic_and_supersedes(self, db_path):
+        """An episode with MAX_EPISODE_TOTAL_FAILURES terminally-failed runs
+        already is abandoned regardless of the exception's failure_policy —
+        the backstop under retry_count for a deterministic loop (BGA reject
+        before it was TERMINAL, plan-hash drift on VPD re-run, ...)."""
+        from hypogeum.db import get_connection
+        self._active_channel(db_path, "ch_ceiling")
+        topic_id = enqueue_topic("ch_ceiling", "poison topic", db_path=db_path)
+        ep = "ep_ceiling_poison"
+        enqueue(db_path=db_path, channel_id="ch_ceiling", episode_id=ep)
+
+        conn = get_connection(db_path)
+        try:
+            for i in range(3):
+                conn.execute(
+                    "INSERT INTO runs (run_id, episode_id, started_at, status, channel_id) "
+                    "VALUES (?,?,?,?,?)",
+                    (f"r{i}", ep, "2026-09-06T00:00:00+00:00", "failed", "ch_ceiling"),
+                )
+            conn.execute(
+                "INSERT INTO episodes (episode_id, title, created_at, status) VALUES (?,?,?,?)",
+                (ep, "Poison", "2026-09-06T00:00:00+00:00", "in_progress"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with patch("hypogeum.pipeline.run_pipeline",
+                   side_effect=RuntimeError("deterministic failure again")):
+            result = process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0,
+                                 QUEUE_MAX_AUTO_RETRIES=2, MAX_EPISODE_TOTAL_FAILURES=3),
+            )
+        assert result.status == "failed"
+        assert get_topic(topic_id, db_path=db_path)["status"] == "skipped"
+        conn = get_connection(db_path)
+        try:
+            st = conn.execute("SELECT status FROM episodes WHERE episode_id=?", (ep,)).fetchone()[0]
+        finally:
+            conn.close()
+        assert st == "superseded", f"episode should be superseded; got {st!r}"
+
+    def test_episode_below_the_ceiling_still_retries(self, db_path):
+        from hypogeum.db import get_connection
+        self._active_channel(db_path, "ch_below")
+        topic_id = enqueue_topic("ch_below", "ok topic", db_path=db_path)
+        ep = "ep_below_ceiling"
+        enqueue(db_path=db_path, channel_id="ch_below", episode_id=ep)
+        conn = get_connection(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO runs (run_id, episode_id, started_at, status, channel_id) "
+                "VALUES (?,?,?,?,?)", ("r0", ep, "2026-09-06T00:00:00+00:00", "failed", "ch_below"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        with patch("hypogeum.pipeline.run_pipeline", side_effect=RuntimeError("transient")):
+            process_next(
+                worker_id=_worker(), db_path=db_path, dry_run=False,
+                config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0,
+                                 QUEUE_MAX_AUTO_RETRIES=2, MAX_EPISODE_TOTAL_FAILURES=3),
+            )
+        # 1 prior failure < ceiling 3 -> topic marked for retry, not skipped
+        assert get_topic(topic_id, db_path=db_path)["status"] != "skipped"
+
     def test_topic_not_touched_on_dry_run(self, db_path):
         """dry_run=True bypasses pipeline entirely — topic lifecycle is unchanged."""
         self._active_channel(db_path, "ch_dryrun")

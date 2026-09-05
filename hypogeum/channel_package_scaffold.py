@@ -74,6 +74,43 @@ def channel_outro_policy(
         return None
 
 
+def channel_i2v_disabled(
+    channel_id: str, *, packages_root: Optional[Path] = None,
+) -> bool:
+    """
+    Whether this channel's Visual Package Director must never request an
+    image-to-video (I2V) scene, per ``channel_packages/<id>/i2v_policy.json``
+    ``{"mode": "disabled"}``. Same opt-in-by-file pattern as
+    channel_outro_policy — no config, no code change per channel, absence
+    of the file means unchanged (I2V allowed).
+
+    Added 2026-09-05: confirmed live (ep_5f72565c, "Pip the Hedgehog") that
+    wan2.7-image-to-video's own reference-frame-leak defect has no reliable
+    fix for every clip -- hypogeum.source_enhancement.
+    check_and_trim_reference_frame_leak() cleanly fixes a fast hard-cut
+    leak, but some clips are a slow, multi-second CROSSFADE from the
+    conditioning image into real content with no stable cut point at all
+    (measured live: the frame-vs-frame-0 diff never plateaus across a 3s
+    scan — it is still climbing when the scan ends). No downstream trim
+    can fix that shape; the only reliable fix is not requesting I2V in the
+    first place. When set, Visual Package Director skips
+    generate_entity_reference_images() entirely (no hosted reference URLs
+    are produced), so every scene naturally resolves to the channel's T2V
+    model instead -- the exact fallback the operator authorized.
+    """
+    if not channel_id:
+        return False
+    root = Path(packages_root) if packages_root is not None else _PACKAGES
+    p = root / channel_id / "i2v_policy.json"
+    if not p.is_file():
+        return False
+    try:
+        pol = json.loads(p.read_text(encoding="utf-8"))
+        return isinstance(pol, dict) and str(pol.get("mode", "")).lower() == "disabled"
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def scaffold_channel_package(channel_id: str, *, db_path: Optional[Path] = None,
                              template: str = "hypogeum",
                              packages_root: Optional[Path] = None) -> dict:

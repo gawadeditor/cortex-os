@@ -2303,12 +2303,26 @@ def _execute_muapi_phase(
     # per-channel signal hypogeum.agents.clip_repair_agent._force_short_
     # native_aspect() already uses for the identical decision at the video-
     # submission boundary — reused here for consistency, not reinvented.
-    _ref_video_aspect_ratio = "9:16" if getattr(config, "SHORT_NATIVE_MODE", False) else "16:9"
-    entity_hosted_urls: dict[str, str] = generate_entity_reference_images(
-        locked_entities, config, episode_id, output_dir, log,
-        budget_guard=budget_guard, video_aspect_ratio=_ref_video_aspect_ratio,
-        channel_id=channel_id,
-    )
+    #
+    # I2V kill switch (2026-09-05, operator-authorized): a channel whose
+    # channel_packages/<id>/i2v_policy.json opts out (see
+    # channel_package_scaffold.channel_i2v_disabled()'s own docstring for
+    # why) never gets any hosted reference URL here, so
+    # generate_all_scene_videos() below finds reference_image_url=None for
+    # every scene and every submission naturally resolves to the channel's
+    # T2V model instead — no I2V-specific code path elsewhere has to change.
+    from hypogeum.channel_package_scaffold import channel_i2v_disabled  # noqa: PLC0415
+    if channel_i2v_disabled(channel_id):
+        log.info("vpd_i2v_disabled_for_channel", episode_id=episode_id, channel_id=channel_id,
+                 entity_count=len(locked_entities))
+        entity_hosted_urls: dict[str, str] = {}
+    else:
+        _ref_video_aspect_ratio = "9:16" if getattr(config, "SHORT_NATIVE_MODE", False) else "16:9"
+        entity_hosted_urls = generate_entity_reference_images(
+            locked_entities, config, episode_id, output_dir, log,
+            budget_guard=budget_guard, video_aspect_ratio=_ref_video_aspect_ratio,
+            channel_id=channel_id,
+        )
 
     # Update locked_entities[] with reference_image_asset_id from results
     apply_reference_image_asset_ids(locked_entities, entity_hosted_urls, episode_id)

@@ -1,0 +1,4 @@
+{
+  "mode": "disabled",
+  "_note": "2026-09-05: I2V (wan2.7-image-to-video) confirmed live on ep_5f72565c ('Pip the Hedgehog') to leak its own character-reference-sheet conditioning frame into the final render. hypogeum.source_enhancement.check_and_trim_reference_frame_leak() reliably fixes a fast hard-cut leak, but re-verification against this episode's own real clips found some scenes (sc_s14, sc_s15) are a slow, multi-second crossfade with no stable cut point at all -- the frame-vs-reference diff never plateaus within a 3s scan. No downstream trim can fix that shape. Operator's own call: 'if you can't reliably solve the reference-image problem, cancel I2V entirely.' Disabled for this channel until the provider-side defect itself is fixed; twinkle's T2V model (wan2.7-text-to-video) is unaffected and remains the default for every scene."
+}

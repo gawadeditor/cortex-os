@@ -15,10 +15,14 @@ the same "today/tomorrow" slot and they collide — the buffer dumps at once
 instead of releasing one per day.
 
 This ledger records the slot each episode was assigned and, for the next
-episode, returns an ``effective_now`` advanced just past the latest recorded
-future slot for that channel. `compute_next_publish_slot` then lands on the
-following day. The provider (Zernio ``scheduledFor``) remains the source of
-truth for the actual schedule; this only spaces out assignment.
+episode, returns an ``effective_now`` moved to the EARLIEST calendar day
+that has no recorded slot for that channel — backfilling a gap between now
+and the last scheduled day before ever appending a fresh day past the last
+one. `compute_next_publish_slot` then resolves that day's ``time_of_day``.
+The provider (Zernio ``scheduledFor``) remains the source of truth for the
+actual schedule (and ``hypogeum.publishing.zernio_schedule_sync`` mirrors
+it back into ``channel_publish_slots`` every worker iteration, so the gap
+scan sees provider reality); this only spaces out assignment.
 
 Public API:
     next_free_now(channel_id, base_now, *, db_path=None) -> datetime
@@ -31,8 +35,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-_GAP = timedelta(minutes=1)  # land strictly after the recorded slot
-
 
 def _iso(dt: datetime) -> str:
     if dt.tzinfo is None:
@@ -42,30 +44,44 @@ def _iso(dt: datetime) -> str:
 
 def next_free_now(channel_id: str, base_now: datetime, *,
                   db_path: Optional[Path] = None) -> datetime:
-    """`base_now`, or just past the channel's latest recorded future publish
-    slot — whichever is later. Feed the result to
-    hypogeum.scheduler.compute_next_publish_slot() so a buffered episode
-    gets the day after the last one, not a colliding same-day slot.
-    Never raises — returns `base_now` on any problem."""
+    """`base_now`, advanced to the EARLIEST calendar day (UTC) from
+    `base_now` forward that has no recorded publish slot for this channel.
+
+    Feed the result to hypogeum.scheduler.compute_next_publish_slot() so a
+    buffered episode fills the earliest OPEN day: it backfills a gap
+    between now and the last scheduled day (e.g. the channel has Sun/Mon/
+    Wed/Fri booked but not Tue — a new episode takes Tue) before it ever
+    appends a fresh day past the last one. Days that already carry a slot
+    are skipped, so back-to-back buffer releases still land on distinct
+    days and never collide.
+
+    `base_now`'s own day, when free, is returned verbatim (keeping the
+    intra-day time so compute_next_publish_slot can still choose today vs.
+    tomorrow); a later free day is returned at 00:00 UTC so the day's own
+    time_of_day resolves cleanly. Never raises — returns `base_now` on any
+    problem.
+    """
     if base_now.tzinfo is None:
         base_now = base_now.replace(tzinfo=timezone.utc)
     try:
         from hypogeum.db import get_connection
+        day0 = base_now.astimezone(timezone.utc).date()
         conn = get_connection(Path(db_path) if db_path else None)
         try:
-            row = conn.execute(
-                "SELECT MAX(slot_utc) FROM channel_publish_slots "
+            rows = conn.execute(
+                "SELECT DISTINCT substr(slot_utc, 1, 10) FROM channel_publish_slots "
                 "WHERE channel_id = ? AND slot_utc >= ?",
-                (channel_id, _iso(base_now)),
-            ).fetchone()
+                (channel_id, day0.isoformat()),
+            ).fetchall()
         finally:
             conn.close()
-        if row and row[0]:
-            latest = datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
-            if latest.tzinfo is None:
-                latest = latest.replace(tzinfo=timezone.utc)
-            if latest + _GAP > base_now:
-                return latest + _GAP
+        taken = {str(r[0]) for r in rows if r and r[0]}
+        if day0.isoformat() not in taken:
+            return base_now
+        for i in range(1, 400):
+            d = day0 + timedelta(days=i)
+            if d.isoformat() not in taken:
+                return datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
     except Exception:  # noqa: BLE001
         pass
     return base_now

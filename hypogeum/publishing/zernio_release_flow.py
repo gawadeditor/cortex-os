@@ -45,7 +45,7 @@ Public API:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -204,6 +204,29 @@ def publish_channel_release(
             status="blocked_schedule", readiness_by_platform=readiness_by_platform, schedule=schedule_result,
             blocked_reason=schedule_result.blocked_reason, blocked_platforms=blocked_platforms,
         )
+    # Roll forward over any day that's already taken (belt-and-suspenders for
+    # next_free_now's gap scan: the today→tomorrow edge, or a slot recorded
+    # between that scan and here). Without this a compiled slot landing on a
+    # taken day just blocks the release and the episode never publishes.
+    if not publish_now and schedule_result.slot is not None:
+        try:
+            from hypogeum.publishing.publish_slot_ledger import day_is_taken as _day_taken
+            _cursor = schedule_result.slot
+            for _ in range(14):
+                if _day_taken(channel_id, _cursor, episode_id, db_path=db_path) is None:
+                    break
+                _next_day = (_cursor.astimezone(timezone.utc) + timedelta(days=1)).replace(
+                    hour=0, minute=0, second=0, microsecond=0,
+                )
+                _rolled = compile_schedule_plan_from_channel_package(
+                    channel_id, target_deliverable_ids, db_path=db_path, publish_now=False,
+                    require_explicit_policy=require_explicit_schedule_policy, now=_next_day,
+                )
+                if _rolled.blocked or _rolled.slot is None:
+                    break
+                schedule_result, _cursor = _rolled, _rolled.slot
+        except Exception:  # noqa: BLE001
+            pass
     # One-episode-per-day-per-channel — enforced for a scheduled release
     # (schedule_result.slot) AND for a publish_now release (its "slot" is
     # today). A publish_now that bypassed this check is exactly how a

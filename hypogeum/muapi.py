@@ -741,11 +741,32 @@ def _resolve_authorization_grant(channel_id: str, episode_id: Optional[str], *, 
     return _authority.resolve_active_grant(channel_id, episode_id or "unknown_episode", at=at), False
 
 
+def _scene_failure_is_systemic(reason: Optional[str]) -> bool:
+    """True when a scene-generation failure will recur identically on every
+    retry (billing / account credit, grant-wide or binding spend capacity
+    exhausted, no resolvable grant) — so submit_scene()'s per-scene retry
+    loop must stop rather than burn its remaining attempts. A prompt/content
+    or transient provider failure returns False (worth another attempt,
+    especially with the simpler fallback prompt)."""
+    t = (reason or "").lower()
+    if "insufficient" in t and any(m in t for m in ("credit", "balance", "top up", "top-up", "top_up")):
+        return True
+    return any(m in t for m in (
+        "grant-wide spend capacity exhausted",
+        "binding spend capacity exhausted",
+        "grant capacity exhausted",
+        "no_active_authorization_grant",
+        "admitted_autonomous_execution_without_active_operating_grant",
+        "no_authoritative_channel_identity",
+        "quota exhausted", "quotaexhausted",
+    ))
+
+
 def _submit_scene_via_gate(
     *, channel_id: str, grant, prompt: str, tier: int, reference_image_url: Optional[str],
     scene_id: str, short_id: Optional[str], aspect_ratio: str, requested_duration: float,
     episode_id: str, output_dir: Path, config: Config, log, is_fallback: bool,
-    repair_fallback_ok: bool = False,
+    repair_fallback_ok: bool = False, recovery_generation: int = 0,
 ) -> "tuple[Optional[dict], Optional[str]]":
     """
     The grant-derived gate path (Correction 3/5.5): compile an
@@ -1026,7 +1047,19 @@ def _submit_scene_via_gate(
             f"can never authorize spend"
         )
 
-    authorization_id = f"{episode_id}:{scene_id}:{'fallback' if is_fallback else 'primary'}"
+    # recovery_generation > 0 => a FRESH idempotency/authorization identity
+    # (":recovery{n}"), so a scene whose ":primary"/":fallback" attempt
+    # stranded (e.g. a poll timeout that left the authorization at
+    # 'submitting', unrecoverable by reconcile) can still be regenerated
+    # instead of the whole episode being lost. It is a genuinely new paid
+    # attempt: its own child authorization, envelope, call/episode budget
+    # rows and grant-ledger reservation. The plan-scoped WEEKLY key below is
+    # unchanged (same plan => replays the one weekly reservation).
+    if recovery_generation > 0:
+        _key_suffix = f"recovery{recovery_generation}"
+    else:
+        _key_suffix = "fallback" if is_fallback else "primary"
+    authorization_id = f"{episode_id}:{scene_id}:{_key_suffix}"
     idempotency_key = authorization_id
 
     # The WEEKLY identity is plan-scoped, never scene-scoped: identical for
@@ -1691,16 +1724,52 @@ def submit_scene(
                     "(or a Channel Operating Grant) before retrying"
                 ),
             }
-        manifest, failure_reason = _submit_scene_via_gate(
-            channel_id=channel_id, grant=grant, prompt=primary_prompt, tier=primary_tier,
-            reference_image_url=reference_image_url, scene_id=scene_id, short_id=short_id,
-            aspect_ratio=aspect_ratio, requested_duration=requested_duration, episode_id=eid,
-            output_dir=output_dir, config=config, log=log, is_fallback=False,
-            repair_fallback_ok=allow_i2v_to_t2v_repair_fallback,
-        )
-        if manifest is not None:
-            return manifest
-        log.warn("muapi_gate_path_attempt1_failed", scene_id=scene_id, reason=failure_reason)
+        # Bounded per-scene retry so ONE flaky scene doesn't cost the whole
+        # episode (operator directive 2026-09-06: "regenerate the failed
+        # scene, don't reject the episode; respect the paid work of every
+        # stage"). Attempt 1 = primary prompt (:primary key). Attempt 2 =
+        # the simpler fallback prompt (:fallback key). Attempt 3+ =
+        # recovery_generation>0 => a FRESH :recovery{n} key, which is what
+        # lets a scene whose earlier authorization stranded at 'submitting'
+        # (reconcile can't clear it) still be regenerated. Total attempts
+        # capped by MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE (>=1); each retry is a
+        # real paid call, bounded overall by the grant ledger, the weekly
+        # reservation and hypogeum.muapi_spend_breaker. A SYSTEMIC failure
+        # (billing / grant capacity / no grant) stops the loop immediately —
+        # it would recur identically on every attempt.
+        _max_attempts = max(1, int(getattr(config, "MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE", 1) or 1))
+        failure_reason = None
+        for _attempt in range(_max_attempts):
+            if _attempt == 0:
+                _p, _fb, _rec = primary_prompt, False, 0
+            elif _attempt == 1:
+                _p, _fb, _rec = fallback_prompt, True, 0
+            else:
+                _p, _fb, _rec = fallback_prompt, False, _attempt - 1
+            manifest, failure_reason = _submit_scene_via_gate(
+                channel_id=channel_id, grant=grant, prompt=_p, tier=primary_tier,
+                reference_image_url=reference_image_url, scene_id=scene_id, short_id=short_id,
+                aspect_ratio=aspect_ratio, requested_duration=requested_duration, episode_id=eid,
+                output_dir=output_dir, config=config, log=log, is_fallback=_fb,
+                repair_fallback_ok=allow_i2v_to_t2v_repair_fallback, recovery_generation=_rec,
+            )
+            if manifest is not None:
+                if _attempt > 0:
+                    log.info(
+                        "muapi_gate_path_recovered_on_retry",
+                        scene_id=scene_id, attempt=_attempt + 1,
+                    )
+                return manifest
+            log.warn(
+                "muapi_gate_path_attempt_failed",
+                scene_id=scene_id, attempt=_attempt + 1, reason=failure_reason,
+            )
+            if _scene_failure_is_systemic(failure_reason):
+                log.warn(
+                    "muapi_gate_path_systemic_stop",
+                    scene_id=scene_id, attempt=_attempt + 1, reason=failure_reason,
+                )
+                break
         return {
             "scene_id": scene_id, "asset_id": None, "generation_status": "generation_failed",
             "provider": "muapi", "tier_used": None, "model_used": None, "prompt_used": None,

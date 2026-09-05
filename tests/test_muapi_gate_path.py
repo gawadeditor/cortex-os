@@ -560,6 +560,88 @@ class TestGrantDerivedGatePath:
         assert "some_future_channel_never_seen_before" in result["failure_reason"]
 
 
+class TestPerSceneRetryLoop:
+    """submit_scene()'s gate branch retries a failed scene (operator
+    directive 2026-09-06: regenerate the scene, don't reject the episode).
+    Attempt 1 = primary prompt (:primary), attempt 2 = fallback prompt
+    (:fallback), attempt 3+ = a fresh :recovery{n} key. Capped by
+    MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE. A systemic failure stops it early."""
+
+    def _spec(self):
+        s = make_scene_spec(scene_id="s01b01")
+        s.setdefault("production_spec", {})
+        s["production_spec"]["primary_prompt"] = "PRIMARY"
+        s["production_spec"]["fallback_prompt"] = "FALLBACK"
+        return s
+
+    def _run(self, monkeypatch, config, outcomes):
+        """outcomes: list of (manifest_or_None, reason) returned by successive
+        _submit_scene_via_gate calls. Returns (result, recorded_calls)."""
+        import hypogeum.muapi as m
+        monkeypatch.setattr(m, "_resolve_authorization_grant",
+                            lambda ch, eid, at: (object(), False))
+        monkeypatch.setattr(m.video_prompt_writer, "assemble_video_scene_prompt",
+                            lambda p, channel_id=None: p)
+        calls = []
+        it = iter(outcomes)
+
+        def _fake_gate(**kw):
+            calls.append((kw["prompt"], kw["is_fallback"], kw["recovery_generation"]))
+            try:
+                return next(it)
+            except StopIteration:
+                return (None, "exhausted_test_outcomes")
+
+        monkeypatch.setattr(m, "_submit_scene_via_gate", _fake_gate)
+        res = m.submit_scene(self._spec(), config, "ep_x", Path("/tmp"), channel_id="ch")
+        return res, calls
+
+    def test_recovers_on_the_fallback_prompt(self, monkeypatch):
+        cfg = make_config()
+        cfg.MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE = 3
+        ok = {"scene_id": "s01b01", "asset_id": "a", "generation_status": "generated"}
+        res, calls = self._run(monkeypatch, cfg, [(None, "transient blip"), (ok, None)])
+        assert res["generation_status"] == "generated"
+        assert calls == [("PRIMARY", False, 0), ("FALLBACK", True, 0)]
+
+    def test_third_attempt_uses_a_fresh_recovery_key(self, monkeypatch):
+        cfg = make_config()
+        cfg.MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE = 4
+        ok = {"scene_id": "s01b01", "asset_id": "a", "generation_status": "generated"}
+        res, calls = self._run(monkeypatch, cfg, [
+            (None, "authorization state is 'submitting'"),
+            (None, "authorization state is 'submitting'"),
+            (ok, None),
+        ])
+        assert res["generation_status"] == "generated"
+        assert calls[2] == ("FALLBACK", False, 1)  # recovery_generation=1
+
+    def test_systemic_billing_failure_stops_immediately(self, monkeypatch):
+        cfg = make_config()
+        cfg.MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE = 5
+        res, calls = self._run(monkeypatch, cfg, [
+            (None, "job_status_failed: Insufficient credits. Please top up your account."),
+        ])
+        assert res["generation_status"] == "generation_failed"
+        assert len(calls) == 1  # did not burn the other 4 attempts
+
+    def test_grant_capacity_failure_stops_immediately(self, monkeypatch):
+        cfg = make_config()
+        cfg.MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE = 5
+        res, calls = self._run(monkeypatch, cfg, [
+            (None, "gate_authorization_failed: grant-wide spend capacity exhausted: 134.8 already active"),
+        ])
+        assert res["generation_status"] == "generation_failed"
+        assert len(calls) == 1
+
+    def test_default_max_attempts_one_is_unchanged_behaviour(self, monkeypatch):
+        cfg = make_config()
+        cfg.MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE = 1
+        res, calls = self._run(monkeypatch, cfg, [(None, "some failure")])
+        assert res["generation_status"] == "generation_failed"
+        assert calls == [("PRIMARY", False, 0)]
+
+
 class TestPhase2PlanBoundAuthorization:
     """Phase 2: financial authorization is bound to the exact verified
     persisted Production Plan. Grant hash, verified persisted plan hash,

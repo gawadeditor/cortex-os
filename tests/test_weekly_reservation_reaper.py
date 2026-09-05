@@ -211,6 +211,53 @@ def test_reaper_never_inflates(dbp):
     assert _weekly_sum(dbp, "hypogeum") == pytest.approx(4.0)
 
 
+def test_reserved_preplan_and_planweekly_holds_are_released_for_a_dead_episode(dbp):
+    conn = db.get_connection(dbp)
+    ch, ep = "hypogeum", "ep_dead"
+    # a $20 preplan hold (reserved) + a plan-weekly row that never committed
+    for key, amt in [(f"preplan:{ch}:{ep}", 20.0), (f"plan-weekly:{ch}:{ep}:h9", 10.4)]:
+        conn.execute(
+            "INSERT INTO budget_reservations (reservation_id, scope_kind, scope_ref, "
+            "idempotency_key, reserved_amount, currency, status, created_at, channel_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (key, "channel_weekly", f"{ch}:{WK}", key, f"{amt:.6f}", "USD", "reserved", NOW, ch),
+        )
+    conn.execute(
+        "INSERT INTO budget_reservations (reservation_id, scope_kind, scope_ref, idempotency_key, "
+        "reserved_amount, currency, status, committed_amount, created_at, channel_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (f"preplan-incurred:{ch}:{ep}", "channel_weekly", f"{ch}:{WK}",
+         f"preplan-incurred:{ch}:{ep}", "1.9", "USD", "committed", "1.9", NOW, ch),
+    )
+    conn.commit()
+    _episode(conn, ep, "superseded")
+    _run(conn, ep, "failed")
+
+    out = reap(db_path=dbp)
+    assert out["ok"]
+    released = {r["episode_id"]: r for r in out["reaped"] if r["result"] == "released_reserved"}
+    assert ep in released
+    assert out["freed_usd"] == pytest.approx(30.4, abs=0.01)
+    # only the real pre-plan LLM cost still counts
+    assert _weekly_sum(dbp, ch) == pytest.approx(1.9, abs=0.01)
+
+
+def test_reserved_hold_for_a_live_episode_is_kept(dbp):
+    conn = db.get_connection(dbp)
+    ch, ep = "hypogeum", "ep_live2"
+    conn.execute(
+        "INSERT INTO budget_reservations (reservation_id, scope_kind, scope_ref, idempotency_key, "
+        "reserved_amount, currency, status, created_at, channel_id) VALUES (?,?,?,?,?,?,?,?,?)",
+        (f"preplan:{ch}:{ep}", "channel_weekly", f"{ch}:{WK}", f"preplan:{ch}:{ep}",
+         "20.0", "USD", "reserved", NOW, ch),
+    )
+    conn.commit()
+    _run(conn, ep, "running")
+    out = reap(db_path=dbp)
+    assert not any(r["episode_id"] == ep for r in out["reaped"])
+    assert _weekly_sum(dbp, ch) == pytest.approx(20.0)
+
+
 def test_no_raise_on_broken_db(tmp_path):
     out = reap(db_path=tmp_path / "does_not_exist_dir" / "x.db")
     assert out["ok"] is False

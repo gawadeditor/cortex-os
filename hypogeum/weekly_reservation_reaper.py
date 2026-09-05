@@ -39,6 +39,14 @@ episode generated no post-plan paid media at all). The row stays
 headroom; only the padding between the plan-maximum estimate and the
 actual charge is returned to the ceiling.
 
+Pass 2 (2026-09-06): a dead episode also strands its ``reserved``
+(never-committed) holds — the ~$20 ``preplan:*`` pre-plan hold, and a
+``plan-weekly:*`` row that stayed ``reserved`` because its first scene
+never reached provider acceptance. Those carry no real spend (real
+charges land on call/episode scopes; ``preplan-incurred:*`` keeps the
+real pre-plan LLM cost counted), so the reaper releases them outright via
+``db.release_budget_reservation`` (which only ever flips ``reserved``).
+
 One-directional and idempotent: the reaper only ever shrinks, recomputes
 the target every pass, and no-ops once a row is already at/below it. A
 published episode's hold is never touched (it shipped — it keeps its
@@ -51,6 +59,7 @@ connection it needs for the ledger.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Optional
@@ -190,6 +199,51 @@ def reconcile_terminal_episode_weekly_reservations(
                         "result": res,
                     })
                     out["freed_usd"] = round(out["freed_usd"] + (before - after), 4)
+
+            # Pass 2 — RESERVED (never-committed) holds for a dead episode.
+            # Pass 1 only trues down 'committed' plan-weekly rows; a dead
+            # episode also strands (a) its $20-ish `preplan:*` pre-plan hold
+            # and (b) a `plan-weekly:*` row that stayed 'reserved' because its
+            # first scene never reached provider ACCEPTANCE (scenes failed
+            # earlier). Both consume the weekly ceiling forever. A `reserved`
+            # row is safe to release outright — no real spend is attached to
+            # it (real charges land on 'call'/'episode' scopes, and the
+            # `preplan-incurred:*` committed row keeps the real pre-plan LLM
+            # cost counted). db.release_budget_reservation only flips
+            # 'reserved' rows, so a committed/released row is never touched.
+            from hypogeum.db import release_budget_reservation  # noqa: PLC0415
+
+            reserved_rows = conn.execute(
+                f"""
+                SELECT reservation_id, idempotency_key, reserved_amount, channel_id
+                FROM budget_reservations
+                WHERE scope_kind = 'channel_weekly'
+                  AND status = 'reserved'
+                  AND substr(scope_ref, instr(scope_ref, ':') + 1) IN ({placeholders})
+                """,
+                tuple(wk),
+            ).fetchall()
+            for row in reserved_rows:
+                out["examined"] += 1
+                key = row["idempotency_key"] or ""
+                m = re.match(r"(?:preplan|plan-weekly|preplan-incurred):[^:]+:(ep_[0-9a-fA-F]+)", key)
+                if not m:
+                    continue
+                ep = m.group(1)
+                ch = row["channel_id"] or (key.split(":")[1] if ":" in key else None)
+                if channel_id is not None and ch != channel_id:
+                    continue
+                if ep in live or ep in published:
+                    continue
+                if not (ep in superseded or (ep in failed and ep not in completed_run)):
+                    continue
+                amt = float(row["reserved_amount"] or 0.0)
+                if release_budget_reservation(conn, row["reservation_id"], at=at):
+                    out["reaped"].append({
+                        "episode_id": ep, "channel_id": ch,
+                        "from_usd": round(amt, 4), "to_usd": 0.0, "result": "released_reserved",
+                    })
+                    out["freed_usd"] = round(out["freed_usd"] + amt, 4)
         finally:
             conn.close()
 

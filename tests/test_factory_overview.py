@@ -168,3 +168,51 @@ class TestWorkerLearningCycle:
 
         summary = run_worker._run_learning_cycle(db_path=db)
         assert summary["episodes"] == 1  # ep_ok still processed
+
+    def test_calls_comparative_insights_once_per_channel(self, tmp_path, monkeypatch):
+        """Regression (2026-09-05): generate_comparative_insights() must
+        run inside the SAME hourly worker cycle as the rest of the
+        learning pipeline -- it was originally wired only into
+        hypogeum.platform_sync.run_platform_sync(), which is reachable
+        only from the dashboard's manual sync button, never from the
+        worker's own automatic hourly _sync_analytics_background() ->
+        _run_learning_cycle() path this test covers."""
+        import run_worker
+        db = _db(tmp_path)
+        _two_channels(db)
+
+        monkeypatch.setattr("hypogeum.analytics_store.list_analytics",
+                            lambda db_path=None, limit=500: [])
+
+        calls: list = []
+        import hypogeum.comparative_insights as ci
+        monkeypatch.setattr(
+            ci, "generate_comparative_insights",
+            lambda channel_id, db_path=None: calls.append(channel_id) or
+                [{"affected_dim": "topic"}],
+        )
+
+        summary = run_worker._run_learning_cycle(db_path=db)
+
+        assert set(calls) == set(CHANNELS)
+        assert summary["comparative_insights"] == len(CHANNELS)
+
+    def test_one_channel_comparative_failure_does_not_abort_other_channels(self, tmp_path, monkeypatch):
+        import run_worker
+        db = _db(tmp_path)
+        _two_channels(db)
+
+        monkeypatch.setattr("hypogeum.analytics_store.list_analytics",
+                            lambda db_path=None, limit=500: [])
+
+        def _comparative(channel_id, db_path=None):
+            if channel_id == "hypogeum":
+                raise RuntimeError("boom")
+            return [{"affected_dim": "topic"}]
+
+        import hypogeum.comparative_insights as ci
+        monkeypatch.setattr(ci, "generate_comparative_insights", _comparative)
+
+        summary = run_worker._run_learning_cycle(db_path=db)
+        # zephyr's own insight still counted despite hypogeum's failure.
+        assert summary["comparative_insights"] == 1

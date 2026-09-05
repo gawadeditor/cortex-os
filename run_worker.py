@@ -339,18 +339,43 @@ def _run_learning_cycle(db_path: Path) -> dict:
     (source='api') platform analytics, run the learning engine's
     idempotent extract_insights() -> generate_actions() pass so fresh
     insights and pending learning_actions are always available to the
-    operator (and, in future, to discovery).
+    operator (and, in future, to discovery). Also runs
+    hypogeum.comparative_insights.generate_comparative_insights() per
+    channel — the cross-episode comparison (publishing_time / topic /
+    script / video) that no single-episode absolute-threshold rule can
+    ever produce; see that module's own docstring.
 
-    Best-effort and non-blocking — a failure for one episode is logged and
-    the sweep continues. Both learning-engine calls are INSERT-OR-IGNORE
-    idempotent, so re-running every analytics-sync cycle is safe and cheap.
+    Best-effort and non-blocking — a failure for one episode/channel is
+    logged and the sweep continues. All three calls are INSERT-OR-IGNORE
+    idempotent (or, for the cadence recommendation, its own pending-action
+    dedup), so re-running every analytics-sync cycle is safe and cheap.
     """
-    summary = {"episodes": 0, "insights": 0, "actions": 0, "cadence_recs": 0}
+    summary = {"episodes": 0, "insights": 0, "actions": 0, "cadence_recs": 0, "comparative_insights": 0}
     try:
         from hypogeum.analytics_store import list_analytics
+        from hypogeum.comparative_insights import generate_comparative_insights
         from hypogeum.learning_engine import (
             extract_insights, generate_actions, generate_cadence_recommendation,
         )
+
+        # Comparative insights first (per channel) -- they write NEW rows
+        # into analytics_insights keyed by episode_id, which the
+        # per-episode loop below must see when it calls generate_actions()
+        # for that same episode_id, or a comparative insight would sit
+        # un-actioned until the NEXT hourly cycle.
+        try:
+            from hypogeum.channel_config import list_channel_profiles
+            for cp in list_channel_profiles(db_path=db_path):
+                cid = getattr(cp, "channel_id", None)
+                if not cid:
+                    continue
+                try:
+                    new_comparative = generate_comparative_insights(cid, db_path=db_path)
+                    summary["comparative_insights"] += len(new_comparative or [])
+                except Exception as exc:
+                    log.error("learning_cycle_comparative_error channel=%s error=%s", cid, exc)
+        except Exception as exc:
+            log.error("learning_cycle_comparative_channels_error error=%s", exc)
 
         records = list_analytics(db_path=db_path, limit=500)
         # F8 data-integrity contract: only real API analytics drive learning.
@@ -380,10 +405,12 @@ def _run_learning_cycle(db_path: Path) -> dict:
         except Exception as exc:
             log.error("learning_cycle_cadence_error error=%s", exc)
 
-        if summary["episodes"] or summary["cadence_recs"]:
+        if summary["episodes"] or summary["cadence_recs"] or summary["comparative_insights"]:
             log.info(
-                "learning_cycle_complete episodes=%d insights=%d pending_actions=%d cadence_recs=%d",
-                summary["episodes"], summary["insights"], summary["actions"], summary["cadence_recs"],
+                "learning_cycle_complete episodes=%d insights=%d pending_actions=%d "
+                "cadence_recs=%d comparative_insights=%d",
+                summary["episodes"], summary["insights"], summary["actions"],
+                summary["cadence_recs"], summary["comparative_insights"],
             )
     except Exception as exc:
         log.error("learning_cycle_error error=%s", exc)

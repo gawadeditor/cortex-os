@@ -1478,6 +1478,31 @@ def run_worker(
         except Exception as exc:
             log.warning("self_healing_sweep_error error=%s", exc)
 
+        # Weekly-budget reaper: muapi commits the full plan-maximum estimate
+        # to the channel_weekly scope on first-scene acceptance and nothing
+        # ever trues it down when the episode then dies (failed QA /
+        # superseded / abandoned) — so a few dead plans can eat a channel's
+        # whole weekly ceiling and silently block new production. This
+        # shrinks each dead episode's committed weekly hold to its real
+        # post-plan spend (or releases it). One-directional, idempotent,
+        # never touches a published or still-live episode. Cheap (indexed
+        # SELECTs over this + last ISO week), no-raise.
+        try:
+            from hypogeum.weekly_reservation_reaper import (
+                reconcile_terminal_episode_weekly_reservations,
+            )
+            _reap = reconcile_terminal_episode_weekly_reservations(db_path=db_path, log=log)
+            if _reap.get("reaped"):
+                log.info(
+                    "weekly_reservation_reaper reaped=%d freed_usd=%.2f episodes=%s",
+                    len(_reap["reaped"]), _reap.get("freed_usd", 0.0),
+                    [r["episode_id"] for r in _reap["reaped"]],
+                )
+            elif not _reap.get("ok"):
+                log.warning("weekly_reservation_reaper_failed error=%s", _reap.get("error"))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("weekly_reservation_reaper_error error=%s", exc)
+
         # Publish-attempt reconciliation: a process that died between the
         # submission_ledger 'submitting' transition and recording the
         # provider result leaves that (episode, deliverable, platform)

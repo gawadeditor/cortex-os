@@ -3657,6 +3657,72 @@ def get_budget_reservation(conn: sqlite3.Connection, reservation_id: str) -> Opt
     return dict(row) if row else None
 
 
+def shrink_terminal_weekly_reservation(
+    conn: sqlite3.Connection, reservation_id: str, new_amount: str, *, at: str,
+) -> str:
+    """
+    Reconcile a COMMITTED channel_weekly plan reservation DOWNWARD to a
+    dead episode's real spend, or release it when nothing was really spent.
+
+    This is the ONLY write path allowed to touch an already-'committed'
+    weekly row, and it is deliberately one-directional:
+
+      - scope_kind MUST be 'channel_weekly' and status MUST be 'committed';
+      - new_amount MUST be <= the row's current reserved_amount (a reaper
+        can only ever shrink a hold, never inflate one -- inflation would
+        be a budget-bypass in reverse and is refused);
+      - new_amount <= 0            -> status='released' (episode generated
+                                     no post-plan paid media at all);
+      - 0 < new_amount < current   -> reserved_amount = committed_amount =
+                                     new_amount, still 'committed' (real
+                                     money was spent -- it keeps consuming
+                                     that much weekly headroom, just not
+                                     the padded plan-maximum estimate).
+
+    Callers: hypogeum.weekly_reservation_reaper only. Not idempotent-keyed
+    (the reaper recomputes the target each pass and no-ops when the row is
+    already at/below it -- see "already_at_target").
+
+    Returns one of: "shrunk", "released", "already_at_target",
+    "not_committed", "refused_inflation", "not_found".
+    """
+    from decimal import Decimal  # local: only this function needs it
+
+    row = conn.execute(
+        "SELECT scope_kind, status, reserved_amount FROM budget_reservations "
+        "WHERE reservation_id = ?",
+        (reservation_id,),
+    ).fetchone()
+    if row is None:
+        return "not_found"
+    if row["scope_kind"] != "channel_weekly" or row["status"] != "committed":
+        return "not_committed"
+
+    current = Decimal(str(row["reserved_amount"]))
+    target = Decimal(str(new_amount))
+    if target > current:
+        return "refused_inflation"
+    if target <= 0:
+        conn.execute(
+            "UPDATE budget_reservations SET status='released', resolved_at=? "
+            "WHERE reservation_id=? AND status='committed'",
+            (at, reservation_id),
+        )
+        conn.commit()
+        return "released"
+    # A cent of slack keeps repeated reaper passes from churning the row.
+    if current - target < Decimal("0.01"):
+        return "already_at_target"
+    ts = f"{target:.6f}"
+    conn.execute(
+        "UPDATE budget_reservations SET reserved_amount=?, committed_amount=?, "
+        "resolved_at=? WHERE reservation_id=? AND status='committed'",
+        (ts, ts, at, reservation_id),
+    )
+    conn.commit()
+    return "shrunk"
+
+
 def sum_reserved_and_committed(conn: sqlite3.Connection, scope_kind: str, scope_ref: str) -> str:
     """Returns the exact Decimal-string sum of every non-released
     reservation for (scope_kind, scope_ref)."""

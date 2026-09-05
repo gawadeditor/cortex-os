@@ -153,26 +153,6 @@ def _probe_subtitle_filter_available(ffmpeg_binary: str) -> bool:
     return (" subtitles " in out or "subtitles " in out) and (" ass " in out or "ass " in out)
 
 
-def _probe_drawtext_filter_available(ffmpeg_binary: str) -> bool:
-    """
-    Read-only capability probe: does `ffmpeg_binary -filters` list
-    'drawtext' (requires libfreetype)? Sibling of
-    _probe_subtitle_filter_available -- same "ask the binary, don't assume"
-    posture, used to gate Script Package text_overlays burn-in (Assembly's
-    _burn_text_overlays) the same way captions gate on libass.
-    """
-    try:
-        result = subprocess.run(
-            [ffmpeg_binary, "-filters"],
-            capture_output=True, text=True, timeout=15,
-        )
-    except Exception:
-        return False
-    if result.returncode != 0:
-        return False
-    return "drawtext" in result.stdout
-
-
 def assert_subtitle_filter_available(ffmpeg_binary: str) -> None:
     """
     Fail closed before ever attempting a caption burn-in: raises

@@ -204,22 +204,32 @@ def publish_channel_release(
             status="blocked_schedule", readiness_by_platform=readiness_by_platform, schedule=schedule_result,
             blocked_reason=schedule_result.blocked_reason, blocked_platforms=blocked_platforms,
         )
-    if not publish_now and schedule_result.slot is not None:
+    # One-episode-per-day-per-channel — enforced for a scheduled release
+    # (schedule_result.slot) AND for a publish_now release (its "slot" is
+    # today). A publish_now that bypassed this check is exactly how a
+    # channel ended up with two posts on 2026-09-05 (a forced republish
+    # landing on a day that already had a scheduled/published episode);
+    # publish_now is a release for TODAY and must respect the daily cap
+    # the same as any other.
+    _guard_slot = schedule_result.slot
+    if publish_now and _guard_slot is None:
+        _guard_slot = (now or datetime.now(timezone.utc))
+    if _guard_slot is not None:
         try:
             from hypogeum.publishing.publish_slot_ledger import day_is_taken, record_slot
-            clash = day_is_taken(channel_id, schedule_result.slot, episode_id, db_path=db_path)
+            clash = day_is_taken(channel_id, _guard_slot, episode_id, db_path=db_path)
             if clash:
                 return ReleasePublishResult(
                     channel_id=channel_id, episode_id=episode_id, platforms=platforms,
                     status="blocked_schedule", readiness_by_platform=readiness_by_platform,
                     schedule=schedule_result, blocked_platforms=blocked_platforms,
                     blocked_reason=(
-                        f"channel '{channel_id}' already has episode '{clash}' scheduled to "
-                        f"publish on {str(schedule_result.slot)[:10]} — refusing a second "
-                        f"release for the same day (one episode per day per channel)"
+                        f"channel '{channel_id}' already has episode '{clash}' publishing on "
+                        f"{str(_guard_slot)[:10]} — refusing a second release for the same day "
+                        f"(one episode per day per channel; applies to publish_now too)"
                     ),
                 )
-            record_slot(channel_id, schedule_result.slot, episode_id, db_path=db_path)
+            record_slot(channel_id, _guard_slot, episode_id, db_path=db_path)
         except Exception:  # noqa: BLE001
             pass
 

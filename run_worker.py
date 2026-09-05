@@ -1183,6 +1183,22 @@ def run_iteration(
         log.debug("publishing_skipped_dry_run")
     elif getattr(config, "AUTO_ZERNIO_PUBLISHING_ENABLED", False):
         if clearance.cleared:
+            # Mirror Zernio's real post schedule into channel_publish_slots
+            # BEFORE the publishing sweep, so the one-episode-per-day guard
+            # (hypogeum.publishing.publish_slot_ledger.day_is_taken) checks
+            # against Zernio's truth, not a ledger that has drifted. Cheap
+            # (one Zernio GET), best-effort, never blocks the sweep.
+            try:
+                from hypogeum.publishing.zernio_schedule_sync import sync_zernio_schedule
+                _ss = sync_zernio_schedule(db_path=db_path, window_days_back=3)
+                if _ss.get("ok"):
+                    log.debug("zernio_schedule_synced written=%d removed=%d unattributed=%d",
+                              _ss.get("slots_written", 0), _ss.get("slots_removed", 0),
+                              _ss.get("unattributed", 0))
+                else:
+                    log.warning("zernio_schedule_sync_failed error=%s", _ss.get("error"))
+            except Exception as exc:  # noqa: BLE001
+                log.error("zernio_schedule_sync_error error=%s", exc)
             try:
                 effective_assets_root = Path(assets_root) if assets_root is not None else _DEFAULT_DB.parent
                 publishing_result = _process_channel_publishing(db_path=db_path, assets_root=effective_assets_root)

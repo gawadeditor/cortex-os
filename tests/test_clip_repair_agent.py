@@ -369,6 +369,111 @@ class TestStrategyB:
         assert entry["prompt_used"] == "a prompt"
         assert entry["fallback_used"] is False
 
+    def test_successful_repair_calls_qualify_asset(self, tmp_path):
+        """A successful Strategy B repair must run the repaired clip through
+        hypogeum.source_enhancement.qualify_asset() -- the documented "one
+        canonical asset-qualification boundary" every clip reaching Assembly
+        is supposed to pass through. Root-cause fix for the same
+        ep_3dee01a9 bug as the manifest-update test above: even with the
+        manifest correctly updated, a T2/T3-tier repair typically lands at
+        the model's native sub-spec resolution (source_enhancement runs
+        BEFORE assembly/clip_repair in pipeline order, so a Strategy B clip
+        has never been through it) and would otherwise fail A_VIDEO/
+        F_ARTIFACT_COMPATIBILITY forever."""
+        assets_root = tmp_path / "assets"
+        assets_root.mkdir()
+
+        scenes = [_make_scene("sc_broken", source_type="main_episode",
+                              scene_index=0, description="a scene")]
+        manifest_entry = {
+            "scene_id": "sc_broken", "asset_id": None,
+            "generation_status": "generation_failed",
+            "provider": "muapi", "tier_used": None, "model": None,
+            "prompt_used": None, "fallback_used": False,
+        }
+        vp = {"scenes": scenes, "asset_manifest": {"assets": [manifest_entry]}}
+        cfg = _make_config(max_generated=5)
+        log = MagicMock()
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent, **kwargs):
+            _write_generated_clip(output_dir, scene_spec)
+            return {
+                "asset_id": "episodes/ep_x/video/sc_sc_broken",
+                "generation_status": "generated", "provider": "muapi",
+                "tier_used": 2, "model_used": "veo3.1-lite-text-to-video",
+                "prompt_used": "a prompt", "fallback_used": False,
+            }
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
+             patch("hypogeum.muapi.reconcile_stuck_scene_authorization"), \
+             patch("hypogeum.source_enhancement.qualify_asset") as mock_qualify:
+            run_clip_repair(
+                visual_package=vp,
+                missing_scene_ids=["sc_broken"],
+                present_clip_ids=[],
+                assets_root=assets_root,
+                config=cfg,
+                episode_id="ep_x",
+                log=log,
+                channel_id="hypogeum",
+            )
+
+        mock_qualify.assert_called_once()
+        args, kwargs = mock_qualify.call_args
+        assert args[0] is manifest_entry
+        assert args[1] == assets_root / "episodes" / "ep_x" / "video" / "sc_sc_broken.mp4"
+        assert args[2] == "main_episode"
+        assert kwargs["channel_id"] == "hypogeum"
+
+    def test_qualify_asset_failure_does_not_abort_repair(self, tmp_path):
+        """qualify_asset() raising must not undo an already-successful
+        repair -- the clip stays repaired (manifest updated, counted in
+        repaired_by_generation), just not enhanced."""
+        assets_root = tmp_path / "assets"
+        assets_root.mkdir()
+
+        scenes = [_make_scene("sc_broken", scene_index=0, description="a scene")]
+        vp = {
+            "scenes": scenes,
+            "asset_manifest": {"assets": [
+                {
+                    "scene_id": "sc_broken", "asset_id": None,
+                    "generation_status": "generation_failed",
+                    "provider": "muapi", "tier_used": None, "model": None,
+                    "prompt_used": None, "fallback_used": False,
+                },
+            ]},
+        }
+        cfg = _make_config(max_generated=5)
+        log = MagicMock()
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent):
+            _write_generated_clip(output_dir, scene_spec)
+            return {
+                "asset_id": "episodes/ep_x/video/sc_sc_broken",
+                "generation_status": "generated", "provider": "muapi",
+                "tier_used": 2, "model_used": "veo3.1-lite-text-to-video",
+                "prompt_used": "a prompt", "fallback_used": False,
+            }
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
+             patch("hypogeum.source_enhancement.qualify_asset",
+                   side_effect=RuntimeError("boom")):
+            result = run_clip_repair(
+                visual_package=vp,
+                missing_scene_ids=["sc_broken"],
+                present_clip_ids=[],
+                assets_root=assets_root,
+                config=cfg,
+                episode_id="ep_x",
+                log=log,
+            )
+
+        assert "sc_broken" in result.repaired_by_generation
+        assert result.still_missing == []
+        entry = vp["asset_manifest"]["assets"][0]
+        assert entry["asset_id"] == "episodes/ep_x/video/sc_sc_broken"
+
     def test_generation_capped_at_max_generated(self, tmp_path):
         """Strategy B generates at most CLIP_REPAIR_MAX_GENERATED clips."""
         assets_root = tmp_path / "assets"

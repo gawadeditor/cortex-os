@@ -295,6 +295,41 @@ def run_clip_repair(
                         manifest_entry["model"] = asset_result.get("model_used")
                         manifest_entry["prompt_used"] = asset_result.get("prompt_used")
                         manifest_entry["fallback_used"] = asset_result.get("fallback_used", False)
+
+                        # Source Enhancement (2026-09-05 root-cause fix): the
+                        # pipeline stage order runs source_enhancement BEFORE
+                        # assembly (and clip_repair runs INSIDE assembly), so
+                        # a Strategy B clip has never been through it -- a
+                        # T2/T3-tier repair typically lands at the model's
+                        # native sub-spec resolution (e.g. 720x1280) and
+                        # would otherwise fail A_VIDEO/F_ARTIFACT_
+                        # COMPATIBILITY forever. hypogeum.source_enhancement.
+                        # qualify_asset() is documented as "the one canonical
+                        # asset-qualification boundary ... every video clip
+                        # that will become eligible for Assembly -- a VPD
+                        # primary clip, a clip_repair_agent coverage-fill
+                        # extra, a retry, or a reused clip -- must pass
+                        # through this function" -- Strategy B is exactly
+                        # the gap that promise didn't cover. Confirmed live
+                        # 2026-09-05 (ep_3dee01a9): three successfully
+                        # repaired clips stayed at raw 720x1280 and hard-
+                        # failed the gate. Never raises (qualify_asset's own
+                        # contract fails closed -- original clip left
+                        # untouched on any problem); a failure here just
+                        # means this specific clip stays at its repaired,
+                        # unenhanced resolution, exactly as before this fix.
+                        try:
+                            from hypogeum.source_enhancement import qualify_asset  # noqa: PLC0415
+                            qualify_asset(
+                                manifest_entry, target_path,
+                                missing_scene.get("source_type"), config, episode_id, log,
+                                channel_id=channel_id, output_dir=output_dir,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            log.warn(
+                                "clip_repair_source_enhancement_failed",
+                                episode_id=episode_id, scene_id=missing_sid, error=str(exc),
+                            )
                     log.info(
                         "clip_repair_strategy_b_clip",
                         episode_id=episode_id,

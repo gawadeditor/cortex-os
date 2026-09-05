@@ -1400,6 +1400,19 @@ class TestPostVPDAuthorization:
         assert exc_info.value.episode_id == "ep_test"
         assert exc_info.value.record["verdict"] == "BLOCKED"
 
+    def test_post_vpd_block_is_terminal_not_auto_retryable(self):
+        # A BLOCKED verdict is deterministic (hash-locked plan + static
+        # ceiling): the queue must not auto-retry it, re-burning every
+        # pre-VPD paid stage. Regression for ep_734076a3 (2026-09-06).
+        from hypogeum.agents.finance_agent import FinancePostVPDBlockedError
+        from hypogeum.failure_policy import FailurePolicy
+
+        assert FinancePostVPDBlockedError.failure_policy is FailurePolicy.TERMINAL
+        exc = FinancePostVPDBlockedError(
+            episode_id="ep_x", record={"verdict": "BLOCKED"},
+        )
+        assert getattr(exc, "failure_policy", None) is FailurePolicy.TERMINAL
+
     def test_post_vpd_record_validates_against_schema(self):
         from hypogeum.agents.finance_agent import run_post_vpd_authorization
         vpd_plan, plan, cfg = self._make_plan_and_vpd(scene_count=1, ceiling=50.0)

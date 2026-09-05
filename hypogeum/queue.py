@@ -1494,6 +1494,19 @@ def process_next(
                 # classes below get the new reason string.
                 _also_unrecoverable = (_pipeline_module.QARejectedError, _pipeline_module.ComplianceRejectedError)
 
+                # FinancePostVPDBlockedError: the compiled, content-hash-locked
+                # plan's bounded cost exceeds the static per-episode ceiling.
+                # Unlike FinanceBudgetBlockedError (a transient weekly-ledger
+                # constraint that frees up), neither input moves on a later
+                # release, so a plain release just re-picks and re-burns every
+                # pre-VPD paid stage. This one is genuinely about the plan, so
+                # it skips like a QA rejection. (2026-09-06: ep_734076a3.)
+                try:
+                    from hypogeum.agents.finance_agent import FinancePostVPDBlockedError
+                    _also_unrecoverable = _also_unrecoverable + (FinancePostVPDBlockedError,)
+                except Exception:  # noqa: BLE001
+                    pass
+
                 # GatedExecutionRefused is ONE class covering several distinct
                 # gate reasons via a free-text message -- operator_enabled/
                 # production_enabled/unattended_operation_enabled False, a

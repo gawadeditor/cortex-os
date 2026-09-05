@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Optional
 
 from hypogeum.config import Config
+from hypogeum.failure_policy import FailurePolicy
 from hypogeum.policy_cascade import get_effective_budget_ceiling
 from hypogeum.production_plan import (
     ROLE_CONTINGENCY,
@@ -202,7 +203,18 @@ class FinancePostVPDBlockedError(Exception):
     Raised by run_post_vpd_authorization() callers when the post-VPD budget
     gate returns verdict="BLOCKED". This halts the pipeline before any MUAPI
     video generation spend is incurred.
+
+    TERMINAL: a BLOCKED verdict means the compiled plan's bounded cost
+    exceeds the effective per-episode ceiling. Both inputs are stable —
+    the plan is content-hash-locked and the ceiling is channel/factory
+    config — so re-running the pipeline reproduces the block identically
+    while re-burning every pre-VPD paid stage (research, script,
+    narration, VPD planning). The operator must lower the plan cost or
+    raise the ceiling; no retry can clear it. (Observed 2026-09-06:
+    ep_734076a3 auto-retried a $27.72-vs-$25 block.)
     """
+    failure_policy = FailurePolicy.TERMINAL
+
     def __init__(self, episode_id: str, record: dict):
         self.episode_id = episode_id
         self.record = record

@@ -460,7 +460,9 @@ def fill_coverage_deficits(
     import math
 
     from hypogeum.agents.coverage_check import MAX_EDITORIAL_SPEED_FACTOR  # noqa: PLC0415
-    from hypogeum.source_enhancement import qualify_asset  # noqa: PLC0415
+    from hypogeum.source_enhancement import (  # noqa: PLC0415
+        check_and_trim_reference_frame_leak, qualify_asset,
+    )
     # Shared source of truth for "same shot" — owned by Cinematic Director,
     # not reimplemented here (see the ownership note above).
     from hypogeum.agents.cinematic_director import shot_diversity_key  # noqa: PLC0415
@@ -790,6 +792,10 @@ def fill_coverage_deficits(
                         # from, or None on the legacy no-plan fallback path.
                         "planned_shot_id": planned_shot.get("shot_id") if planned_shot else None,
                     }
+                    # I2V reference-frame leak (2026-09-05): same fix as
+                    # VPD's own generation path and Strategy B above — see
+                    # check_and_trim_reference_frame_leak()'s own docstring.
+                    check_and_trim_reference_frame_leak(extra_asset, extra_path, log)
                     qualify_asset(
                         extra_asset, extra_path, beat.source_type, config, episode_id, log,
                         channel_id=channel_id, output_dir=output_dir,
@@ -1180,7 +1186,9 @@ def fill_confirmed_missing_shots(
         scene_file_path,
         submit_scene,
     )
-    from hypogeum.source_enhancement import qualify_asset  # noqa: PLC0415
+    from hypogeum.source_enhancement import (  # noqa: PLC0415
+        check_and_trim_reference_frame_leak, qualify_asset,
+    )
     from hypogeum.scene_identity import (  # noqa: PLC0415
         enforce_global_scene_identity,
         enforce_scene_internal_consistency,
@@ -1428,6 +1436,10 @@ def fill_confirmed_missing_shots(
             )
             break
 
+        # I2V reference-frame leak (2026-09-05): same fix as VPD's own
+        # generation path and the other two qualify_asset() sites in this
+        # file — see check_and_trim_reference_frame_leak()'s own docstring.
+        check_and_trim_reference_frame_leak(manifest_entry, clip_path, log)
         qualify_asset(
             manifest_entry, clip_path, source_type, config, episode_id, log,
             channel_id=channel_id, output_dir=output_dir,

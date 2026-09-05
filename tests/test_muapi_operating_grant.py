@@ -74,11 +74,14 @@ def _op_bindings():
 def _sign_operating_grant(priv, db_path, *, grant_id="op_g", weekly_ceiling=Decimal("80.00"),
                           domains=("muapi_video",), workflow_version="1.0.0"):
     bindings = _op_bindings()
+    _total = authority.operating_grant_total_capacity(
+        weekly_ceiling, "2026-08-01T00:00:00Z", "2099-01-01T00:00:00Z",
+    )
     checksum = authority.compute_grant_checksum(
         channel_id=_CH, episode_id="*", workflow_id="hypogeum_main_production",
         workflow_version=workflow_version, workflow_checksum="a" * 64,
         production_plan_content_hash=None, bindings=bindings,
-        max_total_spend_all_bindings=weekly_ceiling, currency="USD",
+        max_total_spend_all_bindings=_total, currency="USD",
         expires_at="2099-01-01T00:00:00Z", grant_kind="channel_operating",
         channel_package_version="1.0", channel_package_checksum="b" * 64,
         allowed_provider_domains=list(domains), cadence_snapshot="",
@@ -92,7 +95,7 @@ def _sign_operating_grant(priv, db_path, *, grant_id="op_g", weekly_ceiling=Deci
         workflow_version=workflow_version, workflow_checksum="a" * 64,
         channel_package_version="1.0", channel_package_checksum="b" * 64,
         allowed_bindings=(GrantBindingApproval("muapi", "veo3.1-lite-text-to-video", "video.text_to_video"),),
-        currency="USD", max_cost_per_call=Decimal("2.50"), max_total_spend=weekly_ceiling,
+        currency="USD", max_cost_per_call=Decimal("2.50"), max_total_spend=_total,
         max_calls=2000, retry_authorized=True, fallback_authorized=True,
         issued_at="2026-08-01T00:00:00Z", expires_at="2099-01-01T00:00:00Z",
         approver_identity="operator", nonce=f"n_{grant_id}",

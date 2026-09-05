@@ -104,10 +104,11 @@ def _sign_and_register_operating_grant(
     tamper=False, approver="operator_x", nonce=None,
 ):
     bindings = _bindings()
+    _total = authority.operating_grant_total_capacity(weekly_ceiling, valid_from, expires_at)
     checksum = authority.compute_grant_checksum(
         channel_id=channel_id, episode_id="*", workflow_id=_WF_ID, workflow_version=workflow_version,
         workflow_checksum=_WF_SUM, production_plan_content_hash=None, bindings=bindings,
-        max_total_spend_all_bindings=weekly_ceiling, currency="USD", expires_at=expires_at,
+        max_total_spend_all_bindings=_total, currency="USD", expires_at=expires_at,
         grant_kind="channel_operating", channel_package_version=_CP_VER, channel_package_checksum=_CP_SUM,
         allowed_provider_domains=list(domains), cadence_snapshot=cadence,
         weekly_exposure_ceiling_usd=weekly_ceiling, valid_from=valid_from,
@@ -119,7 +120,7 @@ def _sign_and_register_operating_grant(
         workflow_version=workflow_version, workflow_checksum=_WF_SUM,
         channel_package_version=_CP_VER, channel_package_checksum=_CP_SUM,
         allowed_bindings=tuple(GrantBindingApproval(b.provider, b.model, b.provider_operation) for b in bindings),
-        currency="USD", max_cost_per_call=Decimal("1.00"), max_total_spend=weekly_ceiling, max_calls=2000,
+        currency="USD", max_cost_per_call=Decimal("1.00"), max_total_spend=_total, max_calls=2000,
         retry_authorized=False, fallback_authorized=False, issued_at=valid_from, expires_at=expires_at,
         approver_identity=approver, nonce=nonce or f"nonce_{grant_id}",
     )

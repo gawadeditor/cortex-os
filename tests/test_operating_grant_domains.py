@@ -75,10 +75,13 @@ def _bindings(triples):
 def _register_operating_grant(priv, db_path, *, domains, binding_triples,
                               grant_id="op_g", tamper_domains=None):
     gb = _bindings(binding_triples)
+    _total = authority.operating_grant_total_capacity(
+        _CEIL, "2026-01-01T00:00:00Z", "2099-01-01T00:00:00Z",
+    )
     checksum = authority.compute_grant_checksum(
         channel_id=_CH, episode_id="*", workflow_id=_WF_ID, workflow_version=_WF_VER,
         workflow_checksum=_WF_SUM, production_plan_content_hash=None, bindings=gb,
-        max_total_spend_all_bindings=_CEIL, currency="USD", expires_at="2099-01-01T00:00:00Z",
+        max_total_spend_all_bindings=_total, currency="USD", expires_at="2099-01-01T00:00:00Z",
         grant_kind="channel_operating", channel_package_version=_CP_VER, channel_package_checksum=_CP_SUM,
         allowed_provider_domains=list(domains), cadence_snapshot=_CADENCE,
         weekly_exposure_ceiling_usd=_CEIL, valid_from="2026-01-01T00:00:00Z",
@@ -90,7 +93,7 @@ def _register_operating_grant(priv, db_path, *, domains, binding_triples,
         workflow_version=_WF_VER, workflow_checksum=_WF_SUM, channel_package_version=_CP_VER,
         channel_package_checksum=_CP_SUM,
         allowed_bindings=tuple(GrantBindingApproval(b.provider, b.model, b.provider_operation) for b in gb),
-        currency="USD", max_cost_per_call=Decimal("3.00"), max_total_spend=_CEIL, max_calls=1000,
+        currency="USD", max_cost_per_call=Decimal("3.00"), max_total_spend=_total, max_calls=1000,
         retry_authorized=False, fallback_authorized=False, issued_at=AT, expires_at="2099-01-01T00:00:00Z",
         approver_identity="operator_test", nonce=f"nonce_{grant_id}",
     )

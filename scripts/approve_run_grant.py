@@ -74,6 +74,7 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key  #
 from hypogeum.approval_artifact import GrantBindingApproval, sign_approval_artifact  # noqa: E402
 from hypogeum.authorization_authority import (  # noqa: E402
     compute_grant_checksum,
+    operating_grant_total_capacity,
     register_channel_operating_grant,
     register_run_grant,
 )
@@ -199,12 +200,18 @@ def _register_channel_operating(args, spec: dict) -> int:
 
     bindings = _build_bindings(spec)
     ceiling = _D(str(spec["weekly_exposure_ceiling_usd"]))
+    # Grant-lifetime backstop: weekly ceiling scaled over the whole validity
+    # window (must match register_channel_operating_grant's own derivation
+    # exactly, or the recomputed checksum won't verify).
+    total_capacity = operating_grant_total_capacity(
+        ceiling, spec["valid_from"], spec["expires_at"],
+    )
     domains = list(spec["allowed_provider_domains"])
     checksum = compute_grant_checksum(
         channel_id=spec["channel_id"], episode_id="*", workflow_id=spec["workflow_id"],
         workflow_version=spec["workflow_version"], workflow_checksum=spec["workflow_checksum"],
         production_plan_content_hash=None, bindings=bindings,
-        max_total_spend_all_bindings=ceiling, currency=spec["currency"], expires_at=spec["expires_at"],
+        max_total_spend_all_bindings=total_capacity, currency=spec["currency"], expires_at=spec["expires_at"],
         grant_kind="channel_operating", channel_package_version=spec["channel_package_version"],
         channel_package_checksum=spec["channel_package_checksum"], allowed_provider_domains=domains,
         cadence_snapshot=spec["cadence_snapshot"], weekly_exposure_ceiling_usd=ceiling,
@@ -220,6 +227,7 @@ def _register_channel_operating(args, spec: dict) -> int:
     print(f"  domains:         {', '.join(sorted(domains))}")
     print(f"  cadence:         {spec['cadence_snapshot']}")
     print(f"  weekly ceiling:  USD {ceiling}   (a CEILING, not capacity)")
+    print(f"  lifetime cap:    USD {total_capacity}   (weekly x validity weeks; grant backstop)")
     print(f"  valid:           {spec['valid_from']}  ->  {spec['expires_at']}")
     print(f"  grant_checksum:  {checksum}")
     print("=" * 72)
@@ -241,7 +249,7 @@ def _register_channel_operating(args, spec: dict) -> int:
             allowed_bindings=tuple(GrantBindingApproval(b.provider, b.model, b.provider_operation) for b in bindings),
             currency=spec["currency"],
             max_cost_per_call=max((b.max_cost_per_call for b in bindings), default=_D("0")),
-            max_total_spend=ceiling, max_calls=sum(b.max_calls for b in bindings),
+            max_total_spend=total_capacity, max_calls=sum(b.max_calls for b in bindings),
             retry_authorized=any(b.retry_authorized for b in bindings),
             fallback_authorized=any(b.fallback_authorized for b in bindings),
             issued_at=args.issued_at, expires_at=spec["expires_at"],

@@ -25,8 +25,10 @@ or authorization is touched.
 from __future__ import annotations
 
 import base64
+import math
 import re
 import sqlite3
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Optional, Sequence
@@ -57,6 +59,7 @@ __all__ = [
     "compute_grant_checksum",
     "register_run_grant",
     "register_channel_operating_grant",
+    "operating_grant_total_capacity",
     "resolve_active_operating_grant",
     "OperatingGrantNotYetValidError",
     "CHANNEL_OPERATING_EPISODE_SENTINEL",
@@ -384,6 +387,42 @@ class OperatingGrantNotYetValidError(AuthorizationAuthorityError):
     """`at` precedes the operating grant's valid_from."""
 
 
+def operating_grant_total_capacity(
+    weekly_exposure_ceiling_usd, valid_from: str, expires_at: str,
+) -> Decimal:
+    """The grant-lifetime spend capacity (``max_total_spend_all_bindings``)
+    for a Channel Operating Grant: the operator's weekly ceiling scaled to
+    the whole operating period, so a grant valid for N weeks can actually
+    fund N weeks of autonomous production.
+
+    Previously this value was hardwired equal to the *weekly* ceiling, which
+    silently bricked a channel roughly one week after signing: once the
+    grant's cumulative ledger reached the weekly number, EVERY paid MUAPI
+    call failed grant-wide-capacity — so clip-repair could never fill a
+    missing scene and every episode then failed QA with
+    ``production_ready=False``. (twinkle only kept running because its grant
+    was re-signed every few days; hypogeum, signed once, exhausted.)
+
+    The authoritative week-to-week gate stays the weekly-budget ledger
+    (``hypogeum.weekly_budget``); this is only the grant's OUTER lifetime
+    bound — a backstop against a runaway/compromised grant, not the working
+    limit. Derived from the signed ``valid_from``/``expires_at`` so signer
+    and registrar compute it identically with no extra signed field.
+    """
+    weekly = Decimal(str(weekly_exposure_ceiling_usd))
+
+    def _parse(s: str) -> datetime:
+        # Python 3.9's datetime.fromisoformat() rejects a trailing 'Z'.
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+
+    try:
+        span_days = (_parse(expires_at) - _parse(valid_from)).days
+    except Exception:  # noqa: BLE001 — a malformed span falls back to one week
+        span_days = 7
+    weeks = max(1, math.ceil(max(span_days, 1) / 7))
+    return weekly * weeks
+
+
 def register_channel_operating_grant(
     *,
     grant_id: str,
@@ -420,15 +459,27 @@ def register_channel_operating_grant(
     Runtime admission rejects the grant if this value no longer equals the
     operator's currently-configured weekly limit (the operator must
     re-sign the grant when the policy changes).
+
+    max_total_spend_all_bindings (the grant's cumulative-ledger backstop) is
+    NOT this weekly ceiling — it is operating_grant_total_capacity(ceiling,
+    valid_from, expires_at) = ceiling scaled across the grant's whole
+    validity window, so the grant can fund its entire operating period. It
+    is derived here (and identically in the offline signer) rather than
+    signed as its own field.
     """
     if currency != "USD":
         raise AuthorizationAuthorityError("Channel Operating Grant currency must be USD")
     ceiling = Decimal(str(weekly_exposure_ceiling_usd))
+    # Grant-lifetime spend capacity is the weekly ceiling scaled across the
+    # whole operating period (see operating_grant_total_capacity) — NOT the
+    # weekly ceiling itself, which used to brick a channel ~1 week after
+    # signing. The weekly ledger remains the real weekly gate.
+    total_capacity = operating_grant_total_capacity(ceiling, valid_from, expires_at)
     grant_checksum = compute_grant_checksum(
         channel_id=channel_id, episode_id=CHANNEL_OPERATING_EPISODE_SENTINEL, workflow_id=workflow_id,
         workflow_version=workflow_version, workflow_checksum=workflow_checksum,
         production_plan_content_hash=None,
-        bindings=bindings, max_total_spend_all_bindings=ceiling, currency=currency,
+        bindings=bindings, max_total_spend_all_bindings=total_capacity, currency=currency,
         expires_at=expires_at,
         grant_kind="channel_operating",
         channel_package_version=channel_package_version,
@@ -457,7 +508,7 @@ def register_channel_operating_grant(
                 channel_id=channel_id, episode_id=CHANNEL_OPERATING_EPISODE_SENTINEL, workflow_id=workflow_id,
                 workflow_version=workflow_version, workflow_checksum=workflow_checksum,
                 production_plan_content_hash="", bindings=bindings,
-                max_total_spend_all_bindings=ceiling, currency=currency, expires_at=expires_at,
+                max_total_spend_all_bindings=total_capacity, currency=currency, expires_at=expires_at,
                 approval_id=approval_artifact.approval_id, approval_version=approval_artifact.approval_version,
                 grant_kind="channel_operating",
                 channel_package_version=channel_package_version,

@@ -36,6 +36,7 @@ log = get_logger(agent="client_content_sync")
 _MAX_PAGES = 20
 _PAGE_LIMIT = 100
 _MAX_RETENTION_CALLS = 10          # per account per run — incremental
+_MAX_ANALYSIS_CALLS = 15          # per client per run — cost-gated below too
 _PLATFORM_KEYS = ("youtube", "instagram", "tiktok", "facebook")
 
 
@@ -92,8 +93,8 @@ def _fetch_external_posts(provider, account_id: str, db_path, errors: dict) -> l
     return posts
 
 
-def sync_client_content(client_id: str, *, provider=None,
-                        db_path: Optional[Path] = None) -> dict:
+def sync_client_content(client_id: str, *, provider=None, analyze: bool = False,
+                        analyze_fn=None, db_path: Optional[Path] = None) -> dict:
     """Sync one client. Never raises."""
     from hypogeum import client_manager as cm
     from hypogeum.analytics_store import store_content_metrics
@@ -105,7 +106,7 @@ def sync_client_content(client_id: str, *, provider=None,
 
     out: dict = {"client_id": client_id, "ok": False, "accounts": 0,
                  "content_items": 0, "metric_rows": 0, "retention": 0,
-                 "audience_rows": 0, "comments": 0, "errors": {}}
+                 "audience_rows": 0, "comments": 0, "profiled": 0, "errors": {}}
 
     client = cm.get_client(client_id, db_path=db_path)
     if not client or client.get("status") == "archived":
@@ -162,6 +163,10 @@ def sync_client_content(client_id: str, *, provider=None,
         out["audience_rows"] += _sync_account_native(provider, client_id, aid, plat, db_path, out)
 
     _sync_account_rollups(provider, client_id, accounts, db_path, out)
+
+    if analyze and client.get("analysis_depth") != "full_video":
+        out["profiled"] = _profile_new_content(client, seen_content, analyze_fn,
+                                               db_path, out)
 
     out["ok"] = out["content_items"] > 0 or out["metric_rows"] > 0
     log.info("client_content_synced", client_id=client_id,
@@ -329,6 +334,39 @@ def _sync_account_native(provider, client_id, account_id, platform, db_path, out
     return audience_rows
 
 
+def _profile_new_content(client, content_ids, analyze_fn, db_path, out) -> int:
+    """Run the content-analysis agent on this client's unprofiled items,
+    stopping at the monthly analysis budget or _MAX_ANALYSIS_CALLS."""
+    from hypogeum import client_manager as cm
+    from hypogeum.agents.content_analysis_agent import analyze_content_item
+
+    budget = float(client.get("monthly_analysis_budget_usd") or 0.0)
+    spent = cm.analysis_spend_this_month(client["client_id"], db_path=db_path)
+    done = 0
+    for cid in list(content_ids):
+        if done >= _MAX_ANALYSIS_CALLS or (budget and spent >= budget):
+            break
+        if cm.get_content_profile(cid, db_path=db_path):
+            continue
+        item = cm.get_content_item(cid, db_path=db_path)
+        if not item:
+            continue
+        try:
+            res = analyze_content_item(item, client=client, analyze_fn=analyze_fn,
+                                       db_path=db_path)
+        except NotImplementedError:
+            break
+        except Exception as exc:  # noqa: BLE001
+            out["errors"][f"analyze:{cid}"] = str(exc)[:120]
+            continue
+        if res.get("ok"):
+            spent += float(res.get("cost_usd") or 0.0)
+            done += 1
+        elif res.get("error"):
+            out["errors"][f"analyze:{cid}"] = res["error"][:120]
+    return done
+
+
 def _sync_account_rollups(provider, client_id, accounts, db_path, out) -> None:
     """best-time / content-decay / posting-frequency / follower-stats for the
     client, into channel_analytics_rollup scope='client:<id>'. Zernio's
@@ -365,12 +403,14 @@ def _sync_account_rollups(provider, client_id, accounts, db_path, out) -> None:
         conn.close()
 
 
-def sync_all_clients(*, provider=None, db_path: Optional[Path] = None) -> dict:
+def sync_all_clients(*, provider=None, analyze: bool = True,
+                     db_path: Optional[Path] = None) -> dict:
     from hypogeum import client_manager as cm
     out = {"clients": 0, "results": []}
     for c in cm.list_clients(status="active", db_path=db_path):
-        r = sync_client_content(c["client_id"], provider=provider, db_path=db_path)
+        r = sync_client_content(c["client_id"], provider=provider, analyze=analyze,
+                                db_path=db_path)
         out["clients"] += 1
         out["results"].append({k: r[k] for k in ("client_id", "ok", "content_items",
-                                                 "metric_rows", "errors")})
+                                                 "metric_rows", "profiled", "errors")})
     return out

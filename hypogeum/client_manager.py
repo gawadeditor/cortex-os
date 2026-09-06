@@ -344,3 +344,71 @@ def list_content_items(client_id: str, *, limit: int = 500,
     finally:
         conn.close()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# content profiles (creative analysis — one per content_item)
+# ---------------------------------------------------------------------------
+
+def store_content_profile(content_id: str, analysis: dict, *,
+                          analysis_depth: str = "metadata",
+                          model_slug: Optional[str] = None,
+                          cost_usd: Optional[float] = None,
+                          db_path: Optional[Path] = None) -> str:
+    """Insert or replace the creative profile for a content item."""
+    now = _now()
+    conn = _conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT profile_id FROM content_profiles WHERE content_id=?", (content_id,),
+        ).fetchone()
+        pid = row["profile_id"] if row else uuid.uuid4().hex
+        conn.execute(
+            "INSERT INTO content_profiles (profile_id, content_id, analysis_json, "
+            "analysis_depth, model_slug, cost_usd, created_at) VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(content_id) DO UPDATE SET analysis_json=excluded.analysis_json, "
+            "analysis_depth=excluded.analysis_depth, model_slug=excluded.model_slug, "
+            "cost_usd=excluded.cost_usd, created_at=excluded.created_at",
+            (pid, content_id, _json.dumps(analysis), analysis_depth, model_slug,
+             cost_usd, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return pid
+
+
+def get_content_profile(content_id: str, *,
+                        db_path: Optional[Path] = None) -> Optional[dict]:
+    conn = _conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM content_profiles WHERE content_id=?", (content_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    try:
+        d["analysis"] = _json.loads(d.get("analysis_json") or "{}")
+    except Exception:  # noqa: BLE001
+        d["analysis"] = {}
+    return d
+
+
+def analysis_spend_this_month(client_id: str, *,
+                              db_path: Optional[Path] = None) -> float:
+    """Sum content_profiles.cost_usd for this client's items, current UTC month."""
+    prefix = datetime.now(timezone.utc).strftime("%Y-%m")
+    conn = _conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(p.cost_usd), 0) AS s FROM content_profiles p "
+            "JOIN content_items c ON c.content_id = p.content_id "
+            "WHERE c.client_id = ? AND p.created_at LIKE ?",
+            (client_id, prefix + "%"),
+        ).fetchone()
+    finally:
+        conn.close()
+    return float(row["s"] or 0.0)

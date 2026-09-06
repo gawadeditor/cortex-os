@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Advisory Clients — Cortex</title>
+  {% include '_base_style.html' %}
+  <style>
+    .cl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+               gap: var(--space-md); margin-top: var(--space-lg); }
+    .cl-card { display: flex; flex-direction: column; gap: 10px; text-decoration: none; }
+    .cl-card:hover { border-color: var(--accent-line); }
+    .cl-card .cl-name { font-family: var(--font-display); font-size: 15px; color: var(--text); }
+    .cl-mode { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); }
+    .cl-stats { display: flex; gap: 18px; margin-top: 2px; }
+    .cl-stat b { font-family: var(--font-display); font-size: 18px; color: var(--text); display: block; }
+    .cl-stat span { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--faint); }
+    .cl-plats { display: flex; gap: 5px; flex-wrap: wrap; }
+    .cl-plat { font-size: 10px; padding: 2px 7px; border-radius: 5px; background: var(--overlay); color: var(--muted); }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+{% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
+
+<div class="container">
+
+{% call hero(
+     eyebrow='Advisory',
+     title='Client performance intelligence',
+     lede='Content Cortex did not produce — shot, edited and published for external clients whose accounts you manage. Cortex ingests each post, tracks how it performs, and turns the pattern into plain-language advice.',
+     figure=d.clients | length,
+     figure_label='clients tracked',
+     pill=(d.clients | selectattr('status', 'equalto', 'active') | list | length) ~ ' active',
+     pill_class='is-good' if d.clients else 'is-warn') %}
+  <a class="btn btn-primary" href="/clients/new?scope=factory">{{ icon('plus') }} New client</a>
+{% endcall %}
+
+{% if not d.clients %}
+<div class="dv-empty">
+  {{ icon('briefcase') }}
+  <div class="dv-empty-title">No advisory clients yet</div>
+  <div class="dv-empty-sub">Add a client, connect the social accounts you manage for them, and Cortex starts pulling their published content and performance.</div>
+  <a class="btn btn-primary" style="margin-top:12px;" href="/clients/new?scope=factory">{{ icon('plus') }} Add your first client</a>
+</div>
+{% else %}
+<div class="cl-grid">
+  {% for c in d.clients %}
+  <a class="card cl-card" href="/client/{{ c.client_id }}?scope=client:{{ c.client_id }}">
+    <div>
+      <div class="cl-name">{{ c.name }}</div>
+      <div class="cl-mode">{{ c.engagement_mode }} · {{ c.status }}</div>
+    </div>
+    <div class="cl-stats">
+      <div class="cl-stat"><b>{{ c.content_items }}</b><span>posts</span></div>
+      <div class="cl-stat"><b>{{ "{:,}".format(c.total_views) }}</b><span>views</span></div>
+      <div class="cl-stat"><b>{{ c.with_analytics }}</b><span>tracked</span></div>
+    </div>
+    {% if c.platforms %}
+    <div class="cl-plats">
+      {% for p in c.platforms %}<span class="cl-plat">{{ p | friendly_platform }}</span>{% endfor %}
+    </div>
+    {% else %}
+    <div class="cl-mode">No accounts connected yet</div>
+    {% endif %}
+  </a>
+  {% endfor %}
+</div>
+{% endif %}
+
+</div>
+</body>
+</html>

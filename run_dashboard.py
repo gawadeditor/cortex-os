@@ -475,26 +475,58 @@ def _nav_channels():
     return g._nav_channels
 
 
-def _current_scope():
-    """'factory' or a channel_id. A /channel/<id>/… path always wins, then
-    ?scope=, then the cortex_scope cookie, else 'factory'."""
+def _nav_clients():
+    """[{client_id, name}, ...] — Cortex Advisory tenants. Cached per request."""
+    if not hasattr(g, "_nav_clients"):
+        try:
+            from hypogeum.client_manager import list_clients
+            g._nav_clients = [
+                {"client_id": c["client_id"], "name": c.get("name") or c["client_id"]}
+                for c in list_clients(status="active", db_path=_db_path())
+            ]
+        except Exception:  # noqa: BLE001
+            g._nav_clients = []
+    return g._nav_clients
+
+
+def _known_scopes():
     ids = {c["channel_id"] for c in _nav_channels()}
+    ids |= {f"client:{c['client_id']}" for c in _nav_clients()}
+    ids.add("factory")
+    return ids
+
+
+def _current_scope():
+    """'factory', a channel_id, or 'client:<id>'. A /channel/<id>/… or
+    /client/<id>/… path always wins, then ?scope=, then the cortex_scope
+    cookie, else 'factory'."""
+    known = _known_scopes()
     m = re.match(r"^/channel/([^/]+)", request.path)
-    if m and m.group(1) in ids:
+    if m and m.group(1) in known:
         return m.group(1)
+    mc = re.match(r"^/client/([^/]+)", request.path)
+    if mc and f"client:{mc.group(1)}" in known:
+        return f"client:{mc.group(1)}"
     q = request.args.get("scope")
-    if q == "factory" or (q and q in ids):
+    if q and q in known:
         return q
     ck = request.cookies.get(_SCOPE_COOKIE)
-    if ck == "factory" or (ck and ck in ids):
+    if ck and ck in known:
         return ck
     return "factory"
 
 
 def _scope_channel():
-    """The channel_id the current view is scoped to, or None for the factory."""
+    """The channel_id the current view is scoped to, or None for the factory
+    or a client scope."""
     s = _current_scope()
-    return None if s == "factory" else s
+    return None if (s == "factory" or s.startswith("client:")) else s
+
+
+def _scope_client():
+    """The client_id the current view is scoped to, or None."""
+    s = _current_scope()
+    return s[len("client:"):] if s.startswith("client:") else None
 
 
 _EP_CHANNEL_CACHE: dict = {}
@@ -531,10 +563,13 @@ def _resolve_episode_channel(episode_id):
 @app.context_processor
 def _inject_scope():
     scope = _current_scope()
+    _cl = _scope_client()
     return {
         "scope":         scope,
-        "scope_channel": None if scope == "factory" else scope,
+        "scope_channel": _scope_channel(),
+        "scope_client":  _cl,
         "nav_channels":  _nav_channels(),
+        "nav_clients":   _nav_clients(),
         "nav_path":      request.path,
     }
 
@@ -543,7 +578,7 @@ def _inject_scope():
 def _persist_scope(resp):
     try:
         q = request.args.get("scope")
-        if q and (q == "factory" or q in {c["channel_id"] for c in _nav_channels()}):
+        if q and q in _known_scopes():
             resp.set_cookie(_SCOPE_COOKIE, q, max_age=60 * 60 * 24 * 365,
                             samesite="Lax", httponly=True)
     except Exception:  # noqa: BLE001
@@ -8291,6 +8326,98 @@ def intelligence_monetization_page():
     ch = request.args.get("channel_id") or _scope_channel()
     d = get_growth_dashboard(channel_id=ch or None, db_path=_db_path())
     return render_template("monetization.html", d=d)
+
+
+# ---------------------------------------------------------------------------
+# Cortex Advisory — client (external content) surfaces
+# ---------------------------------------------------------------------------
+
+@app.route("/clients")
+def clients_index_page():
+    from hypogeum.dashboard_clients import get_clients_overview
+    d = get_clients_overview(db_path=_db_path())
+    return render_template("clients.html", d=d)
+
+
+@app.route("/clients/new", methods=["GET", "POST"])
+def clients_new_page():
+    from hypogeum.client_manager import create_client
+    if request.method == "POST":
+        name = (request.form.get("name") or "").strip()
+        if not name:
+            return render_template("client_new.html", error="A client name is required."), 400
+        tz = (request.form.get("timezone") or "UTC").strip() or "UTC"
+        depth = request.form.get("analysis_depth") or "metadata"
+        mode = request.form.get("engagement_mode") or "observe"
+        brief = (request.form.get("brief") or "").strip() or None
+        try:
+            c = create_client(name, engagement_mode=mode, analysis_depth=depth,
+                              timezone=tz, brief={"note": brief} if brief else None,
+                              db_path=_db_path())
+        except Exception as exc:  # noqa: BLE001
+            return render_template("client_new.html", error=str(exc)), 400
+        cid = c["client_id"]
+        return redirect(f"/client/{cid}/accounts?scope=client:{cid}", 302)
+    return render_template("client_new.html", error=None)
+
+
+@app.route("/client/<client_id>")
+def client_overview_page(client_id):
+    from hypogeum.dashboard_clients import get_client_overview
+    d = get_client_overview(client_id, db_path=_db_path())
+    if not d.get("client"):
+        return render_template("not_found.html", kind="Client", id=client_id), 404
+    return render_template("client_detail.html", d=d)
+
+
+@app.route("/client/<client_id>/content")
+def client_content_page(client_id):
+    from hypogeum.dashboard_clients import get_client_content
+    d = get_client_content(client_id, db_path=_db_path())
+    if not d.get("client"):
+        return render_template("not_found.html", kind="Client", id=client_id), 404
+    return render_template("client_content.html", d=d)
+
+
+@app.route("/client/<client_id>/audience")
+def client_audience_page(client_id):
+    from hypogeum.dashboard_clients import get_client_overview
+    d = get_client_overview(client_id, db_path=_db_path())
+    if not d.get("client"):
+        return render_template("not_found.html", kind="Client", id=client_id), 404
+    return render_template("client_audience.html", d=d)
+
+
+@app.route("/client/<client_id>/accounts")
+def client_accounts_page(client_id):
+    from hypogeum.dashboard_clients import get_client_accounts
+    d = get_client_accounts(client_id, db_path=_db_path())
+    if not d.get("client"):
+        return render_template("not_found.html", kind="Client", id=client_id), 404
+    return render_template("client_accounts.html", d=d, flash=request.args.get("flash"))
+
+
+@app.route("/client/<client_id>/accounts/link", methods=["POST"])
+def client_accounts_link(client_id):
+    from hypogeum.client_manager import link_managed_account, unlink_managed_account
+    platform = request.form.get("platform") or ""
+    action = request.form.get("action") or "link"
+    try:
+        if action == "unlink":
+            unlink_managed_account(request.form.get("managed_account_id") or "",
+                                   db_path=_db_path())
+            msg = f"Unlinked {platform}"
+        else:
+            link_managed_account(
+                client_id, platform,
+                provider_account_id=request.form.get("provider_account_id") or None,
+                provider_profile_id=request.form.get("provider_profile_id") or None,
+                handle=request.form.get("handle") or None,
+                db_path=_db_path())
+            msg = f"Linked {platform}"
+    except Exception as exc:  # noqa: BLE001
+        msg = f"Error: {exc}"
+    return redirect(f"/client/{client_id}/accounts?scope=client:{client_id}&flash={msg}", 302)
 
 
 @app.route("/intelligence/sync")

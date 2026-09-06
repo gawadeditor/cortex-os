@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ d.client.name }} — Audience</title>
+  {% include '_base_style.html' %}
+  {% from '_charts.html' import hbar %}
+  <style>
+    .demo-row { display: grid; grid-template-columns: 100px 1fr 46px; gap: 10px; align-items: center; font-size: 11.5px; margin-bottom: 7px; }
+    .demo-row .demo-lbl { color: var(--muted); text-align: right; }
+    .demo-row .demo-pct { font-family: var(--font-mono); font-size: 11px; color: var(--text); text-align: right; }
+    .demo-group + .demo-group { margin-top: 14px; }
+    .demo-group-title { font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: var(--faint); margin-bottom: 8px; }
+    .bt-list { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+    .bt-slot { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px; padding: 7px 10px; background: var(--overlay); border-radius: 7px; }
+    .bt-slot .bt-when { font-family: var(--font-mono); color: var(--text); }
+    .bt-slot .bt-eng { font-size: 10.5px; color: var(--faint); }
+    .bt-slot.is-top { border: 1px solid var(--accent-line); background: var(--accent-bg); }
+    .cmt { font-size: 12px; line-height: 1.55; padding: 9px 0; border-bottom: 1px solid var(--border); }
+    .cmt:last-child { border-bottom: 0; }
+    .cmt-meta { font-size: 10px; color: var(--faint); margin-top: 3px; text-transform: uppercase; letter-spacing: .05em; }
+    .note { font-size: 11px; color: var(--faint); line-height: 1.5; margin-top: 12px; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+{% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
+
+<div class="container">
+
+{{ hero(
+     eyebrow='Client · audience',
+     title=d.client.name ~ ' — who is watching',
+     lede='Demographics, best posting times and audience comments pulled from the platforms you manage for this client.') }}
+
+<div class="grid grid-2">
+  <div class="card">
+    <div class="card-title">{{ icon('review') }} Who's actually watching</div>
+    {% if d.observed_audience %}
+      <p style="font-size:12px; line-height:1.55; margin:8px 0 14px; color:var(--text);">{{ d.observed_audience }}</p>
+    {% endif %}
+    {% set _yt = d.audience.get('youtube') or d.audience.get('instagram') or d.audience.get('tiktok') or d.audience.get('facebook') or {} %}
+    {% if _yt %}
+      {% for dim in ['age', 'gender', 'country'] %}
+        {% set rows = _yt.get(dim) %}
+        {% if rows %}
+        <div class="demo-group">
+          <div class="demo-group-title">{{ dim }}</div>
+          {% for row in rows[:6] %}
+          <div class="demo-row">
+            <span class="demo-lbl">{{ row.label }}</span>
+            {{ hbar(row.pct, 100, tone='accent') }}
+            <span class="demo-pct">{{ row.pct | round | int }}%</span>
+          </div>
+          {% endfor %}
+        </div>
+        {% endif %}
+      {% endfor %}
+    {% else %}
+      <div class="note">No demographic data yet — a platform needs roughly 100+ followers before it reports audience age, gender or geography.</div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <div class="card-title">{{ icon('calendar') }} Best time to post <span class="muted" style="font-weight:400;text-transform:none;letter-spacing:0;">— UTC</span></div>
+    {% if d.best_time %}
+      <div class="bt-list">
+        {% for s in d.best_time %}
+        <div class="bt-slot {{ 'is-top' if loop.first }}">
+          <span class="bt-when">{{ s.day }} {{ "%02d:00"|format(s.hour) }}</span>
+          <span class="bt-eng">engagement {{ s.engagement }} · {{ s.posts }} posts</span>
+        </div>
+        {% endfor %}
+      </div>
+      <p class="note">The client's timezone is {{ d.client.timezone }} — subtract/add the offset to schedule locally.</p>
+    {% else %}
+      <div class="note">Not enough posting history yet to rank time slots.</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card" style="margin-top: var(--space-md);">
+  <div class="card-title">{{ icon('mic') }} What the audience is saying</div>
+  {% if d.comments %}
+    {% for c in d.comments %}
+    <div class="cmt">
+      {{ c.text }}
+      <div class="cmt-meta">{{ c.platform | friendly_platform }}{% if c.like_count %} · {{ c.like_count }} likes{% endif %}{% if c.author %} · {{ c.author }}{% endif %}</div>
+    </div>
+    {% endfor %}
+  {% else %}
+    <div class="note">No audience comments pulled yet.</div>
+  {% endif %}
+</div>
+
+</div>
+</body>
+</html>

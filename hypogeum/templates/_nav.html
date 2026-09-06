@@ -34,7 +34,18 @@
     ('Settings',   '/channel/' ~ cid ~ '/settings' ~ _s,           ['/channel/' ~ cid ~ '/settings', '/channel/' ~ cid ~ '/edit', '/channel/' ~ cid ~ '/operations']),
   ] -%}
 {%- endif -%}
-{%- set tabs = channel_tabs if cid else factory_tabs -%}
+{%- set client_tabs = [] -%}
+{%- if scope_client -%}
+  {%- set _clid = scope_client -%}
+  {%- set _cs = '?scope=client:' ~ _clid -%}
+  {%- set client_tabs = [
+    ('Overview',  '/client/' ~ _clid ~ _cs,               ['/client/' ~ _clid]),
+    ('Content',   '/client/' ~ _clid ~ '/content' ~ _cs,  ['/client/' ~ _clid ~ '/content']),
+    ('Audience',  '/client/' ~ _clid ~ '/audience' ~ _cs, ['/client/' ~ _clid ~ '/audience']),
+    ('Accounts',  '/client/' ~ _clid ~ '/accounts' ~ _cs, ['/client/' ~ _clid ~ '/accounts', '/client/' ~ _clid ~ '/settings']),
+  ] -%}
+{%- endif -%}
+{%- set tabs = client_tabs if scope_client else (channel_tabs if cid else factory_tabs) -%}
 
 {%- set ns = namespace(active='', alen=-1) -%}
 {%- for _label, _href, _prefixes in tabs -%}
@@ -48,7 +59,7 @@
   <a href="/dashboard?scope=factory" class="rail-brand">Cortex</a>
 
   <a href="/dashboard?scope=factory"
-     class="rail-item rail-factory {{ 'active' if not cid }}">
+     class="rail-item rail-factory {{ 'active' if not cid and not scope_client }}">
     {{ icon('bolt') }}<span>Factory</span>
   </a>
 
@@ -65,6 +76,28 @@
     </a>
   </div>
 
+  {% if nav_clients %}
+  <div class="rail-group-label">Clients</div>
+  <div class="rail-channels">
+    {% for cl in nav_clients %}
+    <a href="/client/{{ cl.client_id }}?scope=client:{{ cl.client_id }}"
+       class="rail-item {{ 'active' if scope_client == cl.client_id }}">
+      {{ icon('briefcase') }}<span>{{ cl.name or cl.client_id }}</span>
+    </a>
+    {% endfor %}
+    <a href="/clients/new?scope=factory" class="rail-item rail-new">
+      {{ icon('plus') }}<span>New client</span>
+    </a>
+  </div>
+  {% else %}
+  <div class="rail-group-label">Clients</div>
+  <div class="rail-channels">
+    <a href="/clients/new?scope=factory" class="rail-item rail-new">
+      {{ icon('plus') }}<span>New client</span>
+    </a>
+  </div>
+  {% endif %}
+
   <div class="rail-foot">
     <button class="skin-toggle" id="skin-toggle" type="button" title="Presentation skin">
       {{ icon('sparkle') }}<span id="skin-label">Base</span>
@@ -78,7 +111,13 @@
 
 <header class="topbar">
   <div class="topbar-crumb">
-    {% if cid %}
+    {% if scope_client %}
+      <a href="/dashboard?scope=factory">Factory</a>
+      <span class="breadcrumb-sep">›</span>
+      <span class="muted">Client</span>
+      <span class="breadcrumb-sep">›</span>
+      <span>{{ (nav_clients | selectattr('client_id', 'equalto', scope_client) | map(attribute='name') | first) or scope_client }}</span>
+    {% elif cid %}
       <a href="/dashboard?scope=factory">Factory</a>
       <span class="breadcrumb-sep">›</span>
       <span>{{ (nav_channels | selectattr('channel_id', 'equalto', cid) | map(attribute='name') | first) or cid }}</span>

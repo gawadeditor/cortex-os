@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ d.client.name }} — Content</title>
+  {% include '_base_style.html' %}
+  <style>
+    .ct-thumb { width: 64px; height: 36px; object-fit: cover; border-radius: 4px; background: var(--overlay); display: block; }
+    .ct-title { font-size: 12.5px; color: var(--text); line-height: 1.4;
+                display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; max-width: 42ch; }
+    .ct-src { font-size: 10px; color: var(--faint); text-transform: uppercase; letter-spacing: .05em; }
+    .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+{% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
+
+<div class="container">
+
+{{ hero(
+     eyebrow='Client · content',
+     title=d.client.name ~ ' — published content',
+     lede='Every post Cortex has pulled for this client, newest first. Metrics are the latest sync from each platform.',
+     figure=d.content | length,
+     figure_label='posts tracked') }}
+
+{% if not d.content %}
+<div class="dv-empty">
+  {{ icon('grid') }}
+  <div class="dv-empty-title">No content yet</div>
+  <div class="dv-empty-sub">Once accounts are connected and a sync runs, this client's published posts appear here with their performance.</div>
+</div>
+{% else %}
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th></th><th>Post</th><th>Platform</th><th>Published</th>
+        <th class="num">Views</th><th class="num">ER</th><th class="num">Retention</th><th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in d.content %}
+      <tr>
+        <td>{% if c.thumbnail_url %}<img class="ct-thumb" src="{{ c.thumbnail_url }}" alt="" loading="lazy">{% else %}<span class="ct-thumb"></span>{% endif %}</td>
+        <td>
+          <div class="ct-title">{{ c.title or c.caption or c.platform_post_id }}</div>
+          <div class="ct-src">{{ c.source | replace('_', ' ') }}{% if c.media_type %} · {{ c.media_type }}{% endif %}</div>
+        </td>
+        <td>{{ c.platform | friendly_platform }}</td>
+        <td class="num">{{ c.published_at[:10] if c.published_at else '—' }}</td>
+        <td class="num">{{ "{:,}".format(c.total_views) if c.total_views else '—' }}</td>
+        <td class="num">{{ (c.engagement_rate ~ '%') if c.engagement_rate is not none else '—' }}</td>
+        <td class="num">{{ ((c.avg_view_pct * 100) | round | int ~ '%') if c.avg_view_pct is not none else '—' }}</td>
+        <td>{% if c.url %}<a class="btn btn-sm btn-ghost" href="{{ c.url }}" target="_blank" rel="noopener">{{ icon('external') }}</a>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+</div>
+</body>
+</html>

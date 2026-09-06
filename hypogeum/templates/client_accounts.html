@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ d.client.name }} — Accounts</title>
+  {% include '_base_style.html' %}
+  <style>
+    .acc-row { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center;
+               padding: 12px 0; border-bottom: 1px solid var(--hairline); }
+    .acc-row:last-child { border-bottom: 0; }
+    .acc-plat { font-family: var(--font-display); font-size: 13px; color: var(--text); }
+    .acc-sub { font-size: 11px; color: var(--faint); margin-top: 2px; }
+    .pool-row { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center;
+                padding: 10px 0; border-bottom: 1px solid var(--hairline); font-size: 12px; }
+    .pool-row:last-child { border-bottom: 0; }
+    .flash { font-size: 12px; padding: 9px 11px; border-radius: 8px; margin-bottom: var(--space-md);
+             background: var(--overlay); border: 1px solid var(--border); color: var(--text); }
+    .inline-form { display: inline; }
+    .note { font-size: 11px; color: var(--faint); line-height: 1.5; margin-top: 12px; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+{% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
+
+<div class="container">
+
+{{ hero(
+     eyebrow='Client · accounts',
+     title=d.client.name ~ ' — connected accounts',
+     lede='Attach the social accounts you manage for this client. Cortex reads their published content and performance from these — it never posts unless the client is in manage mode.',
+     figure=d.accounts | length,
+     figure_label='accounts linked') }}
+
+{% if flash %}<div class="flash">{{ flash }}</div>{% endif %}
+
+<div class="card">
+  <div class="card-title">{{ icon('plug') }} Linked accounts</div>
+  {% if d.accounts %}
+    {% for a in d.accounts %}
+    <div class="acc-row">
+      <div>
+        <div class="acc-plat">{{ a.platform | friendly_platform }}</div>
+        <div class="acc-sub">{{ a.handle or a.provider_account_id or '—' }}{% if a.provider_profile_id %} · profile {{ a.provider_profile_id }}{% endif %}</div>
+      </div>
+      <form class="inline-form" method="post" action="/client/{{ d.client.client_id }}/accounts/link">
+        <input type="hidden" name="action" value="unlink">
+        <input type="hidden" name="platform" value="{{ a.platform }}">
+        <input type="hidden" name="managed_account_id" value="{{ a.managed_account_id }}">
+        <button type="submit" class="btn btn-sm btn-reject">{{ icon('x') }} Unlink</button>
+      </form>
+    </div>
+    {% endfor %}
+  {% else %}
+    <p class="note">No accounts linked yet. Pick one from the Zernio pool below.</p>
+  {% endif %}
+</div>
+
+<div class="card" style="margin-top: var(--space-md);">
+  <div class="card-title">{{ icon('link') }} Zernio account pool</div>
+  {% if d.zernio_pool %}
+    {% for p in d.zernio_pool %}
+    <div class="pool-row">
+      <div>
+        <span class="acc-plat">{{ p.platform | friendly_platform }}</span>
+        <span class="acc-sub">— {{ p.username or p.provider_account_id }}{% if p.followers %} · {{ "{:,}".format(p.followers|int) }} followers{% endif %}{% if p.needs_reconnection %} · <span style="color:var(--warn);">needs reconnect</span>{% endif %}</span>
+      </div>
+      {% if p.linked_here %}
+        <span class="pill is-good" style="font-size:10px;padding:2px 8px;">Linked</span>
+      {% else %}
+        <form class="inline-form" method="post" action="/client/{{ d.client.client_id }}/accounts/link">
+          <input type="hidden" name="action" value="link">
+          <input type="hidden" name="platform" value="{{ p.platform }}">
+          <input type="hidden" name="provider_account_id" value="{{ p.provider_account_id }}">
+          <input type="hidden" name="provider_profile_id" value="{{ p.profile_id or '' }}">
+          <input type="hidden" name="handle" value="{{ p.username or '' }}">
+          <button type="submit" class="btn btn-sm btn-primary">{{ icon('plus') }} Link to {{ d.client.name }}</button>
+        </form>
+      {% endif %}
+    </div>
+    {% endfor %}
+    <p class="note">The pool is every account connected in Zernio (Infrastructure → Connections). Connect a new one there, then link it here.</p>
+  {% else %}
+    <div class="dv-empty">
+      {{ icon('plug') }}
+      <div class="dv-empty-title">No Zernio accounts connected</div>
+      <div class="dv-empty-sub">Connect the client's social accounts in Zernio first — Infrastructure → Connections — then they show up here to link.</div>
+    </div>
+  {% endif %}
+</div>
+
+</div>
+</body>
+</html>

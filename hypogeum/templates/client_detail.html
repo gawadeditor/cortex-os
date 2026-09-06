@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ d.client.name }} — Cortex Advisory</title>
+  {% include '_base_style.html' %}
+  {% from '_charts.html' import hbar %}
+  <style>
+    .cd-list { display: flex; flex-direction: column; }
+    .cd-item { display: grid; grid-template-columns: 1fr auto; gap: 10px 16px; align-items: baseline;
+               padding: 10px 0; border-bottom: 1px solid var(--hairline); }
+    .cd-item:last-child { border-bottom: 0; }
+    .cd-title { font-size: 12.5px; color: var(--text); line-height: 1.4;
+                display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .cd-sub { font-size: 10.5px; color: var(--faint); margin-top: 2px; }
+    .cd-metric { font-family: var(--font-mono); font-size: 12px; color: var(--text); text-align: right; white-space: nowrap; }
+    .cd-metric span { color: var(--faint); font-size: 10.5px; }
+    .mini-mon { display: flex; flex-direction: column; gap: 9px; margin-top: 10px; }
+    .mini-mon-row { font-size: 12px; display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+    .mini-mon-row .mm-head { color: var(--muted); font-size: 11px; }
+    .bt-list { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+    .bt-slot { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+               font-size: 12px; padding: 7px 10px; background: var(--overlay); border-radius: 7px; }
+    .bt-slot .bt-when { font-family: var(--font-mono); color: var(--text); }
+    .bt-slot .bt-eng { font-size: 10.5px; color: var(--faint); }
+    .bt-slot.is-top { border: 1px solid var(--accent-line); background: var(--accent-bg); }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+{% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
+
+<div class="container">
+
+{% set k = d.kpis %}
+{% call hero(
+     eyebrow='Client · overview',
+     title=d.client.name,
+     lede=(d.client.brief and d.client.brief.get('note')) or 'Performance across every account you manage for this client.',
+     figure="{:,}".format(k.total_views or 0),
+     figure_label='total views tracked',
+     pill=(k.tracked ~ ' / ' ~ k.content_items ~ ' posts with analytics'),
+     pill_class='is-good' if k.tracked else 'is-warn') %}
+  <a class="btn" href="/client/{{ d.client.client_id }}/content?scope=client:{{ d.client.client_id }}">{{ icon('grid') }} All content</a>
+  <a class="btn" href="/client/{{ d.client.client_id }}/accounts?scope=client:{{ d.client.client_id }}">{{ icon('plug') }} Accounts</a>
+{% endcall %}
+
+{% if not d.accounts %}
+<div class="dv-empty">
+  {{ icon('plug') }}
+  <div class="dv-empty-title">No accounts connected</div>
+  <div class="dv-empty-sub">Connect the social accounts you manage for {{ d.client.name }} to start pulling their published content and performance.</div>
+  <a class="btn btn-primary" style="margin-top:12px;" href="/client/{{ d.client.client_id }}/accounts?scope=client:{{ d.client.client_id }}">{{ icon('plug') }} Connect accounts</a>
+</div>
+{% endif %}
+
+<div class="kpi-strip">
+  <div class="kpi-card"><div class="kpi-val">{{ k.content_items or 0 }}</div><div class="kpi-lbl">Posts</div></div>
+  <div class="kpi-card"><div class="kpi-val">{{ "{:,}".format(k.total_views or 0) }}</div><div class="kpi-lbl">Views</div></div>
+  <div class="kpi-card"><div class="kpi-val">{{ (k.avg_engagement ~ '%') if k.avg_engagement is not none else '—' }}</div><div class="kpi-lbl">Avg engagement</div></div>
+  <div class="kpi-card"><div class="kpi-val">{{ d.accounts | length }}</div><div class="kpi-lbl">Accounts</div></div>
+</div>
+
+<div class="grid grid-2">
+  <div class="card">
+    <div class="card-title">{{ icon('review') }} Best performing</div>
+    {% if d.top %}
+    <div class="cd-list">
+      {% for c in d.top %}
+      <div class="cd-item">
+        <div>
+          <div class="cd-title">{{ c.title or c.caption or c.platform_post_id }}</div>
+          <div class="cd-sub">{{ c.platform | friendly_platform }}{% if c.published_at %} · {{ c.published_at[:10] }}{% endif %}</div>
+        </div>
+        <div class="cd-metric">{{ c.engagement_rate }}% <span>ER</span><br>{{ "{:,}".format(c.total_views) }} <span>views</span></div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="muted" style="font-size:12px; margin-top:10px;">Not enough posts with analytics to rank yet.</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <div class="card-title">{{ icon('failures') }} Weakest posts</div>
+    {% if d.bottom %}
+    <div class="cd-list">
+      {% for c in d.bottom %}
+      <div class="cd-item">
+        <div>
+          <div class="cd-title">{{ c.title or c.caption or c.platform_post_id }}</div>
+          <div class="cd-sub">{{ c.platform | friendly_platform }}{% if c.published_at %} · {{ c.published_at[:10] }}{% endif %}</div>
+        </div>
+        <div class="cd-metric">{{ c.engagement_rate }}% <span>ER</span><br>{{ "{:,}".format(c.total_views) }} <span>views</span></div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="muted" style="font-size:12px; margin-top:10px;">Need at least four ranked posts to show the bottom of the catalog.</p>
+    {% endif %}
+  </div>
+</div>
+
+<div class="grid grid-2" style="margin-top: var(--space-md);">
+  <div class="card">
+    <div class="card-title">{{ icon('calendar') }} Best time to post <span class="muted" style="font-weight:400;text-transform:none;letter-spacing:0;">— UTC, this client's history</span></div>
+    {% if d.best_time %}
+    <div class="bt-list">
+      {% for s in d.best_time %}
+      <div class="bt-slot {{ 'is-top' if loop.first }}">
+        <span class="bt-when">{{ s.day }} {{ "%02d:00"|format(s.hour) }}</span>
+        <span class="bt-eng">engagement {{ s.engagement }} · {{ s.posts }} posts</span>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="muted" style="font-size:12px; margin-top:10px;">Not enough posting history yet to rank time slots.</p>
+    {% endif %}
+    <a class="btn btn-sm" style="margin-top:12px;" href="/client/{{ d.client.client_id }}/audience?scope=client:{{ d.client.client_id }}">{{ icon('arrow-right') }} Full audience view</a>
+  </div>
+
+  <div class="card">
+    <div class="card-title">{{ icon('dollar') }} Distance to payout</div>
+    {% set mon = (d.monetization or {}).platforms or {} %}
+    {% if mon %}
+    <div class="mini-mon">
+      {% for platform, p in mon.items() %}
+      <div>
+        <div class="mini-mon-row">
+          <span class="mm-head">{{ platform | friendly_platform }}</span>
+          <span class="{{ 'pill is-good' if p.eligible else 'pill is-warn' }}" style="font-size:10px;padding:2px 8px;">{{ 'Eligible' if p.eligible else 'Not yet' }}</span>
+        </div>
+        <p class="muted" style="font-size:11px; margin:4px 0 0;">{% if not p.eligible %}<b style="color:var(--text);">Next:</b> {% endif %}{{ p.headline }}</p>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="muted" style="font-size:12px; margin-top:10px;">Connect an account and sync once to measure how far each platform is from turning on payouts.</p>
+    {% endif %}
+  </div>
+</div>
+
+</div>
+</body>
+</html>

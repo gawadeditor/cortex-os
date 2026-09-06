@@ -687,6 +687,74 @@ def generate_cadence_recommendation(
     return list_actions(status="pending", db_path=db_path)[-1] if list_actions(status="pending", db_path=db_path) else None
 
 
+_DOW_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+_SCHEDULE_MIN_SLOT_POSTS = 2  # ignore a "best" slot backed by a single post
+
+
+def generate_schedule_recommendation(
+    channel_id: str,
+    db_path:    Optional[Path] = None,
+) -> Optional[dict]:
+    """Emit at most one pending `publishing_time` advisory learning_action
+    from Zernio's best-time rollup (factory scope — Zernio computes it over
+    the whole account). Advisory only: apply_action just records the
+    operator's acknowledgement, it does not rewrite the schedule.
+
+    Returns the action dict, or None when there is no rollup yet / no slot
+    clears _SCHEDULE_MIN_SLOT_POSTS / an equivalent action is already
+    pending for this channel.
+    """
+    for a in list_actions(status="pending", db_path=db_path):
+        if a["dimension"] == "publishing_time" and (a.get("evidence") or {}).get("channel_id") == channel_id:
+            return a
+
+    try:
+        from hypogeum.publishing.zernio_aggregate_sync import get_rollup
+        roll = get_rollup("best_time", scope="factory", db_path=db_path)
+    except Exception:  # noqa: BLE001
+        roll = None
+    if not roll or not roll.get("payload"):
+        return None
+
+    slots = [s for s in roll["payload"]
+             if isinstance(s.get("avg_engagement"), (int, float))
+             and (s.get("post_count") or 0) >= _SCHEDULE_MIN_SLOT_POSTS
+             and s.get("day_of_week") is not None and s.get("hour") is not None]
+    if not slots:
+        return None
+    top = max(slots, key=lambda s: s["avg_engagement"])
+    dow = int(top["day_of_week"])
+    hour = int(top["hour"])
+    day_label = _DOW_NAMES[dow] if 0 <= dow < 7 else f"day{dow}"
+    slot_label = f"{day_label} {hour:02d}:00"
+
+    rationale = (
+        f"Publishing-time signal: {slot_label} has the highest historical "
+        f"engagement ({top['avg_engagement']:.1f} avg over {top['post_count']} posts) "
+        f"across the connected accounts. Consider aligning this channel's "
+        f"release slot."
+    )
+    store_action({
+        "source_episode": None,
+        "dimension":      "publishing_time",
+        "action_type":    "test",
+        "rationale":      rationale,
+        "evidence_json":  _json.dumps({
+            "channel_id": channel_id,
+            "best_slot": {"day_of_week": dow, "hour": hour, "label": slot_label},
+            "avg_engagement": top["avg_engagement"],
+            "post_count": top["post_count"],
+            "snapshot_date": roll.get("snapshot_date"),
+            "avg_signal_strength": 0.0,  # advisory — learning.html reads this key unconditionally
+        }),
+        "status":     "pending",
+        "created_at": _now_iso(),
+    }, db_path=db_path)
+    pend = [a for a in list_actions(status="pending", db_path=db_path)
+            if a["dimension"] == "publishing_time"]
+    return pend[-1] if pend else None
+
+
 def apply_action(
     action_id: str,
     db_path:   Optional[Path] = None,

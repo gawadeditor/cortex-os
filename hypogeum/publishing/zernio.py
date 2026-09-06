@@ -737,6 +737,51 @@ class ZernioProvider:
             return {"status_code": response.status_code, "data": None, "error": response.json_body}
         return {"status_code": response.status_code, "data": response.json_body, "error": None}
 
+    def _get_analytics_resource(self, path: str, *, db_path: Optional[Path]) -> dict:
+        """Read-only GET for the aggregate analytics endpoints
+        (content-decay / best-time / posting-frequency / follower-stats).
+        `path` is relative to the Zernio API root and MUST already carry
+        any query string. Returns {status_code, data, error} exactly like
+        get_analytics; raises only on a transport failure."""
+        credential = _resolve_zernio_credential(db_path)
+        if credential is None:
+            raise ZernioCredentialNotFoundError(
+                "no active provider='zernio' secret profile found in Credential Manager"
+            )
+        headers = {"Authorization": f"Bearer {credential}"}
+        del credential
+        response = self._transport.get(
+            url=f"{_ZERNIO_BASE_URL}{path}", headers=headers,
+            timeout=_DEFAULT_TIMEOUT_SECONDS,
+        )
+        if response.status_code != 200 or not isinstance(response.json_body, (dict, list)):
+            return {"status_code": response.status_code, "data": None, "error": response.json_body}
+        return {"status_code": response.status_code, "data": response.json_body, "error": None}
+
+    def get_content_decay(self, *, db_path: Optional[Path] = None) -> dict:
+        """GET /v1/analytics/content-decay — {buckets:[{bucket_order,
+        bucket_label, avg_pct_of_final, post_count}]}: what fraction of a
+        post's eventual engagement has landed by each age bucket."""
+        return self._get_analytics_resource("/analytics/content-decay", db_path=db_path)
+
+    def get_best_time(self, *, db_path: Optional[Path] = None) -> dict:
+        """GET /v1/analytics/best-time — {slots:[{day_of_week, hour,
+        avg_engagement, post_count}]} ranked by historical engagement."""
+        return self._get_analytics_resource("/analytics/best-time", db_path=db_path)
+
+    def get_posting_frequency(self, *, db_path: Optional[Path] = None) -> dict:
+        """GET /v1/analytics/posting-frequency — {frequency:[{platform,
+        posts_per_week, avg_engagement_rate, avg_engagement, weeks_count}]}."""
+        return self._get_analytics_resource("/analytics/posting-frequency", db_path=db_path)
+
+    def get_follower_stats(self, *, from_date: Optional[str] = None,
+                           db_path: Optional[Path] = None) -> dict:
+        """GET /v1/accounts/follower-stats — {accounts:[{platform, name,
+        currentFollowers}], stats:[...time series...], dateRange,
+        granularity}. `from_date` is an ISO date (YYYY-MM-DD)."""
+        q = f"?fromDate={from_date}" if from_date else ""
+        return self._get_analytics_resource(f"/accounts/follower-stats{q}", db_path=db_path)
+
     def publish(
         self,
         *,

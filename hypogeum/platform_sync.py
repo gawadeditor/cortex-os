@@ -274,6 +274,14 @@ def run_platform_sync(
                 results.extend(_sync_zernio(channel_id, db_path, window_days, triggered_by, conn))
             except Exception:  # noqa: BLE001
                 pass
+            # Account-level aggregate rollups (content-decay / best-time /
+            # posting-frequency / follower-stats) — separate endpoints,
+            # separate table; a failure here must never fail the per-post sync.
+            try:
+                from hypogeum.publishing.zernio_aggregate_sync import sync_zernio_aggregates
+                sync_zernio_aggregates(db_path=db_path)
+            except Exception:  # noqa: BLE001
+                pass
 
         for platform in target:
             if platform == "youtube":
@@ -352,7 +360,14 @@ def _refresh_learning_pipeline(channel_id: Optional[str], db_path: Optional[Path
         try:
             generate_comparative_insights(cid, db_path=db_path)
         except Exception:  # noqa: BLE001
-            continue
+            pass
+        # Zernio best-time rollup -> at most one advisory publishing_time
+        # action per channel (dedup-safe, same as the loops below).
+        try:
+            from hypogeum.learning_engine import generate_schedule_recommendation
+            generate_schedule_recommendation(cid, db_path=db_path)
+        except Exception:  # noqa: BLE001
+            pass
 
     db = _resolve(db_path) or _DEFAULT_DB_PATH
     conn = get_connection(db)

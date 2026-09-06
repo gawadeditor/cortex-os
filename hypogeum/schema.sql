@@ -995,6 +995,27 @@ CREATE INDEX IF NOT EXISTS idx_pa_episode  ON platform_analytics(episode_id);
 CREATE INDEX IF NOT EXISTS idx_pa_platform ON platform_analytics(platform);
 CREATE INDEX IF NOT EXISTS idx_pa_date     ON platform_analytics(snapshot_date DESC);
 
+-- Account-level / cross-post rollups from Zernio's aggregate analytics
+-- endpoints (content-decay, best-time, posting-frequency, follower-stats).
+-- These are NOT per-episode: Zernio computes them over the whole connected
+-- account, so scope is 'factory' for the engagement/timing rollups and the
+-- Cortex channel_id for the follower series (mapped from the Zernio account).
+CREATE TABLE IF NOT EXISTS channel_analytics_rollup (
+    rollup_id      TEXT NOT NULL PRIMARY KEY,
+    scope          TEXT NOT NULL,          -- 'factory' | channel_id
+    metric_kind    TEXT NOT NULL
+                   CHECK(metric_kind IN ('content_decay','best_time',
+                                         'posting_frequency','follower_stats')),
+    snapshot_date  TEXT NOT NULL,
+    payload_json   TEXT NOT NULL,          -- normalised list/dict for that kind
+    source         TEXT NOT NULL DEFAULT 'api'
+                   CHECK(source IN ('api','manual','mock')),
+    imported_at    TEXT NOT NULL,
+    UNIQUE(scope, metric_kind, snapshot_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_car_scope ON channel_analytics_rollup(scope, metric_kind, snapshot_date DESC);
+
 -- ---------------------------------------------------------------------------
 -- analytics_insights
 -- Derived signals extracted from platform_analytics by the learning engine.

@@ -608,3 +608,39 @@ class TestContentVolumeRecommendation:
         recs = get_channel_recommendations(_CV_CH, db_path=db_path)
         assert "content_volume" in recs
         assert get_channel_recommendations("some_other_channel", db_path=db_path) == {}
+
+
+class TestScheduleRecommendation:
+    def _seed_best_time(self, db_path, slots):
+        from hypogeum.publishing.zernio_aggregate_sync import _store_rollup
+        conn = _gc(db_path)
+        try:
+            _store_rollup(conn, scope="factory", metric_kind="best_time", payload=slots)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_emits_publishing_time_action_from_best_slot(self, db_path):
+        from hypogeum.learning_engine import generate_schedule_recommendation
+        self._seed_best_time(db_path, [
+            {"day_of_week": 0, "hour": 10, "avg_engagement": 21, "post_count": 4},
+            {"day_of_week": 2, "hour": 18, "avg_engagement": 9.25, "post_count": 4},
+            {"day_of_week": 6, "hour": 14, "avg_engagement": 99, "post_count": 1},
+        ])
+        rec = generate_schedule_recommendation("hypogeum", db_path=db_path)
+        assert rec is not None and rec["dimension"] == "publishing_time"
+        assert rec["evidence"]["best_slot"]["label"] == "Mon 10:00"
+        # single-post slot with the highest engagement must be ignored
+        assert rec["evidence"]["best_slot"]["day_of_week"] == 0
+
+    def test_no_rollup_returns_none(self, db_path):
+        from hypogeum.learning_engine import generate_schedule_recommendation
+        assert generate_schedule_recommendation("hypogeum", db_path=db_path) is None
+
+    def test_dedup_per_channel(self, db_path):
+        from hypogeum.learning_engine import generate_schedule_recommendation
+        self._seed_best_time(db_path, [
+            {"day_of_week": 3, "hour": 15, "avg_engagement": 5, "post_count": 4}])
+        a = generate_schedule_recommendation("hypogeum", db_path=db_path)
+        b = generate_schedule_recommendation("hypogeum", db_path=db_path)
+        assert a["action_id"] == b["action_id"]

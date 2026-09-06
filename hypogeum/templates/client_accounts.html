@@ -20,8 +20,10 @@
     .note { font-size: 11px; color: var(--faint); line-height: 1.5; margin-top: 12px; }
     .steps { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 14px; }
     .step { display: grid; grid-template-columns: 22px 1fr; gap: 10px; font-size: 12.5px; line-height: 1.5; }
-    .step b { display: inline-flex; width: 20px; height: 20px; align-items: center; justify-content: center;
-              border-radius: 50%; background: var(--accent-bg); color: var(--accent); font-size: 11px; }
+    .step > b { display: inline-flex; width: 20px; height: 20px; align-items: center; justify-content: center;
+                border-radius: 50%; background: var(--accent-bg); color: var(--accent); font-size: 11px;
+                flex-shrink: 0; }
+    .step span b { color: var(--text); font-weight: 600; }
     .manual-form { display: grid; grid-template-columns: 150px 1fr auto; gap: 10px; align-items: end; margin-top: 10px; }
     @media (max-width: 640px) { .manual-form { grid-template-columns: 1fr; } }
     .card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }

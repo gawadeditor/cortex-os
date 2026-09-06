@@ -11,31 +11,49 @@ from hypogeum.publishing import zernio_aggregate_sync as zas
 
 
 class _FakeProvider:
-    def __init__(self, *, decay=None, best=None, freq=None, followers=None, raise_on=None):
+    """`best` / `decay` / `freq` may be a plain payload (same for every
+    scope) or a {profile_id_or_None: payload} dict for per-profile data.
+    `accounts` is the /analytics accounts[] used to build the profile map."""
+
+    def __init__(self, *, decay=None, best=None, freq=None, followers=None,
+                 raise_on=None, accounts=None):
         self._decay = decay
         self._best = best
         self._freq = freq
         self._followers = followers
         self._raise_on = raise_on or set()
+        self._accounts = accounts or []
 
     def _wrap(self, data):
         if data is None:
             return {"status_code": 500, "data": None, "error": "no data"}
         return {"status_code": 200, "data": data, "error": None}
 
-    def get_content_decay(self, *, db_path=None):
+    @staticmethod
+    def _pick(spec, profile_id):
+        if isinstance(spec, dict) and ("slots" not in spec and "buckets" not in spec
+                                       and "frequency" not in spec and "accounts" not in spec):
+            return spec.get(profile_id)
+        return spec
+
+    def get_analytics(self, *, page=1, limit=100, db_path=None):
+        return {"status_code": 200,
+                "data": {"posts": [], "pagination": {"pages": 1},
+                         "accounts": self._accounts}, "error": None}
+
+    def get_content_decay(self, *, profile_id=None, db_path=None):
         if "get_content_decay" in self._raise_on:
             raise RuntimeError("boom")
-        return self._wrap(self._decay)
+        return self._wrap(self._pick(self._decay, profile_id))
 
-    def get_best_time(self, *, db_path=None):
-        return self._wrap(self._best)
+    def get_best_time(self, *, profile_id=None, db_path=None):
+        return self._wrap(self._pick(self._best, profile_id))
 
-    def get_posting_frequency(self, *, db_path=None):
-        return self._wrap(self._freq)
+    def get_posting_frequency(self, *, profile_id=None, db_path=None):
+        return self._wrap(self._pick(self._freq, profile_id))
 
-    def get_follower_stats(self, *, from_date=None, db_path=None):
-        return self._wrap(self._followers)
+    def get_follower_stats(self, *, from_date=None, profile_id=None, db_path=None):
+        return self._wrap(self._pick(self._followers, profile_id))
 
 
 @pytest.fixture()
@@ -72,6 +90,7 @@ def test_all_four_kinds_written_to_factory_scope(db_path):
     prov = _FakeProvider(decay=_DECAY, best=_BEST, freq=_FREQ, followers=_FOLLOWERS)
     out = zas.sync_zernio_aggregates(provider=prov, db_path=db_path)
     assert out["ok"] is True
+    assert "factory" in out["scopes"]
     assert set(out["kinds_written"]) >= {"content_decay", "best_time", "posting_frequency", "follower_stats"}
 
     for kind in ("content_decay", "best_time", "posting_frequency", "follower_stats"):
@@ -80,23 +99,44 @@ def test_all_four_kinds_written_to_factory_scope(db_path):
         assert roll["payload"]
 
 
-def test_follower_stats_split_onto_channels(db_path):
-    # seed two channel profiles so the name match has something to hit
+_ACCOUNTS = [
+    {"platform": "youtube", "name": "The Hypogeum", "profileId": "prof_hyp"},
+    {"platform": "tiktok", "name": "TheHypogeum", "profileId": "prof_hyp"},
+    {"platform": "instagram", "name": "twinkle_mini_tales", "profileId": "prof_tw"},
+    {"platform": "youtube", "name": "Some Unrelated Brand", "profileId": "prof_other"},
+]
+
+
+def _seed_channels(db_path):
     from hypogeum.channel_config import create_channel_profile
-    for cid, name in [("hypogeum", "The Hypogeum"), ("twinkle_mini_tales", "Twinkle Mini Tales")]:
+    for cid, name in [("hypogeum", "The Hypogeum"),
+                      ("twinkle_mini_tales", "Twinkle Mini Tales")]:
         create_channel_profile(channel_id=cid, name=name, db_path=db_path)
 
-    prov = _FakeProvider(followers=_FOLLOWERS)
-    zas.sync_zernio_aggregates(provider=prov, db_path=db_path)
 
-    hyp = zas.get_rollup("follower_stats", scope="hypogeum", db_path=db_path)
-    assert hyp is not None
-    plats = {a["platform"] for a in hyp["payload"]["accounts"]}
-    assert plats == {"youtube", "instagram"}
+def test_per_profile_best_time_scoped_to_channel(db_path):
+    _seed_channels(db_path)
+    hyp_best = {"slots": [{"day_of_week": 0, "hour": 10, "avg_engagement": 21, "post_count": 4}]}
+    tw_best = {"slots": [{"day_of_week": 5, "hour": 14, "avg_engagement": 2.3, "post_count": 4}]}
+    prov = _FakeProvider(
+        accounts=_ACCOUNTS,
+        best={None: _BEST, "prof_hyp": hyp_best, "prof_tw": tw_best},
+    )
+    out = zas.sync_zernio_aggregates(provider=prov, db_path=db_path)
+    assert set(out["scopes"]) >= {"factory", "hypogeum", "twinkle_mini_tales"}
 
-    tw = zas.get_rollup("follower_stats", scope="twinkle_mini_tales", db_path=db_path)
-    assert tw is not None
-    assert tw["payload"]["accounts"][0]["followers"] == 1
+    hyp = zas.get_rollup("best_time", scope="hypogeum", db_path=db_path)
+    assert hyp["payload"][0]["day_of_week"] == 0 and hyp["payload"][0]["hour"] == 10
+    tw = zas.get_rollup("best_time", scope="twinkle_mini_tales", db_path=db_path)
+    assert tw["payload"][0]["day_of_week"] == 5 and tw["payload"][0]["hour"] == 14
+
+
+def test_no_profile_map_still_writes_factory(db_path):
+    # no accounts => no per-channel scopes, factory only
+    prov = _FakeProvider(best=_BEST)
+    out = zas.sync_zernio_aggregates(provider=prov, db_path=db_path)
+    assert out["scopes"] == ["factory"]
+    assert zas.get_rollup("best_time", scope="factory", db_path=db_path) is not None
 
 
 def test_partial_failure_still_stores_what_it_got(db_path):
@@ -104,7 +144,7 @@ def test_partial_failure_still_stores_what_it_got(db_path):
     out = zas.sync_zernio_aggregates(provider=prov, db_path=db_path)
     assert "best_time" in out["kinds_written"]
     assert "content_decay" not in out["kinds_written"]
-    assert "get_content_decay" in out["errors"]
+    assert any(k.startswith("get_content_decay") for k in out["errors"])
 
 
 def test_upsert_is_idempotent_per_day(db_path):

@@ -155,73 +155,111 @@ def _store_rollup(conn, *, scope: str, metric_kind: str, payload, source: str = 
     )
 
 
+def _cortex_channels(db_path) -> list:
+    """[(channel_id, display_name)] for the name match."""
+    try:
+        from hypogeum.channel_config import list_channel_profiles
+        return [(p.channel_id,
+                 getattr(p, "name", "") or getattr(p, "channel_name", "") or "")
+                for p in list_channel_profiles(db_path=db_path)]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _zernio_profile_channel_map(provider, db_path, channels: list) -> dict:
+    """{zernio_profile_id: cortex_channel_id}. Zernio groups every connected
+    account under a `profileId`; the /analytics response lists those accounts
+    with their names. A profile maps to the Cortex channel that any of its
+    account names matches (both channels' accounts are named after them)."""
+    try:
+        res = provider.get_analytics(page=1, limit=1, db_path=db_path)
+        accounts = ((res.get("data") or {}).get("accounts")) or []
+    except Exception:  # noqa: BLE001
+        return {}
+    by_profile: dict = {}
+    for a in accounts:
+        pid = a.get("profileId")
+        name = a.get("name") or a.get("displayName") or a.get("username") or ""
+        if not pid:
+            continue
+        by_profile.setdefault(pid, []).append(name)
+    out: dict = {}
+    for pid, names in by_profile.items():
+        for nm in names:
+            cid = _channel_for_account(nm, channels)
+            if cid:
+                out[pid] = cid
+                break
+    return out
+
+
+def _fetch_scope(provider, db_path, *, profile_id, errors: dict) -> dict:
+    """Fetch + normalise all four aggregate endpoints for one scope
+    (profile_id=None → whole account). Returns {kind: payload_or_None}."""
+    def _f(fn_name, **kw):
+        try:
+            res = getattr(provider, fn_name)(db_path=db_path, **kw)
+        except Exception as exc:  # noqa: BLE001
+            errors[f"{fn_name}:{profile_id or 'factory'}"] = str(exc)[:160]
+            return None
+        if res.get("error") or res.get("data") is None:
+            errors[f"{fn_name}:{profile_id or 'factory'}"] = f"status={res.get('status_code')}"
+            return None
+        return res["data"]
+
+    pid_kw = {"profile_id": profile_id} if profile_id else {}
+    return {
+        "content_decay": _normalise_content_decay(_f("get_content_decay", **pid_kw) or {}),
+        "best_time": _normalise_best_time(_f("get_best_time", **pid_kw) or {}),
+        "posting_frequency": _normalise_posting_frequency(_f("get_posting_frequency", **pid_kw) or {}),
+        "follower_stats": _normalise_follower_stats(_f("get_follower_stats", **pid_kw) or {}),
+    }
+
+
 def sync_zernio_aggregates(*, provider=None, db_path: Optional[Path] = None) -> dict:
-    """Fetch all four Zernio aggregate endpoints and upsert today's snapshot
-    into channel_analytics_rollup. Never raises."""
+    """Fetch the four Zernio aggregate endpoints — once for the whole
+    account (scope='factory') and once per connected profile mapped to its
+    Cortex channel (scope=channel_id) — and upsert today's snapshot into
+    channel_analytics_rollup. The per-channel pass matters: the two channels
+    have genuinely different best-time / cadence curves. Never raises."""
     if provider is None:
         from hypogeum.publishing.zernio import ZernioProvider
         provider = ZernioProvider()
 
     from hypogeum.db import get_connection
-    out: dict = {"ok": False, "kinds_written": [], "errors": {}}
+    out: dict = {"ok": False, "kinds_written": [], "scopes": [], "errors": {}}
 
-    def _fetch(fn_name, *args, **kwargs):
-        try:
-            res = getattr(provider, fn_name)(*args, db_path=db_path, **kwargs)
-        except Exception as exc:  # noqa: BLE001
-            out["errors"][fn_name] = str(exc)[:200]
-            return None
-        if res.get("error") or res.get("data") is None:
-            out["errors"][fn_name] = f"status={res.get('status_code')}"
-            return None
-        return res["data"]
+    channels = _cortex_channels(db_path)
+    profile_map = _zernio_profile_channel_map(provider, db_path, channels)
 
-    decay = _normalise_content_decay(_fetch("get_content_decay") or {})
-    best = _normalise_best_time(_fetch("get_best_time") or {})
-    freq = _normalise_posting_frequency(_fetch("get_posting_frequency") or {})
-    followers = _normalise_follower_stats(_fetch("get_follower_stats") or {})
+    # scope -> profile_id (None = whole account)
+    scopes: dict = {"factory": None}
+    for pid, cid in profile_map.items():
+        scopes[cid] = pid
 
     conn = get_connection(Path(db_path) if db_path else None)
     try:
-        if decay is not None:
-            _store_rollup(conn, scope="factory", metric_kind="content_decay", payload=decay)
-            out["kinds_written"].append("content_decay")
-        if best is not None:
-            _store_rollup(conn, scope="factory", metric_kind="best_time", payload=best)
-            out["kinds_written"].append("best_time")
-        if freq is not None:
-            _store_rollup(conn, scope="factory", metric_kind="posting_frequency", payload=freq)
-            out["kinds_written"].append("posting_frequency")
-        if followers is not None:
-            _store_rollup(conn, scope="factory", metric_kind="follower_stats", payload=followers)
-            out["kinds_written"].append("follower_stats")
-            # split per channel
-            try:
-                from hypogeum.channel_config import list_channel_profiles
-                profiles = list_channel_profiles(db_path=db_path)
-                channels = [(p.channel_id,
-                             getattr(p, "name", "") or getattr(p, "channel_name", "") or "")
-                            for p in profiles]
-            except Exception:  # noqa: BLE001
-                channels = []
-            per_channel: dict = {}
-            for acct in followers["accounts"]:
-                cid = _channel_for_account(acct["name"], channels)
-                if cid:
-                    per_channel.setdefault(cid, []).append(acct)
-            for cid, accts in per_channel.items():
-                _store_rollup(conn, scope=cid, metric_kind="follower_stats",
-                              payload={"accounts": accts,
-                                       "date_range": followers.get("date_range"),
-                                       "granularity": followers.get("granularity")})
+        for scope, pid in scopes.items():
+            payloads = _fetch_scope(provider, db_path, profile_id=pid, errors=out["errors"])
+            wrote_any = False
+            for kind, payload in payloads.items():
+                if payload is None:
+                    continue
+                _store_rollup(conn, scope=scope, metric_kind=kind, payload=payload)
+                wrote_any = True
+                if kind not in out["kinds_written"]:
+                    out["kinds_written"].append(kind)
+            if wrote_any:
+                out["scopes"].append(scope)
         conn.commit()
     except Exception as exc:  # noqa: BLE001
         out["errors"]["store"] = str(exc)[:200]
     finally:
         conn.close()
 
-    out["ok"] = bool(out["kinds_written"])
-    log.info("zernio_aggregates_synced", kinds=out["kinds_written"], errors=list(out["errors"]))
+    out["ok"] = bool(out["scopes"])
+    log.info("zernio_aggregates_synced", scopes=out["scopes"],
+             kinds=out["kinds_written"], errors=list(out["errors"]))
     return out
 
 

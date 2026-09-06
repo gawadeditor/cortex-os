@@ -737,12 +737,15 @@ class ZernioProvider:
             return {"status_code": response.status_code, "data": None, "error": response.json_body}
         return {"status_code": response.status_code, "data": response.json_body, "error": None}
 
-    def _get_analytics_resource(self, path: str, *, db_path: Optional[Path]) -> dict:
+    def _get_analytics_resource(self, path: str, *, db_path: Optional[Path],
+                                params: Optional[dict] = None) -> dict:
         """Read-only GET for the aggregate analytics endpoints
         (content-decay / best-time / posting-frequency / follower-stats).
-        `path` is relative to the Zernio API root and MUST already carry
-        any query string. Returns {status_code, data, error} exactly like
-        get_analytics; raises only on a transport failure."""
+        `path` is relative to the Zernio API root; `params` is an optional
+        query dict (e.g. {"profileId": "..."} — every aggregate endpoint
+        accepts profileId to scope the rollup to one connected profile).
+        Returns {status_code, data, error} exactly like get_analytics;
+        raises only on a transport failure."""
         credential = _resolve_zernio_credential(db_path)
         if credential is None:
             raise ZernioCredentialNotFoundError(
@@ -750,37 +753,58 @@ class ZernioProvider:
             )
         headers = {"Authorization": f"Bearer {credential}"}
         del credential
+        qs = ""
+        if params:
+            from urllib.parse import urlencode
+            qs = "?" + urlencode({k: v for k, v in params.items() if v is not None})
         response = self._transport.get(
-            url=f"{_ZERNIO_BASE_URL}{path}", headers=headers,
+            url=f"{_ZERNIO_BASE_URL}{path}{qs}", headers=headers,
             timeout=_DEFAULT_TIMEOUT_SECONDS,
         )
         if response.status_code != 200 or not isinstance(response.json_body, (dict, list)):
             return {"status_code": response.status_code, "data": None, "error": response.json_body}
         return {"status_code": response.status_code, "data": response.json_body, "error": None}
 
-    def get_content_decay(self, *, db_path: Optional[Path] = None) -> dict:
+    def get_content_decay(self, *, profile_id: Optional[str] = None,
+                          db_path: Optional[Path] = None) -> dict:
         """GET /v1/analytics/content-decay — {buckets:[{bucket_order,
         bucket_label, avg_pct_of_final, post_count}]}: what fraction of a
-        post's eventual engagement has landed by each age bucket."""
-        return self._get_analytics_resource("/analytics/content-decay", db_path=db_path)
+        post's eventual engagement has landed by each age bucket.
+        `profile_id` scopes to one connected Zernio profile."""
+        return self._get_analytics_resource(
+            "/analytics/content-decay", db_path=db_path,
+            params={"profileId": profile_id})
 
-    def get_best_time(self, *, db_path: Optional[Path] = None) -> dict:
+    def get_best_time(self, *, profile_id: Optional[str] = None,
+                      db_path: Optional[Path] = None) -> dict:
         """GET /v1/analytics/best-time — {slots:[{day_of_week, hour,
-        avg_engagement, post_count}]} ranked by historical engagement."""
-        return self._get_analytics_resource("/analytics/best-time", db_path=db_path)
+        avg_engagement, post_count}]} ranked by historical engagement.
+        `profile_id` scopes to one connected Zernio profile — the two
+        channels have genuinely different best windows, so the recommender
+        must pass it."""
+        return self._get_analytics_resource(
+            "/analytics/best-time", db_path=db_path,
+            params={"profileId": profile_id})
 
-    def get_posting_frequency(self, *, db_path: Optional[Path] = None) -> dict:
+    def get_posting_frequency(self, *, profile_id: Optional[str] = None,
+                              db_path: Optional[Path] = None) -> dict:
         """GET /v1/analytics/posting-frequency — {frequency:[{platform,
-        posts_per_week, avg_engagement_rate, avg_engagement, weeks_count}]}."""
-        return self._get_analytics_resource("/analytics/posting-frequency", db_path=db_path)
+        posts_per_week, avg_engagement_rate, avg_engagement, weeks_count}]}.
+        `profile_id` scopes to one connected Zernio profile."""
+        return self._get_analytics_resource(
+            "/analytics/posting-frequency", db_path=db_path,
+            params={"profileId": profile_id})
 
     def get_follower_stats(self, *, from_date: Optional[str] = None,
+                           profile_id: Optional[str] = None,
                            db_path: Optional[Path] = None) -> dict:
         """GET /v1/accounts/follower-stats — {accounts:[{platform, name,
         currentFollowers}], stats:[...time series...], dateRange,
-        granularity}. `from_date` is an ISO date (YYYY-MM-DD)."""
-        q = f"?fromDate={from_date}" if from_date else ""
-        return self._get_analytics_resource(f"/accounts/follower-stats{q}", db_path=db_path)
+        granularity}. `from_date` is an ISO date (YYYY-MM-DD); `profile_id`
+        scopes to one connected Zernio profile."""
+        return self._get_analytics_resource(
+            "/accounts/follower-stats", db_path=db_path,
+            params={"fromDate": from_date, "profileId": profile_id})
 
     def publish(
         self,

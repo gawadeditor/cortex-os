@@ -710,7 +710,12 @@ def generate_schedule_recommendation(
 
     try:
         from hypogeum.publishing.zernio_aggregate_sync import get_rollup
-        roll = get_rollup("best_time", scope="factory", db_path=db_path)
+        # The channel's own best-time rollup first — the two channels have
+        # genuinely different best windows (hypogeum Mon 10am, twinkle Sat
+        # 2pm). Fall back to the account-wide rollup only if there is no
+        # per-channel one yet.
+        roll = (get_rollup("best_time", scope=channel_id, db_path=db_path)
+                or get_rollup("best_time", scope="factory", db_path=db_path))
     except Exception:  # noqa: BLE001
         roll = None
     if not roll or not roll.get("payload"):

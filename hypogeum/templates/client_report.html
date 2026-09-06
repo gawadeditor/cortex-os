@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ client.name }} — Performance Report</title>
+  {% include '_base_style.html' %}
+  {% from '_charts.html' import hbar %}
+  <style>
+    .rep { max-width: 860px; margin: 0 auto; }
+    .rep-head { border-bottom: 2px solid var(--accent); padding-bottom: 16px; margin-bottom: var(--space-xl); }
+    .rep-head .rep-kicker { font-size: 11px; text-transform: uppercase; letter-spacing: .12em; color: var(--faint); }
+    .rep-head h1 { font-family: var(--font-display); font-size: 30px; margin: 6px 0 4px; }
+    .rep-head .rep-meta { font-size: 12px; color: var(--muted); }
+    .rep-sec { margin-bottom: var(--space-xl); }
+    .rep-sec > h2 { font-family: var(--font-display); font-size: 17px; margin: 0 0 12px;
+                    padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+    .rep-lede { font-size: 14px; line-height: 1.65; color: var(--text); max-width: 68ch; }
+    .rep-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin: 16px 0; }
+    .rep-kpi { border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+    .rep-kpi b { font-family: var(--font-display); font-size: 22px; display: block; }
+    .rep-kpi span { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--faint); }
+    .rep-list { display: flex; flex-direction: column; gap: 10px; }
+    .rep-item { padding: 10px 0; border-bottom: 1px solid var(--hairline); }
+    .rep-item:last-child { border-bottom: 0; }
+    .rep-item .ri-axis { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); }
+    .rep-item .ri-find { font-size: 13.5px; line-height: 1.5; margin-top: 3px; }
+    .rep-rec { font-size: 13.5px; line-height: 1.5; padding: 8px 0 8px 18px; position: relative; }
+    .rep-rec::before { content: "→"; position: absolute; left: 0; color: var(--accent); }
+    .demo-row { display: grid; grid-template-columns: 110px 1fr 44px; gap: 10px; align-items: center; font-size: 11.5px; margin-bottom: 6px; }
+    .demo-row .dl { text-align: right; color: var(--muted); }
+    .demo-row .dp { text-align: right; font-family: var(--font-mono); }
+    .rep-foot { font-size: 10.5px; color: var(--faint); border-top: 1px solid var(--border); padding-top: 12px; line-height: 1.6; }
+    .rep-actions { margin: var(--space-md) 0 var(--space-xl); }
+
+    @media print {
+      @page { margin: 16mm; }
+      .rail, .topbar, .sub-nav, #rail-toggle, .rep-actions, .skin-toggle { display: none !important; }
+      body { padding: 0 !important; background: #fff !important; color: #111 !important; }
+      .container { max-width: none; padding: 0; }
+      .rep-sec { page-break-inside: avoid; }
+      .rep-head h1 { color: #111; }
+      .rep-kpi, .rep-sec > h2, .rep-item, .rep-foot { border-color: #ccc !important; }
+      a { color: #111 !important; text-decoration: none; }
+      .hbar-track { background: #eee !important; }
+    }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+{% from '_icons.html' import icon %}
+
+<div class="container">
+<div class="rep">
+
+  <div class="rep-actions">
+    <button class="btn btn-primary" type="button" onclick="window.print()">{{ icon('download') }} Save as PDF / print</button>
+    <a class="btn" href="/client/{{ client.client_id }}/advice?scope=client:{{ client.client_id }}">{{ icon('arrow-right') }} Back to advice</a>
+  </div>
+
+  <header class="rep-head">
+    <div class="rep-kicker">Performance report</div>
+    <h1>{{ client.name }}</h1>
+    <div class="rep-meta">Prepared by Cortex · {{ generated_at }}
+      {%- if adv.catalogue %} · {{ adv.catalogue.scored }} of {{ adv.catalogue.total }} posts with performance data{% endif %}</div>
+  </header>
+
+  <section class="rep-sec">
+    <h2>Summary</h2>
+    <p class="rep-lede">{{ adv.summary }}</p>
+    {% set k = ov.kpis %}
+    <div class="rep-kpis">
+      <div class="rep-kpi"><b>{{ k.content_items or 0 }}</b><span>Posts</span></div>
+      <div class="rep-kpi"><b>{{ "{:,}".format(k.total_views or 0) }}</b><span>Views</span></div>
+      <div class="rep-kpi"><b>{{ (k.avg_engagement ~ '%') if k.avg_engagement is not none else '—' }}</b><span>Avg engagement</span></div>
+      <div class="rep-kpi"><b>{{ ov.accounts | length }}</b><span>Accounts</span></div>
+    </div>
+  </section>
+
+  {% if adv.what_works %}
+  <section class="rep-sec">
+    <h2>What is working</h2>
+    <div class="rep-list">
+      {% for w in adv.what_works %}
+      <div class="rep-item">
+        <div class="ri-axis">{{ w.axis }}</div>
+        <div class="ri-find">{{ w.finding }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+  {% if adv.recommendations %}
+  <section class="rep-sec">
+    <h2>Recommendations</h2>
+    {% for r in adv.recommendations %}<div class="rep-rec">{{ r }}</div>{% endfor %}
+  </section>
+  {% endif %}
+
+  {% if adv.best_time %}
+  <section class="rep-sec">
+    <h2>Best time to post</h2>
+    <p class="rep-lede">Based on this account's own history (UTC). Client timezone: {{ client.timezone }}.</p>
+    <div class="rep-list">
+      {% for s in adv.best_time %}
+      <div class="rep-item"><div class="ri-find">{{ s.day }} at {{ "%02d:00"|format(s.hour) }} — engagement {{ s.engagement }} across {{ s.posts }} posts</div></div>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+  {% set _yt = ov.audience.get('youtube') or ov.audience.get('instagram') or ov.audience.get('tiktok') or ov.audience.get('facebook') or {} %}
+  {% if ov.observed_audience or _yt %}
+  <section class="rep-sec">
+    <h2>Audience</h2>
+    {% if ov.observed_audience %}<p class="rep-lede" style="margin-bottom:12px;">{{ ov.observed_audience }}</p>{% endif %}
+    {% for dim in ['age', 'gender', 'country'] %}
+      {% set rows = _yt.get(dim) %}
+      {% if rows %}
+      <div style="margin-bottom:12px;">
+        <div class="ri-axis" style="margin-bottom:6px;">{{ dim }}</div>
+        {% for row in rows[:5] %}
+        <div class="demo-row"><span class="dl">{{ row.label }}</span>{{ hbar(row.pct, 100, tone='accent') }}<span class="dp">{{ row.pct | round | int }}%</span></div>
+        {% endfor %}
+      </div>
+      {% endif %}
+    {% endfor %}
+  </section>
+  {% endif %}
+
+  {% set mon = (adv.monetization or {}).platforms or {} %}
+  {% if mon %}
+  <section class="rep-sec">
+    <h2>Path to revenue</h2>
+    <div class="rep-list">
+      {% for platform, p in mon.items() %}
+      <div class="rep-item">
+        <div class="ri-axis">{{ platform | friendly_platform }} — {{ 'eligible' if p.eligible else 'not yet eligible' }}</div>
+        <div class="ri-find">{{ p.headline }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+  <div class="rep-foot">
+    Generated by Cortex from platform analytics available on {{ generated_at }}. Figures update as new data syncs.
+    Thresholds for revenue eligibility are each platform's own published criteria and vary by country.
+  </div>
+
+</div>
+</div>
+</body>
+</html>

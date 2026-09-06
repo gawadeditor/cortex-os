@@ -597,6 +597,21 @@ _RETENTION_SHRINK_BELOW = 0.35
 _CADENCE_MIN_EPISODES = 3
 
 
+def _is_client_subject(subject_id: str, db_path: Optional[Path]) -> bool:
+    """True when subject_id is a Cortex Advisory client (not a producing channel)."""
+    try:
+        from hypogeum.db import get_connection
+        conn = get_connection(db_path or _DEFAULT_DB)
+        try:
+            return conn.execute(
+                "SELECT 1 FROM clients WHERE client_id = ? LIMIT 1", (subject_id,),
+            ).fetchone() is not None
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _channel_episode_ids(channel_id: str, db_path: Optional[Path]) -> list[str]:
     from hypogeum.db import get_connection
     conn = get_connection(db_path or _DEFAULT_DB)
@@ -782,6 +797,13 @@ def apply_action(
         channel_id = ev.get("channel_id")
         if not channel_id:
             return _err("content_volume action carries no channel_id", "invalid_evidence")
+        # Cortex Advisory: a client has no production_cadence to nudge — a
+        # content_volume action for a client subject is advice only.
+        if _is_client_subject(channel_id, db_path):
+            if not update_action_status(action_id, "dismissed", db_path=db_path):
+                return _err("action status update failed")
+            return _ok(action_id=action_id, status="dismissed", client_id=channel_id,
+                       note="advisory only — a client has no production cadence to nudge")
         try:
             from hypogeum.channel_config import (
                 get_channel_operations_profile, update_channel_operations_profile,

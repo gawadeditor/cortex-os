@@ -141,8 +141,8 @@ def get_client_overview(client_id: str, db_path: Optional[Path] = None) -> dict:
     except Exception:  # noqa: BLE001
         pass
     try:
-        from hypogeum.monetization_eligibility import compute_channel_monetization
-        out["monetization"] = compute_channel_monetization(client_id, db_path=db_path)
+        from hypogeum.monetization_eligibility import compute_client_monetization
+        out["monetization"] = compute_client_monetization(client_id, db_path=db_path)
     except Exception:  # noqa: BLE001
         pass
     try:

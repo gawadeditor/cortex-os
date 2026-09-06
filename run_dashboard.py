@@ -8388,6 +8388,32 @@ def client_audience_page(client_id):
     return render_template("client_audience.html", d=d)
 
 
+@app.route("/client/<client_id>/advice")
+def client_advice_page(client_id):
+    from hypogeum.client_advisory import generate_client_advisory
+    from hypogeum.client_manager import get_client
+    if not get_client(client_id, db_path=_db_path()):
+        return render_template("not_found.html", kind="Client", id=client_id), 404
+    d = generate_client_advisory(client_id, db_path=_db_path())
+    d["client"] = get_client(client_id, db_path=_db_path())
+    return render_template("client_advice.html", d=d)
+
+
+@app.route("/client/<client_id>/report")
+def client_report_page(client_id):
+    from datetime import datetime, timezone
+    from hypogeum.client_advisory import generate_client_advisory
+    from hypogeum.client_manager import get_client
+    from hypogeum.dashboard_clients import get_client_overview
+    if not get_client(client_id, db_path=_db_path()):
+        return render_template("not_found.html", kind="Client", id=client_id), 404
+    adv = generate_client_advisory(client_id, db_path=_db_path())
+    ov = get_client_overview(client_id, db_path=_db_path())
+    return render_template("client_report.html", adv=adv, ov=ov,
+                           client=ov.get("client"),
+                           generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
+
+
 @app.route("/client/<client_id>/accounts")
 def client_accounts_page(client_id):
     from hypogeum.dashboard_clients import get_client_accounts

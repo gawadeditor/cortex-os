@@ -2,7 +2,7 @@
 
 > **PROJECT:** Factory OS
 > **Page Type:** Internal operator — client performance intelligence
-> **Routes:** `/clients`, `/clients/new`, `/client/<id>`, `/client/<id>/content`, `/client/<id>/audience`, `/client/<id>/accounts`
+> **Routes:** `/clients`, `/clients/new`, `/client/<id>`, `/client/<id>/content`, `/client/<id>/audience`, `/client/<id>/advice`, `/client/<id>/report`, `/client/<id>/accounts`
 
 > ⚠️ **IMPORTANT:** Rules here **override** `design-system/factory-os/MASTER.md`.
 > Only deviations are documented; everything else follows Master.
@@ -22,7 +22,11 @@ tenant instead of a producing `channels` row.
 
 - Same `.container` + `_nav` + `_hero` shell as `analytics.html` / `monetization.html`.
 - Client scope is a first-class nav scope: `?scope=client:<id>` + the "Clients" rail
-  group. Client tabs: Overview / Content / Audience / Accounts (Advice + Report land in P4).
+  group. Client tabs: Overview / Content / Audience / Advice / Report / Accounts.
+- `client_report.html` is the one client-facing page: presentation-skin first,
+  a dedicated `@media print` block (hide rail/topbar, black-on-white, `@page` margins,
+  `page-break-inside: avoid` per section) and a "Save as PDF / print" button that
+  calls `window.print()` — no PDF library, no tokened public link.
 
 ### Color
 

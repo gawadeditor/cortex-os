@@ -206,7 +206,70 @@ def compute_channel_monetization(channel_id: str, *,
         metrics = _measure(channel_id, conn)
     finally:
         conn.close()
+    out["platforms"] = _build_platforms(metrics)
+    return out
 
+
+def _client_views_last_days(client_id: str, platform: str, days: int, conn) -> Optional[int]:
+    """Sum of the latest per-content view count for a client on one platform,
+    for content published within `days`. None if no api rows."""
+    try:
+        rows = conn.execute(
+            "SELECT MAX(pa.views) AS v FROM platform_analytics pa "
+            "JOIN content_items ci ON ci.content_id = pa.content_id "
+            "WHERE pa.platform=? AND pa.source='api' AND pa.views IS NOT NULL "
+            "AND pa.client_id=? "
+            "AND (ci.published_at IS NULL OR ci.published_at >= date('now', ?)) "
+            "GROUP BY pa.content_id",
+            (platform, client_id, f"-{int(days)} days"),
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        return None
+    return int(sum((r["v"] or 0) for r in rows)) if rows else None
+
+
+def _measure_client(client_id: str, conn) -> dict:
+    fs = _latest_follower_stats(client_id, conn)
+    yt = _platform_insight(client_id, "youtube", conn)
+    yt_minutes = yt.get("estimatedMinutesWatched")
+    yt_watch_hours = round(yt_minutes / 60.0, 1) if isinstance(yt_minutes, (int, float)) else None
+    yt_shorts_views = yt.get("views")
+    if yt_shorts_views is None:
+        yt_shorts_views = _client_views_last_days(client_id, "youtube", 90, conn)
+    return {
+        "yt_subscribers": fs.get("youtube"),
+        "yt_watch_hours": yt_watch_hours,
+        "yt_shorts_views_90d": yt_shorts_views if isinstance(yt_shorts_views, (int, float)) else None,
+        "tt_followers": fs.get("tiktok"),
+        "tt_views_30d": _client_views_last_days(client_id, "tiktok", 30, conn),
+        "ig_followers": fs.get("instagram"),
+        "fb_followers": fs.get("facebook"),
+    }
+
+
+def compute_client_monetization(client_id: str, *,
+                                db_path: Optional[Path] = None) -> dict:
+    """Per-platform monetization standing for a Cortex Advisory client —
+    the compute_channel_monetization contract, keyed by client_id. Client
+    native rows live in channel_platform_insights / channel_audience /
+    channel_analytics_rollup under channel_id = client_id; content views
+    come from platform_analytics.client_id. Never raises."""
+    out: dict = {"client_id": client_id, "platforms": {}}
+    try:
+        conn = _conn(db_path)
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = str(exc)
+        return out
+    try:
+        metrics = _measure_client(client_id, conn)
+    finally:
+        conn.close()
+    out["platforms"] = _build_platforms(metrics)
+    return out
+
+
+def _build_platforms(metrics: dict) -> dict:
+    platforms: dict = {}
     for platform, spec in PLATFORM_REQUIREMENTS.items():
         all_reqs = [_eval_req(r, metrics.get(r["key"])) for r in spec.get("all_of", [])]
         one_reqs = [_eval_req(r, metrics.get(r["key"])) for r in spec.get("one_of", [])]
@@ -233,13 +296,13 @@ def compute_channel_monetization(channel_id: str, *,
         else:
             headline = "Not enough data yet to measure the gap."
 
-        out["platforms"][platform] = {
+        platforms[platform] = {
             "program": spec["program"], "note": spec["note"],
             "eligible": eligible,
             "requirements": all_reqs + [{**r, "one_of": True} for r in one_reqs],
             "headline": headline,
         }
-    return out
+    return platforms
 
 
 def compute_factory_monetization(*, db_path: Optional[Path] = None) -> dict:

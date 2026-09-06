@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ d.client.name }} — Advice</title>
+  {% include '_base_style.html' %}
+  <style>
+    .adv-sum { font-size: 13.5px; line-height: 1.6; color: var(--text); max-width: 70ch;
+               background: var(--overlay); border: 1px solid var(--border); border-radius: 10px;
+               padding: 14px 16px; margin: var(--space-md) 0 var(--space-lg); }
+    .works { display: flex; flex-direction: column; gap: 10px; }
+    .work { border-left: 3px solid var(--accent); padding: 10px 14px; background: var(--surface);
+            border-radius: 0 8px 8px 0; }
+    .work .work-axis { font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: var(--faint); }
+    .work .work-find { font-size: 13px; color: var(--text); margin-top: 3px; line-height: 1.5; }
+    .work .work-ev { font-size: 11px; color: var(--faint); margin-top: 4px; }
+    .recs { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+    .rec { display: flex; gap: 10px; font-size: 13px; line-height: 1.5; padding: 9px 12px;
+           background: var(--accent-bg); border: 1px solid var(--accent-line); border-radius: 8px; color: var(--text); }
+    .rec .i { color: var(--accent); flex-shrink: 0; margin-top: 2px; }
+    .dir { font-size: 12px; padding: 8px 0; border-bottom: 1px solid var(--hairline); color: var(--muted); }
+    .dir:last-child { border-bottom: 0; }
+    .note { font-size: 11.5px; color: var(--faint); line-height: 1.5; margin-top: 12px; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+{% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
+
+<div class="container">
+
+{% call hero(
+     eyebrow='Client · advice',
+     title=d.client.name ~ ' — what the numbers say',
+     lede='Cortex compares this client’s best posts against the weakest and only reports a difference when it is genuinely on one measurable axis.',
+     figure=d.what_works | length,
+     figure_label='clear patterns found',
+     pill=(d.catalogue.scored ~ ' of ' ~ d.catalogue.total ~ ' posts scored'),
+     pill_class='is-good' if d.ok and d.what_works else 'is-warn') %}
+  <a class="btn" href="/client/{{ d.client.client_id }}/report?scope=client:{{ d.client.client_id }}">{{ icon('review') }} Full report</a>
+{% endcall %}
+
+<div class="adv-sum">{{ d.summary }}</div>
+
+{% if d.what_works %}
+<div class="card">
+  <div class="card-title">{{ icon('sparkle') }} What the top posts have in common</div>
+  <div class="works" style="margin-top:12px;">
+    {% for w in d.what_works %}
+    <div class="work">
+      <div class="work-axis">{{ w.axis }}</div>
+      <div class="work-find">{{ w.finding }}</div>
+      <div class="work-ev">{{ w.evidence }}</div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{% if d.recommendations %}
+<div class="card" style="margin-top: var(--space-md);">
+  <div class="card-title">{{ icon('arrow-right') }} Do next</div>
+  <div class="recs">
+    {% for r in d.recommendations %}
+    <div class="rec">{{ icon('check') }}<span>{{ r }}</span></div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{% if not d.what_works and not d.recommendations %}
+<div class="dv-empty">
+  {{ icon('learning') }}
+  <div class="dv-empty-title">Not enough to advise on yet</div>
+  <div class="dv-empty-sub">{{ d.reason or 'Add more content and let a sync attach metrics + thumbnails.' }}</div>
+</div>
+{% endif %}
+
+{% if d.best_time %}
+<div class="card" style="margin-top: var(--space-md);">
+  <div class="card-title">{{ icon('calendar') }} Best time to post (UTC)</div>
+  <p class="note">{% for s in d.best_time %}{{ s.day }} {{ "%02d:00"|format(s.hour) }} (eng {{ s.engagement }}, {{ s.posts }} posts){% if not loop.last %} · {% endif %}{% endfor %}</p>
+</div>
+{% endif %}
+
+{% if d.directives %}
+<div class="card" style="margin-top: var(--space-md);">
+  <div class="card-title">{{ icon('pencil') }} Your directives for this client</div>
+  {% for x in d.directives %}
+  <div class="dir">{{ x.summary or x.directive or x.note or x }}{% if x.created_at %} <span style="color:var(--faint);">· {{ x.created_at[:10] }}</span>{% endif %}</div>
+  {% endfor %}
+</div>
+{% endif %}
+
+</div>
+</body>
+</html>

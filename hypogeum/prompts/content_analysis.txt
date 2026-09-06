@@ -1,3 +1,8 @@
+# PROMPT_VERSION: v1
+# OWNER_AGENT: content_analysis_agent
+# MODEL_TARGET: anthropic/claude-sonnet-4.6
+# PURPOSE: Cortex Advisory — read the creative choices in one published client post (metadata + thumbnail) into a structured content_profile
+
 CONTENT ANALYSIS AGENT — Cortex Advisory
 ========================================
 

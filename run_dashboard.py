@@ -8376,7 +8376,7 @@ def client_content_page(client_id):
     d = get_client_content(client_id, db_path=_db_path())
     if not d.get("client"):
         return render_template("not_found.html", kind="Client", id=client_id), 404
-    return render_template("client_content.html", d=d)
+    return render_template("client_content.html", d=d, flash=request.args.get("flash"))
 
 
 @app.route("/client/<client_id>/audience")
@@ -8418,6 +8418,77 @@ def client_accounts_link(client_id):
     except Exception as exc:  # noqa: BLE001
         msg = f"Error: {exc}"
     return redirect(f"/client/{client_id}/accounts?scope=client:{client_id}&flash={msg}", 302)
+
+
+@app.route("/client/<client_id>/content/add", methods=["POST"])
+def client_content_add(client_id):
+    from hypogeum.client_manager import get_client, upsert_content_item
+    from hypogeum.oembed import resolve_url
+    if not get_client(client_id, db_path=_db_path()):
+        return render_template("not_found.html", kind="Client", id=client_id), 404
+    res = resolve_url(request.form.get("url") or "")
+    if not res["ok"]:
+        msg = f"Could not add: {res.get('error') or 'unresolved URL'}"
+    else:
+        try:
+            upsert_content_item(
+                client_id, res["platform"],
+                platform_post_id=res["platform_post_id"], url=res["url"],
+                title=res.get("title"), thumbnail_url=res.get("thumbnail_url"),
+                media_type="video", source="manual_url", db_path=_db_path())
+            msg = f"Added {res['platform']} post {res['platform_post_id']}"
+        except Exception as exc:  # noqa: BLE001
+            msg = f"Error: {exc}"
+    return redirect(f"/client/{client_id}/content?scope=client:{client_id}&flash={msg}", 302)
+
+
+@app.route("/client/<client_id>/content/import", methods=["POST"])
+def client_content_import(client_id):
+    import csv as _csv
+    import io as _io
+    from hypogeum.client_manager import get_client, upsert_content_item, new_content_id
+    from hypogeum.analytics_store import store_content_metrics
+    if not get_client(client_id, db_path=_db_path()):
+        return render_template("not_found.html", kind="Client", id=client_id), 404
+    f = request.files.get("file")
+    raw = (f.read().decode("utf-8", "replace") if f else request.form.get("csv") or "")
+    added = failed = 0
+    for row in _csv.DictReader(_io.StringIO(raw)):
+        row = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
+        platform = row.get("platform") or ""
+        pid = row.get("platform_post_id") or row.get("post_id") or ""
+        if not pid and row.get("url"):
+            from hypogeum.oembed import resolve_url
+            r = resolve_url(row["url"])
+            platform, pid = r.get("platform") or platform, r.get("platform_post_id") or ""
+        if not (platform and pid):
+            failed += 1
+            continue
+        try:
+            upsert_content_item(client_id, platform, platform_post_id=pid,
+                                url=row.get("url") or None, title=row.get("title") or None,
+                                published_at=row.get("published_at") or None,
+                                media_type="video", source="csv", db_path=_db_path())
+            metrics = {k: float(row[k]) for k in
+                       ("views", "likes", "comments", "shares", "saves", "reach",
+                        "impressions", "engagement_rate")
+                       if row.get(k) and _is_num(row[k])}
+            if metrics:
+                store_content_metrics(new_content_id(platform, pid), client_id, platform,
+                                      metrics, source="csv", db_path=_db_path())
+            added += 1
+        except Exception:  # noqa: BLE001
+            failed += 1
+    return redirect(f"/client/{client_id}/content?scope=client:{client_id}"
+                    f"&flash=Imported {added} rows ({failed} skipped)", 302)
+
+
+def _is_num(s):
+    try:
+        float(s)
+        return True
+    except (TypeError, ValueError):
+        return False
 
 
 @app.route("/intelligence/sync")

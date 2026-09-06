@@ -192,6 +192,17 @@ def generate_client_advisory(client_id: str, *,
                 recs.append(f"Do more '{tag}' {label} content.")
                 break
 
+    # ---- unused raw material (P5) ----
+    ura = out.get("unused_raw_assets")
+    if ura and ura.get("count"):
+        works.append({
+            "axis": "raw material",
+            "finding": f"{ura['count']} of {ura['total']} registered source assets "
+                       "have not been used in a post yet.",
+            "evidence": "client asset registry."})
+        recs.append(f"Cut new posts from the {ura['count']} unused assets on file "
+                    f"({', '.join(ura['labels'])}).")
+
     # ---- monetization gap (single closest platform) ----
     mon = out.get("monetization") or {}
     gap_line = _closest_monetization_gap(mon)
@@ -243,6 +254,17 @@ def _attach_context(out: dict, client_id: str, db_path) -> None:
     try:
         from hypogeum.channel_learning import list_channel_changelog
         out["directives"] = list_channel_changelog(client_id, limit=15, db_path=db_path) or []
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from hypogeum import client_manager as cm
+        assets = cm.list_client_assets(client_id, db_path=db_path)
+        unused = [a for a in assets if not a.get("used")]
+        if unused:
+            out["unused_raw_assets"] = {
+                "count": len(unused), "total": len(assets),
+                "labels": [a["label"] for a in unused[:6]],
+            }
     except Exception:  # noqa: BLE001
         pass
 

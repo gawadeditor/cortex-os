@@ -397,6 +397,69 @@ def get_content_profile(content_id: str, *,
     return d
 
 
+_ASSET_KINDS = ("footage", "photo", "graphic", "audio", "other")
+
+
+def add_client_asset(client_id: str, label: str, *, kind: str = "other",
+                     location: Optional[str] = None, note: Optional[str] = None,
+                     db_path: Optional[Path] = None) -> str:
+    """Register one piece of raw source material for a client (a registry
+    entry only — no upload, no processing)."""
+    if kind not in _ASSET_KINDS:
+        raise ValueError(f"kind must be one of {_ASSET_KINDS}")
+    if not (label or "").strip():
+        raise ValueError("label is required")
+    aid = uuid.uuid4().hex
+    conn = _conn(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO client_assets (asset_id, client_id, kind, label, location, "
+            "note, used, created_at) VALUES (?,?,?,?,?,?,0,?)",
+            (aid, client_id, kind, label.strip(), (location or None),
+             (note or None), _now()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return aid
+
+
+def list_client_assets(client_id: str, *,
+                       db_path: Optional[Path] = None) -> list[dict]:
+    conn = _conn(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM client_assets WHERE client_id=? ORDER BY created_at DESC",
+            (client_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def set_asset_used(asset_id: str, used: bool = True, *,
+                   db_path: Optional[Path] = None) -> bool:
+    conn = _conn(db_path)
+    try:
+        n = conn.execute("UPDATE client_assets SET used=? WHERE asset_id=?",
+                         (1 if used else 0, asset_id)).rowcount
+        conn.commit()
+    finally:
+        conn.close()
+    return n > 0
+
+
+def delete_client_asset(asset_id: str, *, db_path: Optional[Path] = None) -> bool:
+    conn = _conn(db_path)
+    try:
+        n = conn.execute("DELETE FROM client_assets WHERE asset_id=?",
+                         (asset_id,)).rowcount
+        conn.commit()
+    finally:
+        conn.close()
+    return n > 0
+
+
 def analysis_spend_this_month(client_id: str, *,
                               db_path: Optional[Path] = None) -> float:
     """Sum content_profiles.cost_usd for this client's items, current UTC month."""

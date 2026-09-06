@@ -19,7 +19,7 @@ from urllib.parse import urlparse, parse_qs, quote
 
 from hypogeum.logger import get_logger
 
-log = get_logger(__name__)
+log = get_logger(agent="oembed")
 
 _OEMBED = {
     "youtube": "https://www.youtube.com/oembed?url={url}&format=json",
@@ -121,7 +121,7 @@ def resolve_url(url: str) -> dict:
                 out["error"] = f"oembed {r.status_code}"
         except Exception as exc:  # noqa: BLE001
             out["error"] = f"oembed failed: {exc}"
-            log.warning("oembed_failed", platform=platform, url=url, error=str(exc))
+            log.warn("oembed_failed", platform=platform, url=url, error=str(exc))
 
     out["ok"] = bool(out["platform"] and out["platform_post_id"])
     if not out["ok"] and not out["error"]:

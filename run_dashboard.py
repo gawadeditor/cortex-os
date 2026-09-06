@@ -8339,26 +8339,65 @@ def clients_index_page():
     return render_template("clients.html", d=d)
 
 
-@app.route("/clients/new", methods=["GET", "POST"])
+@app.route("/clients/new", methods=["GET"])
 def clients_new_page():
+    return render_template("client_builder.html")
+
+
+@app.route("/api/clients/create", methods=["POST"])
+def api_clients_create():
     from hypogeum.client_manager import create_client
+    payload = request.get_json(silent=True) or request.form
+    name = (payload.get("name") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "A client name is required."}), 400
+    brief_note = (payload.get("brief") or "").strip() or None
+    try:
+        c = create_client(
+            name,
+            engagement_mode=(payload.get("engagement_mode") or "observe"),
+            analysis_depth=(payload.get("analysis_depth") or "metadata"),
+            timezone=((payload.get("timezone") or "UTC").strip() or "UTC"),
+            brief={"note": brief_note} if brief_note else None,
+            db_path=_db_path())
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    cid = c["client_id"]
+    return jsonify({"ok": True, "client_id": cid,
+                    "next": f"/client/{cid}/accounts?scope=client:{cid}"})
+
+
+@app.route("/client/<client_id>/assets", methods=["GET", "POST"])
+def client_assets_page(client_id):
+    from hypogeum import client_manager as cm
+    if not cm.get_client(client_id, db_path=_db_path()):
+        return render_template("not_found.html", kind="Client", id=client_id), 404
     if request.method == "POST":
-        name = (request.form.get("name") or "").strip()
-        if not name:
-            return render_template("client_new.html", error="A client name is required."), 400
-        tz = (request.form.get("timezone") or "UTC").strip() or "UTC"
-        depth = request.form.get("analysis_depth") or "metadata"
-        mode = request.form.get("engagement_mode") or "observe"
-        brief = (request.form.get("brief") or "").strip() or None
         try:
-            c = create_client(name, engagement_mode=mode, analysis_depth=depth,
-                              timezone=tz, brief={"note": brief} if brief else None,
-                              db_path=_db_path())
+            cm.add_client_asset(client_id,
+                                request.form.get("label") or "",
+                                kind=request.form.get("kind") or "other",
+                                location=request.form.get("location") or None,
+                                note=request.form.get("note") or None,
+                                db_path=_db_path())
+            msg = "Asset registered"
         except Exception as exc:  # noqa: BLE001
-            return render_template("client_new.html", error=str(exc)), 400
-        cid = c["client_id"]
-        return redirect(f"/client/{cid}/accounts?scope=client:{cid}", 302)
-    return render_template("client_new.html", error=None)
+            msg = f"Error: {exc}"
+        return redirect(f"/client/{client_id}/assets?scope=client:{client_id}&flash={msg}", 302)
+    return render_template("client_assets.html",
+                           client=cm.get_client(client_id, db_path=_db_path()),
+                           assets=cm.list_client_assets(client_id, db_path=_db_path()),
+                           flash=request.args.get("flash"))
+
+
+@app.route("/client/<client_id>/assets/<asset_id>/<action>", methods=["POST"])
+def client_asset_action(client_id, asset_id, action):
+    from hypogeum import client_manager as cm
+    if action == "delete":
+        cm.delete_client_asset(asset_id, db_path=_db_path())
+    elif action in ("used", "unused"):
+        cm.set_asset_used(asset_id, action == "used", db_path=_db_path())
+    return redirect(f"/client/{client_id}/assets?scope=client:{client_id}", 302)
 
 
 @app.route("/client/<client_id>")

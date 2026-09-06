@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>New Advisory Client — Cortex</title>
+  {% include '_base_style.html' %}
+  <style>
+    .cb { max-width: 620px; margin: var(--space-lg) auto 0; }
+    .stepper { display: flex; gap: 8px; margin-bottom: var(--space-lg); }
+    .stepper .st { flex: 1; height: 4px; border-radius: 2px; background: var(--border); }
+    .stepper .st.done { background: var(--accent); }
+    .cb-step { display: none; }
+    .cb-step.on { display: block; }
+    .cb-step h2 { font-family: var(--font-display); font-size: 18px; margin: 0 0 6px; }
+    .cb-step p.sub { font-size: 12.5px; color: var(--muted); line-height: 1.6; margin: 0 0 16px; max-width: 60ch; }
+    .cb-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: var(--space-md); }
+    .cb-field .hint { font-size: 10.5px; color: var(--faint); line-height: 1.5; text-transform: none; letter-spacing: 0; }
+    .cb-nav { display: flex; justify-content: space-between; margin-top: var(--space-lg); }
+    .cb-err { font-size: 12px; color: var(--critical); background: var(--critical-bg);
+              border: 1px solid color-mix(in srgb, var(--critical) 40%, var(--border));
+              border-radius: 8px; padding: 9px 11px; margin-bottom: var(--space-md); }
+    .cb-review { font-size: 13px; line-height: 1.7; }
+    .cb-review b { color: var(--faint); font-weight: 600; text-transform: uppercase; font-size: 10px; letter-spacing: .05em; display: inline-block; min-width: 130px; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+{% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
+
+<div class="container">
+{{ hero(eyebrow='Advisory', title='Add a client',
+        lede='Four quick steps. Cortex then tracks this client\'s published content and turns it into advice — no production involved.') }}
+
+<form class="cb card" id="cb">
+  <div class="stepper" id="stepper">
+    <span class="st done"></span><span class="st"></span><span class="st"></span><span class="st"></span>
+  </div>
+  <div class="cb-err" id="cb-err" style="display:none;"></div>
+
+  <div class="cb-step on" data-step="0">
+    <h2>Identity &amp; brief</h2>
+    <p class="sub">Who is this client and what does "good" look like for their content?</p>
+    <div class="cb-field">
+      <label for="name">Client name</label>
+      <input type="text" id="name" name="name" required autofocus placeholder="Acme Studios">
+    </div>
+    <div class="cb-field">
+      <label for="brief">Brief (optional)</label>
+      <textarea id="brief" name="brief" placeholder="What the content is for, the audience, what success means."></textarea>
+    </div>
+    <div class="cb-field">
+      <label for="timezone">Timezone</label>
+      <input type="text" id="timezone" name="timezone" value="UTC" placeholder="UTC / Africa/Cairo">
+      <span class="hint">Used to read their best-time-to-post in local hours.</span>
+    </div>
+  </div>
+
+  <div class="cb-step" data-step="1">
+    <h2>How Cortex engages</h2>
+    <p class="sub">Observe is the safe default — Cortex only reads and advises. Manage additionally lets Cortex schedule the client's posts (behind an approval step).</p>
+    <div class="cb-field">
+      <label for="engagement_mode">Engagement mode</label>
+      <select id="engagement_mode" name="engagement_mode">
+        <option value="observe" selected>Observe — track &amp; advise only</option>
+        <option value="manage">Manage — also schedule posts (with approval)</option>
+      </select>
+    </div>
+    <div class="cb-field">
+      <label for="analysis_depth">Content analysis</label>
+      <select id="analysis_depth" name="analysis_depth">
+        <option value="metadata" selected>Metadata + thumbnail</option>
+        <option value="full_video">Full video (not available yet)</option>
+      </select>
+      <span class="hint">Cortex reads the caption/hook and runs vision on the thumbnail.</span>
+    </div>
+  </div>
+
+  <div class="cb-step" data-step="2">
+    <h2>Connect accounts</h2>
+    <p class="sub">You'll connect the social accounts you manage for this client right after creating it — on the client's Accounts page, from the shared Zernio pool.</p>
+    <p class="sub" style="color:var(--faint);">Nothing to do here now. This step is a reminder of what comes next.</p>
+  </div>
+
+  <div class="cb-step" data-step="3">
+    <h2>Review</h2>
+    <p class="sub">Create the client, then connect accounts and run the first sync.</p>
+    <div class="cb-review" id="cb-review"></div>
+  </div>
+
+  <div class="cb-nav">
+    <button type="button" class="btn" id="cb-back" style="visibility:hidden;">{{ icon('arrow-right') }} Back</button>
+    <div>
+      <a class="btn btn-ghost" href="/clients?scope=factory">Cancel</a>
+      <button type="button" class="btn btn-primary" id="cb-next">Next</button>
+    </div>
+  </div>
+</form>
+</div>
+
+<script>
+(function(){
+  var f = document.getElementById('cb'), step = 0, LAST = 3;
+  var steps = f.querySelectorAll('.cb-step'), bars = document.querySelectorAll('#stepper .st');
+  var back = document.getElementById('cb-back'), next = document.getElementById('cb-next');
+  var err = document.getElementById('cb-err');
+  function show(){
+    steps.forEach(function(s){ s.classList.toggle('on', +s.dataset.step === step); });
+    bars.forEach(function(b, i){ b.classList.toggle('done', i <= step); });
+    back.style.visibility = step === 0 ? 'hidden' : 'visible';
+    next.textContent = step === LAST ? 'Create client' : 'Next';
+    if (step === LAST){
+      document.getElementById('cb-review').innerHTML =
+        '<div><b>Name</b> ' + (f.name.value || '—') + '</div>' +
+        '<div><b>Timezone</b> ' + (f.timezone.value || 'UTC') + '</div>' +
+        '<div><b>Engagement</b> ' + f.engagement_mode.value + '</div>' +
+        '<div><b>Analysis</b> ' + f.analysis_depth.value + '</div>';
+    }
+  }
+  function fail(m){ err.textContent = m; err.style.display = 'block'; }
+  back.addEventListener('click', function(){ if (step > 0){ step--; err.style.display='none'; show(); } });
+  next.addEventListener('click', function(){
+    err.style.display = 'none';
+    if (step === 0 && !f.name.value.trim()){ fail('A client name is required.'); return; }
+    if (step < LAST){ step++; show(); return; }
+    next.disabled = true; next.textContent = '…';
+    fetch('/api/clients/create', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        name: f.name.value.trim(), brief: f.brief.value.trim(),
+        timezone: f.timezone.value.trim() || 'UTC',
+        engagement_mode: f.engagement_mode.value, analysis_depth: f.analysis_depth.value
+      })
+    }).then(function(r){ return r.json(); }).then(function(d){
+      if (d.ok){ window.location = d.next; }
+      else { next.disabled = false; next.textContent = 'Create client'; fail(d.error || 'Could not create client.'); }
+    }).catch(function(){ next.disabled = false; next.textContent = 'Create client'; fail('Request failed.'); });
+  });
+  show();
+})();
+</script>
+</body>
+</html>

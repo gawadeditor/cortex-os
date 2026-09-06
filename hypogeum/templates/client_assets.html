@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ client.name }} — Source Material</title>
+  {% include '_base_style.html' %}
+  <style>
+    .flash { font-size: 12px; padding: 9px 11px; border-radius: 8px; margin-bottom: var(--space-md);
+             background: var(--overlay); border: 1px solid var(--border); color: var(--text); }
+    .add-form { display: grid; grid-template-columns: 130px 1fr 1fr auto; gap: 10px; align-items: end; }
+    @media (max-width: 720px) { .add-form { grid-template-columns: 1fr; } }
+    .as-row { display: grid; grid-template-columns: 90px 1fr auto; gap: 12px; align-items: center;
+              padding: 11px 0; border-bottom: 1px solid var(--hairline); }
+    .as-row:last-child { border-bottom: 0; }
+    .as-kind { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); }
+    .as-label { font-size: 13px; color: var(--text); }
+    .as-meta { font-size: 11px; color: var(--faint); margin-top: 2px; }
+    .as-used { opacity: .55; }
+    .inline-form { display: inline; }
+    .note { font-size: 11px; color: var(--faint); line-height: 1.5; margin-top: 12px; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+{% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
+
+<div class="container">
+
+{% set _unused = assets | rejectattr('used') | list | length %}
+{% call hero(
+     eyebrow='Client · material',
+     title=client.name ~ ' — source material',
+     lede='A registry of the raw footage, photos and graphics you have for this client. It is a list only — no upload, no processing. Cortex flags unused material in the advice when the best posts drew on raw assets.',
+     figure=assets | length,
+     figure_label='assets on file',
+     pill=(_unused ~ ' unused'),
+     pill_class='is-warn' if _unused else 'is-good') %}
+{% endcall %}
+
+{% if flash %}<div class="flash">{{ flash }}</div>{% endif %}
+
+<div class="card">
+  <div class="card-title">{{ icon('plus') }} Register an asset</div>
+  <form class="add-form" method="post" action="/client/{{ client.client_id }}/assets" style="margin-top:12px;">
+    <div>
+      <label for="kind">Kind</label>
+      <select id="kind" name="kind">
+        <option value="footage">Footage</option><option value="photo">Photo</option>
+        <option value="graphic">Graphic</option><option value="audio">Audio</option>
+        <option value="other" selected>Other</option>
+      </select>
+    </div>
+    <div>
+      <label for="label">Label</label>
+      <input type="text" id="label" name="label" required placeholder="Studio interview B-roll, Aug shoot">
+    </div>
+    <div>
+      <label for="location">Location (optional)</label>
+      <input type="text" id="location" name="location" placeholder="Drive folder / path">
+    </div>
+    <button type="submit" class="btn btn-primary">{{ icon('check') }} Add</button>
+  </form>
+</div>
+
+<div class="card" style="margin-top: var(--space-md);">
+  <div class="card-title">{{ icon('grid') }} Registered material</div>
+  {% if assets %}
+    {% for a in assets %}
+    <div class="as-row {{ 'as-used' if a.used }}">
+      <span class="as-kind">{{ a.kind }}</span>
+      <div>
+        <div class="as-label">{{ a.label }}</div>
+        {% if a.location or a.note %}<div class="as-meta">{{ a.location }}{% if a.location and a.note %} · {% endif %}{{ a.note }}</div>{% endif %}
+      </div>
+      <div>
+        <form class="inline-form" method="post" action="/client/{{ client.client_id }}/assets/{{ a.asset_id }}/{{ 'unused' if a.used else 'used' }}">
+          <button type="submit" class="btn btn-sm btn-ghost">{{ 'Mark unused' if a.used else 'Mark used' }}</button>
+        </form>
+        <form class="inline-form" method="post" action="/client/{{ client.client_id }}/assets/{{ a.asset_id }}/delete">
+          <button type="submit" class="btn btn-sm btn-reject">{{ icon('x') }}</button>
+        </form>
+      </div>
+    </div>
+    {% endfor %}
+  {% else %}
+    <p class="note">Nothing registered yet. Add the footage and photos you have for this client so the advice can spot what has not been used.</p>
+  {% endif %}
+</div>
+
+{% if client.engagement_mode == 'manage' %}
+<div class="card" style="margin-top: var(--space-md);">
+  <div class="card-title">{{ icon('calendar') }} Managed publishing</div>
+  <p class="note">This client is in <b>manage</b> mode. Scheduling the client's posts through Cortex
+  (draft → your approval → publish, on the connected Zernio accounts) is not wired up yet —
+  for now Cortex tracks and advises. Switch to <b>observe</b> on the client settings if you
+  don't want manage mode.</p>
+</div>
+{% endif %}
+
+</div>
+</body>
+</html>

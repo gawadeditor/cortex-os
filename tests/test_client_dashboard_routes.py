@@ -28,17 +28,37 @@ def test_p1_pages_render(app_client):
     cl, cid, _ = app_client
     for path in ("/clients", "/clients/new", f"/client/{cid}",
                  f"/client/{cid}/content", f"/client/{cid}/audience",
-                 f"/client/{cid}/accounts"):
+                 f"/client/{cid}/advice", f"/client/{cid}/report",
+                 f"/client/{cid}/assets", f"/client/{cid}/accounts"):
         r = cl.get(path)
         assert r.status_code == 200, path
     assert cl.get("/client/does-not-exist").status_code == 404
 
 
-def test_create_client_route(app_client):
+def test_assets_register_and_toggle(app_client):
+    cl, cid, db = app_client
+    r = cl.post(f"/client/{cid}/assets",
+                data={"label": "Aug shoot B-roll", "kind": "footage"})
+    assert r.status_code == 302
+    assets = cm.list_client_assets(cid, db_path=db)
+    assert len(assets) == 1 and assets[0]["label"] == "Aug shoot B-roll"
+    aid = assets[0]["asset_id"]
+    cl.post(f"/client/{cid}/assets/{aid}/used")
+    assert cm.list_client_assets(cid, db_path=db)[0]["used"] == 1
+    cl.post(f"/client/{cid}/assets/{aid}/delete")
+    assert cm.list_client_assets(cid, db_path=db) == []
+
+
+def test_create_client_api(app_client):
     cl, _, db = app_client
-    r = cl.post("/clients/new", data={"name": "Beta Co", "timezone": "UTC"})
-    assert r.status_code == 302 and "/accounts" in r.headers["Location"]
+    r = cl.post("/api/clients/create", json={"name": "Beta Co", "timezone": "UTC"})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] and "/accounts" in body["next"]
     assert any(x["name"] == "Beta Co" for x in cm.list_clients(db_path=db))
+
+    bad = cl.post("/api/clients/create", json={"name": ""})
+    assert bad.status_code == 400 and bad.get_json()["ok"] is False
 
 
 def test_account_link_unlink_route(app_client):

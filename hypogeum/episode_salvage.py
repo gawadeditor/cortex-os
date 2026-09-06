@@ -189,6 +189,99 @@ def salvage_preconditions(
     return out
 
 
+def _rebind_stale_admission(channel_id: str, episode_id: str, *, db_path, log=None) -> Optional[str]:
+    """If the episode's admission is FAILED/RELEASED/EXPIRED and bound to a
+    grant that is no longer the channel's active one, point it at the
+    current active grant (id + version + workflow_version). Returns the new
+    grant_id when it rebound, None otherwise. Never raises."""
+    try:
+        from hypogeum.db import get_connection
+        import hypogeum.authorization_authority as authority
+        from datetime import datetime, timezone
+
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                "SELECT admission_id, status, operating_grant_id FROM execution_admissions "
+                "WHERE episode_id = ? ORDER BY admitted_at DESC LIMIT 1",
+                (episode_id,),
+            ).fetchone()
+            if row is None or row["status"] not in ("failed", "released", "expired"):
+                return None
+            grant = authority.resolve_active_operating_grant(
+                channel_id, at=datetime.now(timezone.utc).isoformat(), db_path=db_path,
+            )
+            if grant is None or grant.grant_id == row["operating_grant_id"]:
+                return None
+            conn.execute(
+                "UPDATE execution_admissions SET operating_grant_id = ?, "
+                "operating_grant_version = ?, workflow_version = ?, updated_at = ? "
+                "WHERE admission_id = ?",
+                (grant.grant_id, grant.grant_version, grant.workflow_version,
+                 datetime.now(timezone.utc).isoformat(), row["admission_id"]),
+            )
+            conn.commit()
+            return grant.grant_id
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001
+        if log is not None:
+            try:
+                log.warning("episode_salvage_admission_rebind_failed",
+                            episode_id=episode_id, error=str(exc))
+            except Exception:  # noqa: BLE001
+                pass
+        return None
+
+
+def _reinstate_plan_weekly_reservation(channel_id: str, episode_id: str, *, db_path, log=None) -> Optional[float]:
+    """The weekly-reservation reaper RELEASES a dead episode's
+    ``plan-weekly:*`` channel_weekly hold. hypogeum.weekly_budget then
+    fail-closes any replay of a released reservation
+    (WeeklyReleasedReplayError) — so a salvage's resume can't authorize its
+    upscale / repair spend. A salvage is a deliberate decision to finish
+    the episode, so its plan hold legitimately consumes weekly headroom
+    again: flip the released row back to 'reserved'. Returns the reinstated
+    amount, or None. Never raises. (The episode has a 'running' run during
+    the salvage, so the reaper treats it as live and won't re-release it.)
+    """
+    try:
+        from hypogeum.db import get_connection
+        from datetime import datetime, timezone
+
+        conn = get_connection(db_path)
+        try:
+            rows = conn.execute(
+                "SELECT reservation_id, reserved_amount FROM budget_reservations "
+                "WHERE scope_kind = 'channel_weekly' AND status = 'released' "
+                "AND idempotency_key LIKE ?",
+                (f"plan-weekly:{channel_id}:{episode_id}:%",),
+            ).fetchall()
+            if not rows:
+                return None
+            total = 0.0
+            now = datetime.now(timezone.utc).isoformat()
+            for r in rows:
+                conn.execute(
+                    "UPDATE budget_reservations SET status = 'reserved', resolved_at = NULL, "
+                    "updated_at = ? WHERE reservation_id = ? AND status = 'released'",
+                    (now, r["reservation_id"]),
+                )
+                total += float(r["reserved_amount"] or 0)
+            conn.commit()
+            return round(total, 4)
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001
+        if log is not None:
+            try:
+                log.warning("episode_salvage_plan_weekly_reinstate_failed",
+                            episode_id=episode_id, error=str(exc))
+            except Exception:  # noqa: BLE001
+                pass
+        return None
+
+
 def salvage_episode(
     episode_id: str, *, config, db_path: Optional[object] = None, log=None,
     dry_run: bool = False,
@@ -215,6 +308,32 @@ def salvage_episode(
         from hypogeum.pipeline import run_pipeline
 
         _p = Path(db_path) if db_path else None
+
+        # An old episode's admission row is bound to whatever Operating Grant
+        # was active when it first ran. If the channel's grant was re-signed
+        # since (e.g. the 2026-09-05 lifetime-cap fix), bind_episode_admission's
+        # re-admit path fails closed with OperatingGrantScopeError. A salvage
+        # is a deliberate, operator-driven re-run: rebind the stale FAILED/
+        # RELEASED/EXPIRED admission to the channel's CURRENT active grant so
+        # the re-admit proceeds. Never touches an 'admitted'/'completed' row.
+        _rebound = _rebind_stale_admission(pre["channel_id"], episode_id, db_path=_p, log=log)
+        if _rebound and log is not None:
+            try:
+                log.info("episode_salvage_admission_rebound", episode_id=episode_id,
+                         channel_id=pre["channel_id"], new_grant=_rebound)
+            except Exception:  # noqa: BLE001
+                pass
+
+        _reinstated = _reinstate_plan_weekly_reservation(
+            pre["channel_id"], episode_id, db_path=_p, log=log,
+        )
+        if _reinstated and log is not None:
+            try:
+                log.info("episode_salvage_plan_weekly_reinstated", episode_id=episode_id,
+                         amount_usd=_reinstated)
+            except Exception:  # noqa: BLE001
+                pass
+
         bind_episode_admission(
             pre["channel_id"], episode_id, config=config,
             worker_id="episode_salvage", db_path=_p,

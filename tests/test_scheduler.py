@@ -1220,3 +1220,36 @@ class TestProduceAheadBufferGuard:
                         cadence="daily", next_run_at=future)
         result = tick(db_path=db_path, now=_now())
         assert result == []
+
+    def test_reactive_topup_cooldown_stops_churn_when_runs_never_land(self, db_path, monkeypatch):
+        """The 'self-limiting' assumption breaks when every created run fails
+        FAST at admission (weekly budget cap): the scheduled_run goes
+        'triggered', its queue item 'failed', the buffer never rises, and
+        without the cooldown the top-up fires every single tick. With the
+        cooldown it fires once, then holds for _REACTIVE_TOPUP_COOLDOWN_SECONDS."""
+        import hypogeum.scheduler as sch
+        monkeypatch.setattr(sch, "_PRODUCTION_BUFFER_TARGET", 2)
+        monkeypatch.setattr(sch, "_PRODUCTION_CATCHUP_MAX", 1)
+        monkeypatch.setattr(sch, "_REACTIVE_TOPUP_COOLDOWN_SECONDS", 1800)
+        future = _now() + timedelta(hours=20)
+        create_schedule(db_path=db_path, scope="channel", channel_id="ch_stuck",
+                        cadence="daily", next_run_at=future)
+
+        t0 = _now()
+        first = tick(db_path=db_path, now=t0)
+        assert len(first) == 1
+        # simulate the failed-admission outcome: scheduled_run -> triggered,
+        # nothing queued, buffer still 0
+        conn = get_connection(db_path)
+        try:
+            conn.execute("UPDATE scheduled_runs SET status='triggered'")
+            conn.commit()
+        finally:
+            conn.close()
+
+        # 5 min later — still inside the cooldown → nothing new
+        assert tick(db_path=db_path, now=t0 + timedelta(minutes=5)) == []
+        assert tick(db_path=db_path, now=t0 + timedelta(minutes=20)) == []
+        # 31 min later — cooldown elapsed → fires again (one, not 30)
+        later = tick(db_path=db_path, now=t0 + timedelta(minutes=31))
+        assert len(later) == 1

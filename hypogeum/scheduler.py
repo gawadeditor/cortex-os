@@ -92,6 +92,18 @@ _PRODUCTION_BUFFER_TARGET = _env_int("PRODUCTION_BUFFER_TARGET", 2)
 # per tick (unchanged behavior); the factory opts in via .env.
 _PRODUCTION_CATCHUP_MAX = _env_int("PRODUCTION_CATCHUP_MAX", 1, floor=1)
 
+# Reactive buffer top-up cooldown. The top-up assumes each scheduled_run it
+# creates becomes a real episode (or stays pending) and so raises
+# channel_buffer_depth on the next tick — "self-limiting". That assumption
+# breaks when the run fails FAST at admission (e.g. the channel is at its
+# weekly budget ceiling): the scheduled_run goes 'triggered', its queue
+# item goes 'failed', no episode is created, depth is unchanged, and the
+# top-up re-fires every single tick — ~1400 dead scheduled_runs/day. The
+# cooldown caps it: after a top-up for a channel, don't top that channel up
+# again for this long, regardless of buffer depth. A genuine mid-day buffer
+# drop still gets caught within the window; a stuck channel stops churning.
+_REACTIVE_TOPUP_COOLDOWN_SECONDS = _env_int("REACTIVE_TOPUP_COOLDOWN_SECONDS", 3600, floor=60)
+
 
 def channel_buffer_depth(channel_id: str, conn) -> int:
     """How many episodes for `channel_id` are already produced-but-unpublished
@@ -703,6 +715,27 @@ def tick(
                 depth = channel_buffer_depth(channel_id_r, conn)
                 if depth >= buffer_target:
                     continue
+                # Cooldown: if this channel already got a reactive top-up
+                # very recently, don't fire again even though the buffer
+                # still reads low — the last one may be stuck at admission
+                # (budget cap etc.), and re-firing every tick just piles up
+                # dead scheduled_runs. A real buffer drop is still caught
+                # within _REACTIVE_TOPUP_COOLDOWN_SECONDS.
+                try:
+                    recent = conn.execute(
+                        "SELECT MAX(created_at) FROM scheduled_runs "
+                        "WHERE channel_id = ? AND schedule_id = ?",
+                        (channel_id_r, row["schedule_id"]),
+                    ).fetchone()[0]
+                except Exception:  # noqa: BLE001
+                    recent = None
+                if recent:
+                    try:
+                        age = (now - _parse_dt_utc(recent)).total_seconds()
+                    except Exception:  # noqa: BLE001
+                        age = _REACTIVE_TOPUP_COOLDOWN_SECONDS + 1
+                    if 0 <= age < _REACTIVE_TOPUP_COOLDOWN_SECONDS:
+                        continue
                 gap = buffer_target - depth
                 n_runs = min(max(1, gap), catchup_max)
                 from hypogeum.logger import get_logger

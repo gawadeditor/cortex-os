@@ -863,10 +863,29 @@ def _submit_scene_via_gate(
         )
     real_prompt_fingerprint = prompt_fingerprint(prompt)
     if real_prompt_fingerprint != declared_asset.prompt_fingerprint:
-        return None, (
-            f"prompt_mismatch: real prompt fingerprint for {expected_output_identity!r} "
-            f"does not match the plan's declared fingerprint for this asset identity"
+        # The freshly re-assembled prompt no longer matches the one the plan
+        # was compiled (and Finance-authorized) against — invariably because
+        # a DNA / video_prompt_writer change since then produces different
+        # text for the same scene. For a fresh episode both are computed
+        # with today's code and this never fires. For clip_repair rescuing
+        # an OLD plan's missing scene (repair_fallback_ok=True — the same
+        # operator-approved 2026-09-04 flag the model-mismatch downgrade
+        # just below uses), fall back to the plan's OWN declared prompt: it
+        # is the authorized text, so this can only ever use LESS-new content
+        # than the caller assembled, never invent an asset the plan didn't
+        # declare. Every other caller still fails closed.
+        if not repair_fallback_ok:
+            return None, (
+                f"prompt_mismatch: real prompt fingerprint for {expected_output_identity!r} "
+                f"does not match the plan's declared fingerprint for this asset identity"
+            )
+        log.warn(
+            "clip_repair_prompt_drift_using_plan_declared",
+            scene_id=scene_id, asset_id=expected_output_identity,
+            reason="assembled prompt drifted from the plan's Finance-authorized text "
+                   "(DNA/prompt-writer change since compile); using the plan's own",
         )
+        prompt = declared_asset.prompt
     _repair_i2v_fallback = False
     if model != declared_asset.model:
         # The channel's OWN I2V model, recomputed the same way the plan
@@ -1792,6 +1811,11 @@ def submit_scene(
         _STRANDED_AUTH_MARKERS = (
             "03_authorization_active_and_unconsumed",
             "authorization state is 'submitting'",
+            # a prior attempt on this identity left non-terminal receipt
+            # evidence, so the same idempotency_key can never be resubmitted
+            # — a fresh ':recovery{n}' key has none and is eligible.
+            "05_idempotency_key_unconsumed",
+            "already has attempt evidence",
         )
         _MAX_STRANDED_AUTH_RECOVERIES = 1
         _stranded_recoveries = 0

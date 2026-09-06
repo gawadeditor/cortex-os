@@ -966,3 +966,75 @@ class TestI2VRepairFallback:
 
         assert result["generation_status"] == "generation_failed"
         assert "model_mismatch" in result["failure_reason"]
+
+
+class TestPromptDriftUsesPlanDeclaredPrompt:
+    """A DNA / video_prompt_writer change since a plan was compiled makes
+    the freshly re-assembled prompt for the same scene fingerprint-differ
+    from the plan's Finance-authorized text. For a normal caller that is a
+    hard prompt_mismatch (the plan is the authority); for clip_repair
+    rescuing an OLD plan's missing scene (allow_i2v_to_t2v_repair_fallback
+    =True) the plan's OWN declared prompt is used instead. 2026-09-06
+    salvage batch: the ep_14a830cc / ep_24dafec5 / ... class."""
+
+    def _setup(self, keypair, tmp_path, monkeypatch, config):
+        priv, _pub = keypair
+        import hypogeum.db as db
+        db_path = tmp_path / "auth.db"
+        db.initialize_schema(db_path)
+        _register_grant(
+            priv, db_path, model=config.MUAPI_T2_MODEL,
+            production_plan_content_hash=_matching_plan_hash(model=config.MUAPI_T2_MODEL, unit_price_usd=0.15),
+        )
+        monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
+        _configure_channel_weekly(db_path)
+        _persist_matching_plan(tmp_path, model=config.MUAPI_T2_MODEL, unit_price_usd=0.15)
+
+    def test_repair_uses_plan_prompt_when_assembly_drifted(self, keypair, tmp_path, monkeypatch):
+        import hypogeum.muapi as m
+        config = make_config()
+        self._setup(keypair, tmp_path, monkeypatch, config)
+        spec = make_scene_spec(scene_id="s01b01")
+
+        monkeypatch.setattr(
+            m.video_prompt_writer, "assemble_video_scene_prompt",
+            lambda p, channel_id=None: "DRIFTED PROMPT — a DNA module changed since compile",
+        )
+        seen = []
+        real_gate = m._submit_scene_via_gate
+
+        def _spy(**kw):
+            seen.append(kw["prompt"])
+            return real_gate(**kw)
+        monkeypatch.setattr(m, "_submit_scene_via_gate", _spy)
+
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.requests.get") as mock_get, \
+             patch("hypogeum.muapi.time.sleep"), \
+             patch("hypogeum.muapi._download_file", return_value=(True, "")), \
+             patch("hypogeum.muapi._validate_video_file", return_value=(True, "")):
+            mock_post.return_value = _mock_submit_ok("req_prompt_drift")
+            mock_get.return_value = _mock_poll_completed()
+            result = submit_scene(
+                spec, config, "ep_gate_test", tmp_path, channel_id="test_channel",
+                agent="clip_repair_agent", allow_i2v_to_t2v_repair_fallback=True,
+            )
+
+        assert result["generation_status"] == "generated", result
+        assert "DRIFTED PROMPT" in seen[0]  # the drifted text reached the gate; the gate swapped in the plan's
+
+    def test_without_the_flag_prompt_drift_still_hard_fails(self, keypair, tmp_path, monkeypatch):
+        import hypogeum.muapi as m
+        config = make_config()
+        self._setup(keypair, tmp_path, monkeypatch, config)
+        spec = make_scene_spec(scene_id="s01b01")
+        monkeypatch.setattr(
+            m.video_prompt_writer, "assemble_video_scene_prompt",
+            lambda p, channel_id=None: "DRIFTED PROMPT — a DNA module changed since compile",
+        )
+        with patch("hypogeum.muapi.requests.post") as mock_post, \
+             patch("hypogeum.muapi.requests.get") as mock_get:
+            result = submit_scene(spec, config, "ep_gate_test", tmp_path, channel_id="test_channel")
+            assert mock_post.called is False
+        assert result["generation_status"] == "generation_failed"
+        assert "prompt_mismatch" in result["failure_reason"]

@@ -303,6 +303,63 @@ class TestComputeNextPublishSlotPerWeekday:
         result = compute_next_publish_slot(self._SCHEDULE, "Not/A_Real_Zone", _now())
         assert result is None
 
+
+class TestComputeNextPublishSlotWeeklySlots:
+    """Multi-slot weekly shape (2026-09-06): publish ONLY at a fixed set of
+    (weekday, time) points — a real N×/week cadence. 2026-06-15 is a Monday;
+    06-17 Wed, 06-19 Fri, 06-20 Sat."""
+
+    _SLOTS = {
+        "weekly_slots": [
+            {"day_of_week": "monday", "time_of_day": "10:00"},
+            {"day_of_week": "wednesday", "time_of_day": "18:00"},
+            {"day_of_week": "friday", "time_of_day": "15:00"},
+        ],
+        "timezone": "UTC",
+    }
+
+    def test_next_slot_is_today_when_still_ahead(self):
+        r = compute_next_publish_slot(self._SLOTS, "Asia/Dubai", _utc(2026, 6, 15, 9, 0, 0))
+        assert r == _utc(2026, 6, 15, 10, 0, 0)  # policy timezone UTC overrides channel tz
+
+    def test_skips_to_next_listed_slot_after_todays_passed(self):
+        # Monday 11:00 — Mon 10:00 gone, next is Wed 18:00
+        r = compute_next_publish_slot(self._SLOTS, "UTC", _utc(2026, 6, 15, 11, 0, 0))
+        assert r == _utc(2026, 6, 17, 18, 0, 0)
+
+    def test_unlisted_day_is_skipped_entirely(self):
+        # Tuesday — no Tuesday slot; next is Wed 18:00
+        r = compute_next_publish_slot(self._SLOTS, "UTC", _utc(2026, 6, 16, 12, 0, 0))
+        assert r == _utc(2026, 6, 17, 18, 0, 0)
+
+    def test_wraps_to_next_week(self):
+        # Saturday — nothing left this week; next Monday 10:00
+        r = compute_next_publish_slot(self._SLOTS, "UTC", _utc(2026, 6, 20, 12, 0, 0))
+        assert r == _utc(2026, 6, 22, 10, 0, 0)
+
+    def test_integer_day_of_week_accepted(self):
+        s = {"weekly_slots": [{"day_of_week": 2, "time_of_day": "18:00"}]}
+        r = compute_next_publish_slot(s, "UTC", _utc(2026, 6, 15, 9, 0, 0))
+        assert r == _utc(2026, 6, 17, 18, 0, 0)
+
+    def test_takes_priority_over_weekday_time_of_day_and_flat(self):
+        s = {**self._SLOTS, "weekday_time_of_day": {"monday": "23:00"}, "time_of_day": "22:00"}
+        r = compute_next_publish_slot(s, "UTC", _utc(2026, 6, 15, 9, 0, 0))
+        assert r == _utc(2026, 6, 15, 10, 0, 0)
+
+    def test_bad_time_returns_none(self):
+        s = {"weekly_slots": [{"day_of_week": "monday", "time_of_day": "99:99"}]}
+        assert compute_next_publish_slot(s, "UTC", _now()) is None
+
+    def test_bad_day_returns_none(self):
+        s = {"weekly_slots": [{"day_of_week": "someday", "time_of_day": "10:00"}]}
+        assert compute_next_publish_slot(s, "UTC", _now()) is None
+
+    def test_empty_list_falls_through(self):
+        s = {"weekly_slots": [], "day_of_week": "thursday", "time_of_day": "18:00"}
+        r = compute_next_publish_slot(s, "UTC", _utc(2026, 6, 15, 9, 0, 0))
+        assert r == _utc(2026, 6, 18, 18, 0, 0)  # falls through to the weekly shape
+
     def test_invalid_day_name_returns_none(self):
         result = compute_next_publish_slot(
             {"day_of_week": "someday", "time_of_day": "18:00"}, "UTC", _now(),

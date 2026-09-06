@@ -207,7 +207,15 @@ def compute_next_publish_slot(
     hypogeum.dashboard_control.next_thursday_publish_slot()'s "next weekday
     at fixed time" pattern to any channel-configured day/time/timezone.
 
-    Three schedule shapes are accepted:
+    Four schedule shapes are accepted (weekly_slots is checked first, then
+    weekday_time_of_day, then day_of_week/time_of_day):
+      - Multi-slot weekly: {"weekly_slots": [{"day_of_week": "monday",
+        "time_of_day": "10:00"}, {"day_of_week": "wednesday",
+        "time_of_day": "18:00"}, ...], "timezone": "UTC"} — publish ONLY
+        at those fixed weekday+time points (a real "N×/week at chosen
+        times" cadence, unlike the per-weekday shape which still publishes
+        daily). Optional "timezone" overrides the channel timezone for
+        these slots (e.g. the times came from a UTC analytics source).
       - Weekly: {"day_of_week": "thursday", "time_of_day": "18:00"} — the
         next occurrence of that weekday at that time (the original behavior).
       - Daily:  {"time_of_day": "15:00"} with day_of_week absent, or
@@ -244,6 +252,12 @@ def compute_next_publish_slot(
         matching worker_integration.py's existing fail-closed behavior for
         scheduled runs with no target_publish_at.
     """
+    slots_raw = publishing_schedule.get("weekly_slots")
+    if isinstance(slots_raw, list) and slots_raw:
+        return _compute_next_weekly_slots_slot(
+            slots_raw, publishing_schedule.get("timezone") or tz_name, from_dt,
+        )
+
     weekday_times_raw = publishing_schedule.get("weekday_time_of_day")
     if isinstance(weekday_times_raw, dict) and weekday_times_raw:
         return _compute_next_weekday_varying_slot(
@@ -348,6 +362,65 @@ def _compute_next_weekday_varying_slot(
             return candidate.astimezone(timezone.utc)
 
     return None
+
+
+def _compute_next_weekly_slots_slot(
+    slots_raw: list,
+    tz_name: str,
+    from_dt: datetime,
+) -> Optional[datetime]:
+    """
+    compute_next_publish_slot()'s Multi-slot weekly shape — a fixed set of
+    (weekday, time-of-day) points, and the channel publishes ONLY at those
+    points (typically 3 per week, chosen from the channel's own best-time-
+    to-post data). Unlike the per-weekday shape this genuinely limits WHICH
+    DAYS publish, so it is the shape for a "3×/week at the recommended
+    times" cadence.
+
+    slots_raw: [{"day_of_week": <"monday".."sunday" or 0-6>,
+                 "time_of_day": "HH:MM"}, ...]
+
+    Same fail-closed philosophy: any unrecognised day, any unparseable
+    HH:MM, an empty list, or an invalid tz_name returns None. Never raises.
+    Returns the earliest slot strictly after from_dt (scanning a full week
+    ahead), as a timezone-aware UTC datetime.
+    """
+    parsed: list = []
+    for entry in slots_raw:
+        if not isinstance(entry, dict):
+            return None
+        day_raw = entry.get("day_of_week")
+        if isinstance(day_raw, int) and 0 <= day_raw <= 6:
+            wd = day_raw
+        else:
+            wd = _WEEKDAY_NAMES.get(str(day_raw).strip().lower())
+        if wd is None:
+            return None
+        time_raw = entry.get("time_of_day")
+        if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", str(time_raw)):
+            return None
+        h, m = (int(p) for p in str(time_raw).split(":"))
+        parsed.append((wd, h, m))
+    if not parsed:
+        return None
+
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        return None
+
+    local_from = from_dt.astimezone(tz)
+    best: Optional[datetime] = None
+    for offset in range(8):
+        day = local_from + timedelta(days=offset)
+        for wd, h, m in parsed:
+            if day.weekday() != wd:
+                continue
+            cand = day.replace(hour=h, minute=m, second=0, microsecond=0)
+            if cand > local_from and (best is None or cand < best):
+                best = cand
+    return best.astimezone(timezone.utc) if best is not None else None
 
 
 def is_scheduled_invocation(claimed_row: dict) -> bool:

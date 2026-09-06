@@ -252,6 +252,8 @@ def _compile_bundle_cycle(
         # time_of_day, so passing both is always safe.
         "weekday_time_of_day": anchor_entry.get("weekday_time_of_day"),
         "default_time_of_day": anchor_entry.get("default_time_of_day"),
+        "weekly_slots": anchor_entry.get("weekly_slots"),
+        "timezone": anchor_entry.get("timezone"),
     }
     anchor_slot = compute_next_publish_slot(anchor_schedule, anchor_tz, effective_now)
     if anchor_slot is None:
@@ -280,6 +282,8 @@ def _compile_bundle_cycle(
             "time_of_day": member_entry.get("time_of_day"),
             "weekday_time_of_day": member_entry.get("weekday_time_of_day"),
             "default_time_of_day": member_entry.get("default_time_of_day"),
+            "weekly_slots": member_entry.get("weekly_slots"),
+            "timezone": member_entry.get("timezone"),
         }
         relation = member_entry.get("anchor_relation", "after")
 
@@ -486,6 +490,10 @@ def compile_schedule_plan_from_channel_package(
                 "time_of_day": policy_entry.get("time_of_day"),
                 "weekday_time_of_day": policy_entry.get("weekday_time_of_day"),
                 "default_time_of_day": policy_entry.get("default_time_of_day"),
+                # Multi-slot weekly shape (2026-09-06): same drop-on-
+                # reconstruction hazard as weekday_time_of_day above.
+                "weekly_slots": policy_entry.get("weekly_slots"),
+                "timezone": policy_entry.get("timezone"),
             }
             entry_tz = policy_entry.get("timezone") or profile.timezone
             slot_dt = compute_next_publish_slot(entry_schedule, entry_tz, effective_now)

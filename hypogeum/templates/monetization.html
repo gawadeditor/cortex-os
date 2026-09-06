@@ -39,6 +39,16 @@
     .decay-bar .db-fill { width: 100%; background: var(--accent); border-radius: 3px 3px 0 0; min-height: 3px; }
     .decay-bar .db-lbl { font-size: 9.5px; color: var(--faint); }
     .decay-bar .db-val { font-family: var(--font-mono); font-size: 10px; color: var(--text); }
+    .explainer { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+                 padding: var(--space-lg); margin-bottom: var(--space-lg); }
+    .explainer h2 { font-family: var(--font-display); font-size: 14px; margin: 0 0 8px; }
+    .explainer p { font-size: 12.5px; line-height: 1.6; color: var(--muted); margin: 0 0 8px; max-width: 68ch; }
+    .explainer p:last-child { margin-bottom: 0; }
+    .explainer b { color: var(--text); }
+    .section-divider { display: flex; align-items: center; gap: 12px; margin: var(--space-2xl) 0 var(--space-md); }
+    .section-divider h2 { font-family: var(--font-display); font-size: 15px; margin: 0; white-space: nowrap; }
+    .section-divider .sd-sub { font-size: 11px; color: var(--faint); }
+    .section-divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
   </style>
 </head>
 <body>
@@ -48,24 +58,31 @@
 
 <div class="container">
 
-<div class="sub-nav">
-  <a href="/intelligence/learning"     class="sub-nav-link">Learning</a>
-  <a href="/intelligence/performance"  class="sub-nav-link">Performance</a>
-  <a href="/intelligence/monetization" class="sub-nav-link active">Monetization</a>
-  <a href="/intelligence/sync"         class="sub-nav-link">Sync health</a>
-</div>
-
 {% set _pairs = d.total_pairs or 0 %}
 {% call hero(
-     eyebrow='Monetization' ~ (' · this channel' if d.channel_scoped else ''),
-     title='How close each channel is to earning on each platform',
-     lede='Every platform pays out only above an audience-size and recent-activity bar. This is where each channel stands, measured from the analytics Cortex already collects — and the single number to move next.',
-     figure=(d.eligible_pairs ~ ' / ' ~ _pairs) if _pairs else '—',
-     figure_label='channel-platform pairs eligible',
-     pill=('All bars still ahead' if not d.eligible_pairs else (d.eligible_pairs ~ ' eligible')),
+     eyebrow='Revenue' ~ (' · this channel' if d.channel_scoped else ''),
+     title='Getting the channels paid',
+     lede='None of these channels earn money yet. Every platform only starts paying a creator once the channel clears a follower count and a recent-activity bar. This page measures exactly how far each channel is from each of those bars.',
+     figure=(d.eligible_pairs ~ ' / ' ~ _pairs) if _pairs else ('0 / ' ~ _pairs) if _pairs else '—',
+     figure_label='channel + platform combinations earning',
+     pill=('No platform paying yet' if not d.eligible_pairs else (d.eligible_pairs ~ ' earning')),
      pill_class='is-warn' if not d.eligible_pairs else 'is-good') %}
-  <a class="btn" href="/intelligence/performance">{{ icon('analytics') }} Performance detail</a>
+  <a class="btn" href="/intelligence/performance">{{ icon('analytics') }} Full performance</a>
 {% endcall %}
+
+<div class="explainer">
+  <h2>What "eligible" means here</h2>
+  <p>Each card below is one channel on one platform. It lists that platform's published rules for
+     turning on payouts — for example, YouTube needs <b>1,000 subscribers</b> <i>and</i> either
+     <b>4,000 watch-hours</b> in a year or <b>10M Shorts views</b> in 90 days. The bar under each
+     line shows how far along we are; the highlighted <b>Next</b> line is the single number that
+     moves the channel forward fastest.</p>
+  <p>The lower half — <b>who is actually watching</b>, <b>the best times to post</b>, and
+     <b>what the audience says</b> — is the context for growing toward those bars. It is the same
+     real data the production agents now use to shape new episodes.</p>
+  <p class="muted" style="font-size:11px;">Thresholds are each platform's public 2024–2025 criteria and vary by country;
+     a metric Cortex does not yet track (Facebook watch-minutes) is shown as "not tracked", never estimated.</p>
+</div>
 
 {% if not d.channels %}
 <div class="dv-empty">
@@ -77,10 +94,11 @@
 
 {% for ch in d.channels %}
 {% set mon = ch.monetization.platforms %}
-<section class="stack" style="margin-bottom: var(--space-2xl);">
-  {% if not d.channel_scoped %}
-  <h2 style="font-family:var(--font-display); font-size:16px; margin: var(--space-lg) 0 2px;">{{ ch.channel_id }}</h2>
-  {% endif %}
+<section style="margin-bottom: var(--space-3xl);">
+  <div class="section-divider">
+    <h2>{% if not d.channel_scoped %}{{ ch.channel_id }} — {% endif %}Payout requirements</h2>
+    <span class="sd-sub">what each platform needs before it pays</span>
+  </div>
 
   {# ── Eligibility grid ─────────────────────────────────────────────── #}
   <div class="grid grid-2">
@@ -140,6 +158,10 @@
   </div>
 
   {# ── Who's watching + best time ───────────────────────────────────── #}
+  <div class="section-divider">
+    <h2>Who this channel reaches</h2>
+    <span class="sd-sub">the audience to grow — and how to reach more of them</span>
+  </div>
   <div class="grid grid-2">
     <div class="card">
       <div class="card-title">{{ icon('review') }} Who's actually watching</div>
@@ -200,7 +222,7 @@
   </div>
 
   {# ── Audience comments ────────────────────────────────────────────── #}
-  <div class="card">
+  <div class="card" style="margin-top: var(--space-md);">
     <div class="card-title">{{ icon('mic') }} What the audience is saying</div>
     {% if ch.comments %}
       {% for c in ch.comments %}

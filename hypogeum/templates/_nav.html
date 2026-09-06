@@ -11,7 +11,8 @@
   ('Channels',       '/channels',             ['/channels']),
   ('Production',     '/runs',                 ['/runs', '/run/', '/create', '/live', '/failures', '/queue']),
   ('Episodes',       '/episodes',             ['/episodes', '/episode/', '/attention', '/approvals', '/preflight', '/signals']),
-  ('Learning',       '/intelligence/learning',['/intelligence', '/compare', '/learning', '/analytics']),
+  ('Learning',       '/intelligence/learning',['/intelligence/learning', '/intelligence/performance', '/intelligence/platform', '/intelligence/sync', '/compare', '/learning', '/analytics']),
+  ('Revenue',        '/intelligence/monetization', ['/intelligence/monetization']),
   ('Providers',      '/providers',            ['/providers', '/providers/models']),
   ('Infrastructure', '/infrastructure',       ['/infrastructure', '/setup']),
   ('Governance',     '/decisions',            ['/decisions', '/decision-reviews', '/decision-inputs', '/execution-plans']),
@@ -28,6 +29,7 @@
     ('Episodes',   '/episodes?channel_id=' ~ cid ~ _sc,             ['/episodes', '/episode/', '/attention', '/approvals']),
     ('Discovery',  '/discover?channel_id=' ~ cid ~ _sc,             ['/discover']),
     ('Analytics',  '/analytics?channel_id=' ~ cid ~ _sc,            ['/analytics', '/intelligence/performance', '/intelligence/platform']),
+    ('Revenue',    '/intelligence/monetization?channel_id=' ~ cid ~ _sc, ['/intelligence/monetization']),
     ('Publishing', '/channel/' ~ cid ~ '/publishing' ~ _s,         ['/channel/' ~ cid ~ '/publishing']),
     ('Settings',   '/channel/' ~ cid ~ '/settings' ~ _s,           ['/channel/' ~ cid ~ '/settings', '/channel/' ~ cid ~ '/edit', '/channel/' ~ cid ~ '/operations']),
   ] -%}

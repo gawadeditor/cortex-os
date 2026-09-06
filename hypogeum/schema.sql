@@ -1016,6 +1016,46 @@ CREATE TABLE IF NOT EXISTS channel_analytics_rollup (
 
 CREATE INDEX IF NOT EXISTS idx_car_scope ON channel_analytics_rollup(scope, metric_kind, snapshot_date DESC);
 
+-- Platform-native ACCOUNT-level metric snapshots (2026-09-06): each
+-- platform's own analytics API via Zernio — YouTube channel-insights
+-- (views / estimatedMinutesWatched / subs), Instagram account-insights,
+-- TikTok account-insights, Facebook page-insights. One row per
+-- (channel, platform, day); metrics_json is the platform's own metric bag.
+CREATE TABLE IF NOT EXISTS channel_platform_insights (
+    insight_id     TEXT NOT NULL PRIMARY KEY,
+    channel_id     TEXT NOT NULL,
+    platform       TEXT NOT NULL
+                   CHECK(platform IN ('youtube','tiktok','instagram','facebook')),
+    snapshot_date  TEXT NOT NULL,
+    metrics_json   TEXT NOT NULL,
+    source         TEXT NOT NULL DEFAULT 'api'
+                   CHECK(source IN ('api','manual','mock')),
+    imported_at    TEXT NOT NULL,
+    UNIQUE(channel_id, platform, snapshot_date)
+);
+CREATE INDEX IF NOT EXISTS idx_cpi ON channel_platform_insights(channel_id, platform, snapshot_date DESC);
+
+-- Audience demographics per channel × platform (2026-09-06): YouTube +
+-- Instagram expose follower age / gender / geography. One row per
+-- (channel, platform, dimension, day); breakdown_json is [{label, pct}].
+-- A stark, actionable signal — hypogeum's YouTube audience is ~66% aged
+-- 55+ and ~79% male, which the content agents should adapt register to.
+CREATE TABLE IF NOT EXISTS channel_audience (
+    audience_id    TEXT NOT NULL PRIMARY KEY,
+    channel_id     TEXT NOT NULL,
+    platform       TEXT NOT NULL
+                   CHECK(platform IN ('youtube','tiktok','instagram','facebook')),
+    dimension      TEXT NOT NULL
+                   CHECK(dimension IN ('age','gender','city','country')),
+    snapshot_date  TEXT NOT NULL,
+    breakdown_json TEXT NOT NULL,
+    source         TEXT NOT NULL DEFAULT 'api'
+                   CHECK(source IN ('api','manual','mock')),
+    imported_at    TEXT NOT NULL,
+    UNIQUE(channel_id, platform, dimension, snapshot_date)
+);
+CREATE INDEX IF NOT EXISTS idx_caud ON channel_audience(channel_id, platform, dimension, snapshot_date DESC);
+
 -- ---------------------------------------------------------------------------
 -- analytics_insights
 -- Derived signals extracted from platform_analytics by the learning engine.

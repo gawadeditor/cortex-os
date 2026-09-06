@@ -806,6 +806,94 @@ class ZernioProvider:
             "/accounts/follower-stats", db_path=db_path,
             params={"fromDate": from_date, "profileId": profile_id})
 
+    # ------------------------------------------------------------------
+    # Platform-native account analytics (2026-09-06). Zernio proxies each
+    # platform's own analytics API — richer than the cross-platform
+    # /analytics rollup: real YouTube watch-time + audience retention
+    # curves, IG/YT audience demographics, per-account follower series.
+    # All read-only, keyed by the Zernio accountId (not profileId).
+    # ------------------------------------------------------------------
+    def get_youtube_channel_insights(self, *, account_id: str,
+                                     db_path: Optional[Path] = None) -> dict:
+        """GET /v1/analytics/youtube/channel-insights — {metrics:{views,
+        estimatedMinutesWatched, subscribersGained, subscribersLost}}.
+        estimatedMinutesWatched / views is the channel's real average
+        view duration — the YouTube retention signal the cross-platform
+        rollup never carries (2-3 day data delay)."""
+        return self._get_analytics_resource(
+            "/analytics/youtube/channel-insights", db_path=db_path,
+            params={"accountId": account_id})
+
+    def get_youtube_video_retention(self, *, account_id: str, video_id: str,
+                                    start_date: Optional[str] = None,
+                                    end_date: Optional[str] = None,
+                                    db_path: Optional[Path] = None) -> dict:
+        """GET /v1/analytics/youtube/video-retention — {durationSeconds,
+        retentionCurve:[{elapsedRatio, watchRatio}], ...}. YouTube may
+        return an empty curve for a low-view or still-processing video."""
+        return self._get_analytics_resource(
+            "/analytics/youtube/video-retention", db_path=db_path,
+            params={"accountId": account_id, "videoId": video_id,
+                    "startDate": start_date, "endDate": end_date})
+
+    def get_youtube_demographics(self, *, account_id: str,
+                                 db_path: Optional[Path] = None) -> dict:
+        """GET /v1/analytics/youtube/demographics — {demographics:{age:[
+        {dimension, value}], gender:[...]}}. value is a percentage."""
+        return self._get_analytics_resource(
+            "/analytics/youtube/demographics", db_path=db_path,
+            params={"accountId": account_id})
+
+    def get_instagram_account_insights(self, *, account_id: str,
+                                       db_path: Optional[Path] = None) -> dict:
+        """GET /v1/analytics/instagram/account-insights — {metrics:{reach,
+        views, accounts_engaged, total_interactions}}."""
+        return self._get_analytics_resource(
+            "/analytics/instagram/account-insights", db_path=db_path,
+            params={"accountId": account_id})
+
+    def get_instagram_demographics(self, *, account_id: str,
+                                   db_path: Optional[Path] = None) -> dict:
+        """GET /v1/analytics/instagram/demographics — {demographics:{age,
+        city, country, gender}}. Requires 100+ followers (empty below)."""
+        return self._get_analytics_resource(
+            "/analytics/instagram/demographics", db_path=db_path,
+            params={"accountId": account_id})
+
+    def get_instagram_follower_history(self, *, account_id: str,
+                                       db_path: Optional[Path] = None) -> dict:
+        """GET /v1/analytics/instagram/follower-history — {metrics:{
+        follower_count, followers_gained, followers_lost}}."""
+        return self._get_analytics_resource(
+            "/analytics/instagram/follower-history", db_path=db_path,
+            params={"accountId": account_id})
+
+    def get_tiktok_account_insights(self, *, account_id: str,
+                                    db_path: Optional[Path] = None) -> dict:
+        """GET /v1/analytics/tiktok/account-insights — {metrics:{
+        follower_count, likes_count, video_count, followers_gained,
+        followers_lost}}. TikTok's public API exposes nothing else."""
+        return self._get_analytics_resource(
+            "/analytics/tiktok/account-insights", db_path=db_path,
+            params={"accountId": account_id})
+
+    def get_facebook_page_insights(self, *, account_id: str,
+                                   db_path: Optional[Path] = None) -> dict:
+        """GET /v1/analytics/facebook/page-insights — {metrics:{
+        page_media_view, page_post_engagements, page_follows,
+        followers_gained, ...}}."""
+        return self._get_analytics_resource(
+            "/analytics/facebook/page-insights", db_path=db_path,
+            params={"accountId": account_id})
+
+    def get_accounts(self, *, db_path: Optional[Path] = None) -> dict:
+        """GET /v1/accounts — the connected-account roster
+        ({accounts:[{_id, platform, name/displayName/username,
+        profileId}]}). Used to map a Zernio accountId/profileId to the
+        Cortex channel that owns it."""
+        return self._get_analytics_resource(
+            "/accounts", db_path=db_path, params={"page": 1, "limit": 100})
+
     def publish(
         self,
         *,

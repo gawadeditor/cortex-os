@@ -327,6 +327,11 @@ _V2_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("reposts",         "INTEGER"),
         ("engagement_rate", "REAL"),
         ("skip_rate",       "REAL"),
+        # YouTube per-video audience-retention curve from
+        # /analytics/youtube/video-retention — [{elapsedRatio, watchRatio}].
+        # Populated only for YouTube rows once the video has enough views
+        # and YouTube has finalised the data (2-3 day delay).
+        ("retention_curve_json", "TEXT"),
     ],
     "run_queue": [
         ("source",               "TEXT"),  # 'rerun' | 'schedule' | 'manual' | 'auto_retry'

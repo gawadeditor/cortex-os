@@ -282,6 +282,14 @@ def run_platform_sync(
                 sync_zernio_aggregates(db_path=db_path)
             except Exception:  # noqa: BLE001
                 pass
+            # Platform-native account analytics (YouTube channel-insights +
+            # retention curves, IG/YT demographics, per-account follower
+            # series). Own tables; failure-isolated from the per-post sync.
+            try:
+                from hypogeum.publishing.zernio_native_sync import sync_zernio_native_analytics
+                sync_zernio_native_analytics(db_path=db_path)
+            except Exception:  # noqa: BLE001
+                pass
 
         for platform in target:
             if platform == "youtube":

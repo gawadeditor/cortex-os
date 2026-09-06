@@ -62,6 +62,9 @@ class _FakeProvider:
     def get_facebook_page_insights(self, *, account_id, db_path=None):
         return self._wrap("fb_page")
 
+    def get_post_comments(self, *, account_id, post_id, limit=50, db_path=None):
+        return self._wrap(f"comments_{post_id}")
+
 
 @pytest.fixture()
 def db_path(tmp_path):
@@ -156,6 +159,42 @@ def test_empty_retention_curve_is_skipped(db_path):
     prov = _FakeProvider(retention_VIDLOW={"retentionCurve": []})
     out = zns.sync_zernio_native_analytics(provider=prov, db_path=db_path)
     assert out["retention_videos"] == 0
+
+
+def test_post_comments_stored_owner_flag_split(db_path):
+    from hypogeum.analytics_store import store_platform_metrics
+    conn = get_connection(db_path)
+    try:
+        conn.execute("INSERT INTO episode_topics (topic_id, channel_id, episode_id, "
+                     "topic_text, status, created_at, updated_at) VALUES "
+                     "('tc','hypogeum','ep_c','c','consumed','c','c')")
+        conn.commit()
+    finally:
+        conn.close()
+    store_platform_metrics("ep_c", "youtube",
+                           {"views": 500, "comments": 2, "platform_video_id": "VIDC"},
+                           source="api", db_path=db_path)
+    prov = _FakeProvider(comments_VIDC={"comments": [
+        {"id": "c1", "text": "This is the best explanation I've seen — do one on the Antikythera mechanism next!",
+         "from": {"name": "@viewer1", "isOwner": False}, "likeCount": 4, "createdAt": "2026-09-05T12:00:00Z"},
+        {"id": "c2", "text": "Sources in the description.",
+         "from": {"name": "@TheHypogeum", "isOwner": True}, "likeCount": 1, "createdAt": "2026-09-05T11:00:00Z"},
+    ]})
+    out = zns.sync_zernio_native_analytics(provider=prov, db_path=db_path)
+    assert out["comments"] == 2
+    assert out["audience_comments"] == 1
+
+    ep_c = zns.get_episode_comments("ep_c", db_path=db_path)
+    assert len(ep_c) == 1  # owner excluded
+    assert "Antikythera" in ep_c[0]["text"]
+
+    recent = zns.get_recent_audience_comments("hypogeum", db_path=db_path)
+    assert len(recent) == 1
+
+    from hypogeum.audience_profile import summarize_audience_voice
+    voice = summarize_audience_voice("hypogeum", db_path=db_path)
+    assert voice is not None and "Antikythera" in voice
+    assert "4♥" in voice
 
 
 def test_no_mapped_accounts_returns_not_ok(db_path):

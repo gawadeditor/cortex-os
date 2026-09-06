@@ -57,8 +57,11 @@ def _flatten_metrics(raw: dict) -> dict:
         return {}
     out: dict = {}
     for k, v in m.items():
-        if isinstance(v, dict) and "total" in v:
-            out[k] = v["total"]
+        if isinstance(v, dict):
+            for probe in ("total", "value", "average"):
+                if probe in v and isinstance(v[probe], (int, float)):
+                    out[k] = v[probe]
+                    break
         elif isinstance(v, (int, float)):
             out[k] = v
     return out
@@ -267,6 +270,7 @@ def sync_zernio_native_analytics(*, provider=None, db_path: Optional[Path] = Non
                 pi_rows.append((cid, plat, _flatten_metrics(d)))
 
     retention_updates = _fetch_youtube_retention(provider, acct_map, out, db_path)
+    comment_rows = _fetch_post_comments(provider, acct_map, out, db_path)
 
     # ---- PHASE 2: one short write transaction ----
     conn = get_connection(Path(db_path) if db_path else None)
@@ -284,6 +288,18 @@ def sync_zernio_native_analytics(*, provider=None, db_path: Optional[Path] = Non
                 (_json.dumps(curve), avp, record_id),
             )
         out["retention_videos"] = len({rid for rid, _, _ in retention_updates})
+        for c in comment_rows:
+            conn.execute(
+                "INSERT OR REPLACE INTO post_comments (comment_id, episode_id, "
+                "channel_id, platform, platform_post_id, author, is_owner, text, "
+                "like_count, published_at, source, imported_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (c["comment_id"], c["episode_id"], c["channel_id"], c["platform"],
+                 c["platform_post_id"], c["author"], 1 if c["is_owner"] else 0,
+                 c["text"], c["like_count"], c["published_at"], "api", _now()),
+            )
+        out["comments"] = len(comment_rows)
+        out["audience_comments"] = len([c for c in comment_rows if not c["is_owner"]])
         conn.commit()
     except Exception as exc:  # noqa: BLE001
         out["errors"]["store"] = str(exc)[:200]
@@ -291,11 +307,112 @@ def sync_zernio_native_analytics(*, provider=None, db_path: Optional[Path] = Non
         conn.close()
 
     out["ok"] = (out["platform_insights"] > 0 or out["audience_rows"] > 0
-                 or out["retention_videos"] > 0)
+                 or out["retention_videos"] > 0 or out.get("comments", 0) > 0)
     log.info("zernio_native_synced", **{k: out[k] for k in
              ("accounts", "platform_insights", "audience_rows", "retention_videos")},
+             comments=out.get("comments", 0),
+             audience_comments=out.get("audience_comments", 0),
              errors=list(out["errors"]))
     return out
+
+
+_MAX_COMMENT_POST_CALLS_PER_SYNC = 15
+
+
+def _fetch_post_comments(provider, acct_map: dict, out: dict, db_path) -> list:
+    """Pull comment text for published posts. Returns [dict] rows for
+    post_comments. Deduped by (channel, platform_post_id), only the post's
+    own channel's account, capped per run. No DB connection during HTTP."""
+    from hypogeum.db import get_connection
+    by_channel_plat = {(cid, plat): aid for (cid, plat), aid in acct_map.items()}
+    if not by_channel_plat:
+        return []
+
+    conn = get_connection(Path(db_path) if db_path else None)
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT pa.episode_id, pa.platform, pa.platform_video_id, "
+            "       (SELECT et.channel_id FROM episode_topics et "
+            "        WHERE et.episode_id = pa.episode_id LIMIT 1) AS channel_id "
+            "FROM platform_analytics pa "
+            "WHERE pa.source='api' AND pa.platform_video_id IS NOT NULL "
+            "AND (pa.comments IS NULL OR pa.comments > 0)"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    out_rows: list = []
+    seen: set = set()
+    calls = 0
+    for r in rows:
+        cid, plat, pid = r["channel_id"], r["platform"], r["platform_video_id"]
+        key = (cid, plat, pid)
+        if not cid or key in seen or (cid, plat) not in by_channel_plat:
+            continue
+        seen.add(key)
+        if calls >= _MAX_COMMENT_POST_CALLS_PER_SYNC:
+            break
+        calls += 1
+        try:
+            res = provider.get_post_comments(
+                account_id=by_channel_plat[(cid, plat)], post_id=pid, db_path=db_path)
+        except Exception as exc:  # noqa: BLE001
+            out["errors"][f"comments:{pid}"] = str(exc)[:120]
+            continue
+        data = res.get("data") or {}
+        comments = data.get("comments") or data.get("data") or []
+        for cm in comments:
+            frm = cm.get("from") or {}
+            author = frm.get("name") if isinstance(frm, dict) else str(frm)
+            is_owner = bool(frm.get("isOwner")) if isinstance(frm, dict) else False
+            text = (cm.get("text") or cm.get("content") or cm.get("message")
+                    or cm.get("body") or "").strip()
+            if not text:
+                continue
+            cmid = str(cm.get("id") or cm.get("commentId") or f"{pid}:{hash(text)}")
+            out_rows.append({
+                "comment_id": cmid, "episode_id": r["episode_id"], "channel_id": cid,
+                "platform": plat, "platform_post_id": pid, "author": author,
+                "is_owner": is_owner, "text": text[:2000],
+                "like_count": cm.get("likeCount") or cm.get("likes"),
+                "published_at": (cm.get("createdAt") or cm.get("timestamp") or "")[:32] or None,
+            })
+    return out_rows
+
+
+def get_episode_comments(episode_id: str, *, include_owner: bool = False,
+                         db_path: Optional[Path] = None) -> list:
+    """All stored comments for an episode, newest first. Excludes the
+    channel's own comments/replies unless include_owner=True."""
+    from hypogeum.db import get_connection
+    conn = get_connection(Path(db_path) if db_path else None)
+    try:
+        q = ("SELECT platform, author, is_owner, text, like_count, published_at "
+             "FROM post_comments WHERE episode_id=? ")
+        if not include_owner:
+            q += "AND is_owner=0 "
+        q += "ORDER BY published_at DESC"
+        rows = conn.execute(q, (episode_id,)).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_recent_audience_comments(channel_id: str, *, limit: int = 20,
+                                 db_path: Optional[Path] = None) -> list:
+    """Recent NON-owner comments across a channel's episodes, newest first."""
+    from hypogeum.db import get_connection
+    conn = get_connection(Path(db_path) if db_path else None)
+    try:
+        rows = conn.execute(
+            "SELECT platform, author, text, like_count, published_at, episode_id "
+            "FROM post_comments WHERE channel_id=? AND is_owner=0 "
+            "ORDER BY published_at DESC LIMIT ?",
+            (channel_id, limit),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
 
 
 _MAX_RETENTION_CALLS_PER_SYNC = 12   # incremental — the rest catch up next run

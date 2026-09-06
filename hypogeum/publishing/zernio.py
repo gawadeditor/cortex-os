@@ -816,13 +816,29 @@ class ZernioProvider:
     def get_youtube_channel_insights(self, *, account_id: str,
                                      db_path: Optional[Path] = None) -> dict:
         """GET /v1/analytics/youtube/channel-insights — {metrics:{views,
-        estimatedMinutesWatched, subscribersGained, subscribersLost}}.
-        estimatedMinutesWatched / views is the channel's real average
-        view duration — the YouTube retention signal the cross-platform
-        rollup never carries (2-3 day data delay)."""
+        estimatedMinutesWatched, averageViewDuration, subscribersGained,
+        subscribersLost}}. averageViewDuration (seconds, weighted mean
+        across days) is YouTube's own average-watch figure — the retention
+        signal the cross-platform rollup never carries (2-3 day delay).
+        Every metric is requested explicitly (the default omits
+        averageViewDuration)."""
         return self._get_analytics_resource(
             "/analytics/youtube/channel-insights", db_path=db_path,
-            params={"accountId": account_id})
+            params={"accountId": account_id,
+                    "metrics": "views,estimatedMinutesWatched,"
+                               "averageViewDuration,subscribersGained,subscribersLost"})
+
+    def get_post_comments(self, *, account_id: str, post_id: str,
+                          limit: int = 50,
+                          db_path: Optional[Path] = None) -> dict:
+        """GET /v1/inbox/comments/{postId} — {comments:[{id, text/content,
+        from:{name, isOwner}, likeCount, createdAt}]}. Real audience
+        reactions in their own words. `post_id` is the platform's own post
+        id (YouTube video id, IG media id, ...); `account_id` is required."""
+        from urllib.parse import quote
+        return self._get_analytics_resource(
+            f"/inbox/comments/{quote(str(post_id), safe='')}", db_path=db_path,
+            params={"accountId": account_id, "limit": limit})
 
     def get_youtube_video_retention(self, *, account_id: str, video_id: str,
                                     start_date: Optional[str] = None,

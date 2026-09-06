@@ -1056,6 +1056,29 @@ CREATE TABLE IF NOT EXISTS channel_audience (
 );
 CREATE INDEX IF NOT EXISTS idx_caud ON channel_audience(channel_id, platform, dimension, snapshot_date DESC);
 
+-- Audience comment text on published posts (2026-09-06), from Zernio's
+-- /v1/inbox/comments/{postId}. `is_owner` = the channel's own reply /
+-- pinned comment (excluded from the audience-voice signal). Real audience
+-- comments are a strong editorial signal once a channel has any volume.
+CREATE TABLE IF NOT EXISTS post_comments (
+    comment_id       TEXT NOT NULL PRIMARY KEY,   -- the platform's own comment id
+    episode_id       TEXT NOT NULL,
+    channel_id       TEXT NOT NULL,
+    platform         TEXT NOT NULL
+                     CHECK(platform IN ('youtube','tiktok','instagram','facebook')),
+    platform_post_id TEXT,
+    author           TEXT,
+    is_owner         INTEGER NOT NULL DEFAULT 0,
+    text             TEXT NOT NULL,
+    like_count       INTEGER,
+    published_at     TEXT,
+    source           TEXT NOT NULL DEFAULT 'api'
+                     CHECK(source IN ('api','manual','mock')),
+    imported_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pcmt_ep ON post_comments(episode_id, is_owner);
+CREATE INDEX IF NOT EXISTS idx_pcmt_ch ON post_comments(channel_id, is_owner, published_at DESC);
+
 -- ---------------------------------------------------------------------------
 -- analytics_insights
 -- Derived signals extracted from platform_analytics by the learning engine.

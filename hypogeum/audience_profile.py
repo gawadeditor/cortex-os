@@ -92,3 +92,39 @@ def summarize_observed_audience(channel_id: str, *,
                 f"Pitch references, vocabulary and pacing to this real "
                 f"audience, not the channel's original target.")
     return None
+
+
+_MAX_VOICE_COMMENTS = 12
+_MAX_VOICE_CHARS = 1400
+
+
+def summarize_audience_voice(channel_id: str, *,
+                             db_path: Optional[Path] = None) -> Optional[str]:
+    """Recent audience comments (their own words) as a compact block for the
+    content agents — what viewers are actually reacting to and asking for.
+    None when the channel has no non-owner comments yet."""
+    try:
+        from hypogeum.publishing.zernio_native_sync import get_recent_audience_comments
+        rows = get_recent_audience_comments(channel_id, limit=_MAX_VOICE_COMMENTS,
+                                            db_path=db_path)
+    except Exception:  # noqa: BLE001
+        return None
+    if not rows:
+        return None
+    lines = []
+    used = 0
+    for r in rows:
+        t = " ".join((r.get("text") or "").split())
+        if not t:
+            continue
+        likes = r.get("like_count") or 0
+        entry = f"- ({r.get('platform')}{f', {likes}♥' if likes else ''}) {t[:220]}"
+        if used + len(entry) > _MAX_VOICE_CHARS:
+            break
+        lines.append(entry)
+        used += len(entry)
+    if not lines:
+        return None
+    return ("Recent audience comments (their words — what actually landed, "
+            "what they asked for, correct any recurring misconception in a "
+            "future episode rather than the current one):\n" + "\n".join(lines))

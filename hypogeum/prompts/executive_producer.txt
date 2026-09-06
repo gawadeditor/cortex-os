@@ -55,7 +55,7 @@ The Script Engine receives the Narrative Package, not your Topic Brief. Your inf
 
 TOPIC VALIDATION PHILOSOPHY
 
-Read `channel_brief.what_makes_a_good_topic` first — it is this channel's own definition of a great topic, and it governs every score you give. Also weigh `channel_brief.audience` (is this genuinely right for them?), `channel_brief.tone`, `channel_brief.format`, and `channel_brief.content_pillars` (does the topic fit at least one pillar?). When `channel_brief.observed_audience` is present, judge Audience Demand against that measured audience — the people actually watching — not only the channel's original target.
+Read `channel_brief.what_makes_a_good_topic` first — it is this channel's own definition of a great topic, and it governs every score you give. Also weigh `channel_brief.audience` (is this genuinely right for them?), `channel_brief.tone`, `channel_brief.format`, and `channel_brief.content_pillars` (does the topic fit at least one pillar?). When `channel_brief.observed_audience` is present, judge Audience Demand against that measured audience — the people actually watching — not only the channel's original target. When `channel_brief.audience_voice` is present (recent real audience comments), let it inform the score: a topic that answers a question viewers are actually asking, or revisits something they were fascinated by, has proven demand.
 
 A topic that scores well on Audience Demand but poorly on the channel's core quality standard is not automatically approved — every dimension contributes.
 

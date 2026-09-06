@@ -189,17 +189,30 @@ def salvage_preconditions(
     return out
 
 
+def _salvage_conn(db_path):
+    """A connection with a long busy_timeout — a salvage's pre-steps run
+    right after the previous episode's run_pipeline and the DB can still be
+    briefly locked; a bare get_connection() would fail-fast and the fix
+    (rebind / reinstate) would be silently skipped, dooming the run."""
+    from hypogeum.db import get_connection
+    conn = get_connection(db_path)
+    try:
+        conn.execute("PRAGMA busy_timeout = 30000")
+    except Exception:  # noqa: BLE001
+        pass
+    return conn
+
+
 def _rebind_stale_admission(channel_id: str, episode_id: str, *, db_path, log=None) -> Optional[str]:
     """If the episode's admission is FAILED/RELEASED/EXPIRED and bound to a
     grant that is no longer the channel's active one, point it at the
     current active grant (id + version + workflow_version). Returns the new
     grant_id when it rebound, None otherwise. Never raises."""
     try:
-        from hypogeum.db import get_connection
         import hypogeum.authorization_authority as authority
         from datetime import datetime, timezone
 
-        conn = get_connection(db_path)
+        conn = _salvage_conn(db_path)
         try:
             row = conn.execute(
                 "SELECT admission_id, status, operating_grant_id FROM execution_admissions "
@@ -234,6 +247,13 @@ def _rebind_stale_admission(channel_id: str, episode_id: str, *, db_path, log=No
         return None
 
 
+class _ReinstateFailed(RuntimeError):
+    """Released plan-weekly rows exist for the episode but could not be
+    flipped back to 'reserved' (DB contention) — the salvage must NOT
+    proceed, or its resume dies at the first paid repair with
+    WeeklyReleasedReplayError after burning nothing useful."""
+
+
 def _reinstate_plan_weekly_reservation(channel_id: str, episode_id: str, *, db_path, log=None) -> Optional[float]:
     """The weekly-reservation reaper RELEASES a dead episode's
     ``plan-weekly:*`` channel_weekly hold. hypogeum.weekly_budget then
@@ -242,44 +262,82 @@ def _reinstate_plan_weekly_reservation(channel_id: str, episode_id: str, *, db_p
     upscale / repair spend. A salvage is a deliberate decision to finish
     the episode, so its plan hold legitimately consumes weekly headroom
     again: flip the released row back to 'reserved'. Returns the reinstated
-    amount, or None. Never raises. (The episode has a 'running' run during
-    the salvage, so the reaper treats it as live and won't re-release it.)
+    amount (0.0 if there was nothing to do). Raises _ReinstateFailed if
+    released rows exist but could not be flipped. (The episode has a
+    'running' run during the salvage, so the reaper leaves it be.)
     """
-    try:
-        from hypogeum.db import get_connection
-        from datetime import datetime, timezone
-
-        conn = get_connection(db_path)
-        try:
-            rows = conn.execute(
-                "SELECT reservation_id, reserved_amount FROM budget_reservations "
-                "WHERE scope_kind = 'channel_weekly' AND status = 'released' "
-                "AND idempotency_key LIKE ?",
-                (f"plan-weekly:{channel_id}:{episode_id}:%",),
-            ).fetchall()
-            if not rows:
-                return None
-            total = 0.0
-            now = datetime.now(timezone.utc).isoformat()
-            for r in rows:
-                conn.execute(
-                    "UPDATE budget_reservations SET status = 'reserved', resolved_at = NULL, "
-                    "updated_at = ? WHERE reservation_id = ? AND status = 'released'",
-                    (now, r["reservation_id"]),
-                )
-                total += float(r["reserved_amount"] or 0)
-            conn.commit()
-            return round(total, 4)
-        finally:
-            conn.close()
-    except Exception as exc:  # noqa: BLE001
-        if log is not None:
+    # ONLY the plan-weekly row for the episode's CURRENT persisted plan
+    # (matched on its exact content_hash) — never every historical
+    # compile-attempt row, or a salvage would re-reserve $100+ of stale
+    # holds and blow past the channel's weekly grant ceiling.
+    _hash = None
+    for _name in (f"production_plan_{episode_id}.json", "production_plan.json"):
+        _pp = _episode_dir(episode_id) / _name
+        if _pp.exists():
             try:
-                log.warning("episode_salvage_plan_weekly_reinstate_failed",
-                            episode_id=episode_id, error=str(exc))
+                import json  # noqa: PLC0415
+                _hash = json.loads(_pp.read_text(encoding="utf-8")).get("content_hash")
             except Exception:  # noqa: BLE001
                 pass
-        return None
+            break
+    if not _hash:
+        return 0.0  # no persisted plan hash — precondition check already gates this
+    like = f"plan-weekly:{channel_id}:{episode_id}:{_hash}"
+    last_exc = None
+    for _attempt in range(3):
+        try:
+            from datetime import datetime, timezone
+            conn = _salvage_conn(db_path)
+            try:
+                rows = conn.execute(
+                    "SELECT reservation_id, reserved_amount FROM budget_reservations "
+                    "WHERE scope_kind = 'channel_weekly' AND status = 'released' "
+                    "AND idempotency_key = ?",
+                    (like,),
+                ).fetchall()
+                if not rows:
+                    return 0.0
+                now = datetime.now(timezone.utc).isoformat()
+                total = 0.0
+                for r in rows:
+                    conn.execute(
+                        "UPDATE budget_reservations SET status = 'reserved', resolved_at = NULL "
+                        "WHERE reservation_id = ? AND status = 'released'",
+                        (r["reservation_id"],),
+                    )
+                    total += float(r["reserved_amount"] or 0)
+                _ = now  # timestamp not stored on this table
+                conn.commit()
+                # verify it stuck
+                still = conn.execute(
+                    "SELECT COUNT(*) FROM budget_reservations WHERE scope_kind='channel_weekly' "
+                    "AND status='released' AND idempotency_key = ?", (like,),
+                ).fetchone()[0]
+                if still:
+                    raise _ReinstateFailed(f"{still} plan-weekly row(s) still released after update")
+                return round(total, 4)
+            finally:
+                conn.close()
+        except _ReinstateFailed:
+            raise
+        except Exception as exc:  # noqa: BLE001 — DB lock etc; retry
+            last_exc = exc
+            import time
+            time.sleep(2)
+    # exhausted retries — if released rows still exist this is fatal for the salvage
+    try:
+        from hypogeum.db import get_connection
+        c = get_connection(db_path)
+        n = c.execute(
+            "SELECT COUNT(*) FROM budget_reservations WHERE scope_kind='channel_weekly' "
+            "AND status='released' AND idempotency_key = ?", (like,),
+        ).fetchone()[0]
+        c.close()
+    except Exception:  # noqa: BLE001
+        n = 1
+    if n:
+        raise _ReinstateFailed(f"could not reinstate plan-weekly after 3 tries: {last_exc}")
+    return 0.0
 
 
 def salvage_episode(
@@ -324,9 +382,16 @@ def salvage_episode(
             except Exception:  # noqa: BLE001
                 pass
 
-        _reinstated = _reinstate_plan_weekly_reservation(
-            pre["channel_id"], episode_id, db_path=_p, log=log,
-        )
+        try:
+            _reinstated = _reinstate_plan_weekly_reservation(
+                pre["channel_id"], episode_id, db_path=_p, log=log,
+            )
+        except _ReinstateFailed as exc:
+            out["reason"] = (
+                f"plan-weekly reinstate failed ({exc}) — not resuming; the pipeline would "
+                f"die at the first paid repair. Retry when the DB is quiet."
+            )
+            return out
         if _reinstated and log is not None:
             try:
                 log.info("episode_salvage_plan_weekly_reinstated", episode_id=episode_id,

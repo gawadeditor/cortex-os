@@ -977,6 +977,11 @@ CREATE TABLE IF NOT EXISTS platform_analytics (
     comments           INTEGER,
     shares             INTEGER,
     saves              INTEGER,   -- bookmarks/saves (Instagram, TikTok)
+    reach              INTEGER,   -- unique accounts reached (Facebook / Instagram; NULL elsewhere)
+    follows            INTEGER,   -- follower conversions attributed to this post
+    reposts            INTEGER,   -- reshares onto another account's feed (distinct from shares)
+    engagement_rate    REAL,      -- platform-computed engagement rate in PERCENT (e.g. 2.66 = 2.66%)
+    skip_rate          REAL,      -- Instagram Reels skip rate in PERCENT (early scroll-away); NULL elsewhere
     platform_video_id  TEXT,      -- platform's own video identifier
     raw_json           TEXT,      -- JSON blob for platform-specific extra fields
     source             TEXT    NOT NULL DEFAULT 'manual'

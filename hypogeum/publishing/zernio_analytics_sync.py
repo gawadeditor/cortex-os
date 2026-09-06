@@ -25,6 +25,11 @@ Metric translation (Zernio key -> platform_analytics column):
     igReelsAvgWatchTime   (ms)  -> avg_watch_time_s      (/ 1000)
     igReelsVideoViewTotalTime (ms) -> total_watch_time_s (/ 1000)
     avg_watch_time_s / videoDurationSeconds -> avg_view_pct
+    reach                       -> reach          (FB / IG only; NULL elsewhere)
+    follows                     -> follows
+    reposts                     -> reposts
+    engagementRate              -> engagement_rate  (kept in PERCENT, 2.66 == 2.66%)
+    reelsSkipRate               -> skip_rate       (Instagram Reels only; NULL elsewhere)
     platformPostId              -> platform_video_id
     (full metric dict)          -> raw_json
 
@@ -153,6 +158,22 @@ def _translate_metrics(raw: dict, *, platform_post_id: Optional[str],
     if avg_watch_s and duration and duration > 0:
         avg_view_pct = round(min(avg_watch_s / duration, 1.0), 4)
 
+    def _int(key):
+        v = _num(raw.get(key))
+        return int(v) if v is not None else None
+
+    # Zernio reports reach for Facebook + Instagram; for YouTube / TikTok it
+    # echoes 0, which is "no such metric on this platform", not a measurement.
+    reach = _int("reach") if platform in ("facebook", "instagram") else None
+    # reelsSkipRate is an Instagram-Reels-only field; same rule as watch time.
+    skip_rate = None
+    if platform == "instagram":
+        _s = _num(raw.get("reelsSkipRate"))
+        skip_rate = round(_s, 2) if _s is not None else None
+    # engagementRate is Zernio-computed and already a percentage (2.66 == 2.66%).
+    _er = _num(raw.get("engagementRate"))
+    engagement_rate = round(_er, 4) if _er is not None else None
+
     return {
         "views": int(views) if views is not None else None,
         "impressions": int(impressions) if impressions is not None else None,
@@ -160,10 +181,15 @@ def _translate_metrics(raw: dict, *, platform_post_id: Optional[str],
         "avg_view_pct": avg_view_pct,
         "avg_watch_time_s": avg_watch_s,
         "total_watch_time_s": total_watch_s,
-        "likes": int(_num(raw.get("likes"))) if _num(raw.get("likes")) is not None else None,
-        "comments": int(_num(raw.get("comments"))) if _num(raw.get("comments")) is not None else None,
-        "shares": int(_num(raw.get("shares"))) if _num(raw.get("shares")) is not None else None,
-        "saves": int(_num(raw.get("saves"))) if _num(raw.get("saves")) is not None else None,
+        "likes": _int("likes"),
+        "comments": _int("comments"),
+        "shares": _int("shares"),
+        "saves": _int("saves"),
+        "reach": reach,
+        "follows": _int("follows"),
+        "reposts": _int("reposts"),
+        "engagement_rate": engagement_rate,
+        "skip_rate": skip_rate,
         "platform_video_id": platform_post_id,
         "raw_json": raw,
     }
@@ -217,7 +243,8 @@ def sync_zernio_analytics(*, provider=None, db_path: Optional[Path] = None,
         # ambiguously — but keep it if any signal at all is present.
         if not any(metrics.get(k) for k in
                    ("views", "impressions", "likes", "comments", "shares",
-                    "avg_watch_time_s", "total_watch_time_s")):
+                    "avg_watch_time_s", "total_watch_time_s",
+                    "reach", "follows", "engagement_rate")):
             continue
         try:
             store_platform_metrics(

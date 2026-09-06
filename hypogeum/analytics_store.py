@@ -475,8 +475,9 @@ def store_platform_metrics(
                (record_id, episode_id, platform, snapshot_date, window_days,
                 views, impressions, ctr, avg_view_pct, avg_watch_time_s,
                 total_watch_time_s, likes, comments, shares, saves,
+                reach, follows, reposts, engagement_rate, skip_rate,
                 platform_video_id, raw_json, source, imported_at, metadata_version)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 record_id, episode_id, platform, snap_date, window_days,
                 metrics.get("views"),
@@ -489,6 +490,11 @@ def store_platform_metrics(
                 metrics.get("comments"),
                 metrics.get("shares"),
                 metrics.get("saves"),
+                metrics.get("reach"),
+                metrics.get("follows"),
+                metrics.get("reposts"),
+                metrics.get("engagement_rate"),
+                metrics.get("skip_rate"),
                 metrics.get("platform_video_id"),
                 _json.dumps(metrics.get("raw_json", {})) if metrics.get("raw_json") else None,
                 source,

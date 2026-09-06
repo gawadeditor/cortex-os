@@ -31,30 +31,29 @@ class _FakeProvider:
 
 
 def _post(late_id, platform, ppid, *, views=100, impressions=120, likes=5,
-          comments=1, ig_avg_ms=0, ig_total_ms=0, duration=None):
+          comments=1, ig_avg_ms=0, ig_total_ms=0, duration=None,
+          reach=0, follows=0, reposts=0, engagement_rate=0, skip_rate=0):
+    metrics = {
+        "views": views, "impressions": impressions, "likes": likes,
+        "comments": comments, "shares": 0, "saves": 0, "clicks": 3,
+        "reach": reach, "follows": follows, "reposts": reposts,
+        "engagementRate": engagement_rate, "reelsSkipRate": skip_rate,
+        "igReelsAvgWatchTime": ig_avg_ms, "igReelsVideoViewTotalTime": ig_total_ms,
+        "videoDurationSeconds": duration,
+    }
     return {
         "_id": f"zernio_{platform}_{late_id}",
         "latePostId": late_id,
         "content": f"caption for {late_id}",
         "publishedAt": "2026-09-02T19:00:00.000Z",
         "status": "published",
-        "analytics": {
-            "views": views, "impressions": impressions, "likes": likes,
-            "comments": comments, "shares": 0, "saves": 0, "clicks": 3,
-            "igReelsAvgWatchTime": ig_avg_ms, "igReelsVideoViewTotalTime": ig_total_ms,
-            "videoDurationSeconds": duration,
-        },
+        "analytics": dict(metrics),
         "platforms": [{
             "platform": platform,
             "status": "published",
             "platformPostId": ppid,
             "platformPostUrl": f"https://{platform}.example/{ppid}",
-            "analytics": {
-                "views": views, "impressions": impressions, "likes": likes,
-                "comments": comments, "shares": 0, "saves": 0, "clicks": 3,
-                "igReelsAvgWatchTime": ig_avg_ms, "igReelsVideoViewTotalTime": ig_total_ms,
-                "videoDurationSeconds": duration,
-            },
+            "analytics": dict(metrics),
         }],
     }
 
@@ -132,8 +131,10 @@ def test_instagram_watch_time_translated_other_platforms_not(db_path):
         conn.close()
 
     provider = _FakeProvider([
-        _post("LATE1", "instagram", "ig1", ig_avg_ms=15000, ig_total_ms=300000, duration=30),
-        _post("LATE1", "facebook", "fb1", ig_avg_ms=0, ig_total_ms=0),
+        _post("LATE1", "instagram", "ig1", ig_avg_ms=15000, ig_total_ms=300000, duration=30,
+              reach=480, skip_rate=43.9, engagement_rate=2.63, follows=1),
+        _post("LATE1", "facebook", "fb1", ig_avg_ms=0, ig_total_ms=0,
+              reach=3723, skip_rate=99.9, engagement_rate=0.32),
     ])
     zas.sync_zernio_analytics(provider=provider, db_path=db_path)
     rec = get_episode_analytics("ep_abc", db_path=db_path)
@@ -141,6 +142,40 @@ def test_instagram_watch_time_translated_other_platforms_not(db_path):
     assert rec["instagram"]["total_watch_time_s"] == 300.0
     assert abs(rec["instagram"]["avg_view_pct"] - 0.5) < 1e-6
     assert rec["facebook"]["avg_watch_time_s"] is None
+    # reach: FB + IG only
+    assert rec["instagram"]["reach"] == 480
+    assert rec["facebook"]["reach"] == 3723
+    # skip_rate: Instagram Reels only — never synthesised for Facebook
+    assert rec["instagram"]["skip_rate"] == 43.9
+    assert rec["facebook"]["skip_rate"] is None
+    # engagement_rate: Zernio-computed, kept in percent, every platform
+    assert rec["instagram"]["engagement_rate"] == 2.63
+    assert rec["facebook"]["engagement_rate"] == 0.32
+    assert rec["instagram"]["follows"] == 1
+
+
+def test_reach_only_post_is_written_even_with_no_views(db_path):
+    """A post Zernio knows the reach of but hasn't scored for views/likes
+    yet must still land — reach is real data."""
+    p = _post("LATE1", "youtube", "yt1", views=0, impressions=0, likes=0,
+              comments=0, engagement_rate=0)
+    p["platforms"][0]["analytics"]["reach"] = 0
+    p["platforms"][0]["analytics"]["follows"] = 0
+    # YouTube reach is echoed as 0 by Zernio → not a measurement → still skipped
+    out = zas.sync_zernio_analytics(provider=_FakeProvider([p]), db_path=db_path)
+    assert out["rows_written"] == 0
+
+    conn = get_connection(db_path)
+    try:
+        _ledger_row(conn, platform="facebook")
+        conn.commit()
+    finally:
+        conn.close()
+    fb = _post("LATE1", "facebook", "fb9", views=0, impressions=0, likes=0,
+               comments=0, reach=210, engagement_rate=0)
+    out = zas.sync_zernio_analytics(provider=_FakeProvider([fb]), db_path=db_path)
+    assert out["rows_written"] == 1
+    assert get_episode_analytics("ep_abc", db_path=db_path)["facebook"]["reach"] == 210
 
 
 def test_empty_metrics_post_skipped(db_path):

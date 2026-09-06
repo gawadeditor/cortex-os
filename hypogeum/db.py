@@ -317,6 +317,17 @@ _V2_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "publish_calendar": [
         ("release_id", "TEXT"),   # P12-22: FK → releases.release_id
     ],
+    "platform_analytics": [
+        # 2026-09-06: real Zernio per-post fields we were dropping on the
+        # floor. reach/skip_rate come from Zernio for FB+IG / IG-Reels only
+        # (NULL elsewhere — never a synthesised zero). engagement_rate is
+        # Zernio-computed and stored in PERCENT (2.66 == 2.66%), not 0–1.
+        ("reach",           "INTEGER"),
+        ("follows",         "INTEGER"),
+        ("reposts",         "INTEGER"),
+        ("engagement_rate", "REAL"),
+        ("skip_rate",       "REAL"),
+    ],
     "run_queue": [
         ("source",               "TEXT"),  # 'rerun' | 'schedule' | 'manual' | 'auto_retry'
         ("recovery_from_run_id", "TEXT"),  # FK → runs.run_id; set for reruns/auto_retry only

@@ -8539,6 +8539,51 @@ def client_accounts_link(client_id):
     return redirect(f"/client/{client_id}/accounts?scope=client:{client_id}&flash={msg}", 302)
 
 
+_CHANNEL_IMPORTS: dict = {}   # client_id -> {status, channel, added, metric_rows, error, at}
+
+
+@app.route("/client/<client_id>/content/import_channel", methods=["POST"])
+def client_content_import_channel(client_id):
+    """Kick off a background yt-dlp public-catalogue pull for a channel URL
+    (no account access needed — the prospect / 'before signing' path)."""
+    import threading
+    from datetime import datetime, timezone
+    from hypogeum.client_manager import get_client
+    if not get_client(client_id, db_path=_db_path()):
+        return render_template("not_found.html", kind="Client", id=client_id), 404
+    url = (request.form.get("url") or "").strip()
+    if not url:
+        return redirect(f"/client/{client_id}/content?scope=client:{client_id}"
+                        f"&flash=Paste a channel URL or @handle first.", 302)
+    if _CHANNEL_IMPORTS.get(client_id, {}).get("status") == "running":
+        return redirect(f"/client/{client_id}/content?scope=client:{client_id}"
+                        f"&flash=A channel import is already running — reload in a minute.", 302)
+    db = _db_path()
+    _CHANNEL_IMPORTS[client_id] = {"status": "running", "channel": None, "added": 0,
+                                   "metric_rows": 0, "error": None,
+                                   "at": datetime.now(timezone.utc).isoformat()}
+
+    def _run():
+        from hypogeum.public_ingest import import_public_channel
+        try:
+            r = import_public_channel(client_id, url, platform="youtube", db_path=db)
+            _CHANNEL_IMPORTS[client_id].update(
+                status="done" if r["ok"] else "error",
+                channel=r.get("channel"), added=r.get("added", 0),
+                metric_rows=r.get("metric_rows", 0), error=r.get("error"))
+        except Exception as exc:  # noqa: BLE001
+            _CHANNEL_IMPORTS[client_id].update(status="error", error=str(exc))
+
+    threading.Thread(target=_run, daemon=True).start()
+    return redirect(f"/client/{client_id}/content?scope=client:{client_id}"
+                    f"&flash=Importing the channel in the background — reload in a minute.", 302)
+
+
+@app.route("/api/client/<client_id>/import_channel/state")
+def api_client_import_channel_state(client_id):
+    return jsonify(_CHANNEL_IMPORTS.get(client_id) or {"status": "idle"})
+
+
 @app.route("/client/<client_id>/content/add", methods=["POST"])
 def client_content_add(client_id):
     from hypogeum.client_manager import get_client, upsert_content_item

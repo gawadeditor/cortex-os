@@ -688,6 +688,71 @@ def _migrate_budget_reservations_scope_check(conn: sqlite3.Connection) -> None:
         raise
 
 
+def _migrate_content_items_source_check(conn: sqlite3.Connection) -> None:
+    """Cortex Advisory (2026-09-06): widen content_items.source's CHECK with
+    'public' (yt-dlp public-catalogue import). SQLite cannot ALTER a CHECK,
+    so rebuild the table inside one explicit transaction — same
+    crash-atomicity as _migrate_budget_reservations_scope_check(). Idempotent:
+    gated on whether 'public' already appears in the stored CREATE statement.
+    Every existing row is copied unchanged."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='content_items'"
+    ).fetchone()
+    if not row or row[0] is None:
+        return  # no table yet (schema.sql creates the new shape directly)
+    if "'public'" in row[0]:
+        return  # already migrated
+
+    conn.execute("BEGIN")
+    try:
+        conn.execute("ALTER TABLE content_items RENAME TO content_items_v1")
+        conn.execute(
+            """
+            CREATE TABLE content_items (
+                content_id         TEXT NOT NULL PRIMARY KEY,
+                client_id          TEXT NOT NULL,
+                managed_account_id TEXT,
+                platform           TEXT NOT NULL
+                                   CHECK(platform IN ('youtube','tiktok','instagram','facebook')),
+                platform_post_id   TEXT,
+                zernio_post_id     TEXT,
+                url                TEXT,
+                title              TEXT,
+                caption            TEXT,
+                thumbnail_url      TEXT,
+                media_type         TEXT,
+                published_at       TEXT,
+                source             TEXT NOT NULL DEFAULT 'zernio_external'
+                                   CHECK(source IN ('zernio_external','zernio_late','manual_url','csv','public')),
+                created_at         TEXT NOT NULL,
+                updated_at         TEXT NOT NULL,
+                UNIQUE(platform, platform_post_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO content_items
+                (content_id, client_id, managed_account_id, platform, platform_post_id,
+                 zernio_post_id, url, title, caption, thumbnail_url, media_type,
+                 published_at, source, created_at, updated_at)
+            SELECT content_id, client_id, managed_account_id, platform, platform_post_id,
+                   zernio_post_id, url, title, caption, thumbnail_url, media_type,
+                   published_at, source, created_at, updated_at
+            FROM content_items_v1
+            """
+        )
+        conn.execute("DROP TABLE content_items_v1")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_citem_client "
+            "ON content_items(client_id, published_at DESC)"
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def initialize_schema(db_path: Optional[Path] = None) -> None:
     """
     Create all tables and indexes defined in schema.sql, then apply v2–v4
@@ -721,6 +786,7 @@ def initialize_schema(db_path: Optional[Path] = None) -> None:
         _migrate_publishing_outcomes_deliverable_id(conn)
         _migrate_publishing_outcomes_status_enum(conn)
         _migrate_budget_reservations_scope_check(conn)
+        _migrate_content_items_source_check(conn)
         conn.executescript(schema_sql)
         conn.commit()
         _apply_v2_column_migrations(conn)

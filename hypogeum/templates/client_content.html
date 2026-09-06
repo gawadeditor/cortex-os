@@ -40,22 +40,47 @@
 {% if flash %}<div class="flash">{{ flash }}</div>{% endif %}
 
 <details class="add-panel"{% if flash %} open{% endif %}>
-  <summary>{{ icon('plus') }} Add content manually</summary>
+  <summary>{{ icon('plus') }} Add content</summary>
+
+  <form class="card" method="post" action="/client/{{ d.client.client_id }}/content/import_channel" style="margin-bottom:14px;">
+    <div class="card-title">{{ icon('download') }} Import a whole YouTube channel (public — no account needed)</div>
+    <p class="hint">Paste the client's channel URL or <code>@handle</code>. Cortex pulls the recent public videos with their view / like / comment counts — the "before" baseline for a prospect. Runs in the background (~1 min); reload after.</p>
+    <input type="text" name="url" required placeholder="https://www.youtube.com/@channel  ·  or  @channel" style="margin-top:10px;">
+    <div class="btn-row"><button type="submit" class="btn btn-primary btn-sm">{{ icon('download') }} Import channel</button></div>
+    <div id="ci-state" class="hint" style="margin-top:8px;"></div>
+  </form>
+
   <div class="add-grid">
     <form class="card" method="post" action="/client/{{ d.client.client_id }}/content/add">
-      <div class="card-title">{{ icon('link') }} Paste a post URL</div>
-      <p class="hint">YouTube / TikTok resolve title + thumbnail automatically. Instagram / Facebook register the post id only; analytics attach on the next Zernio sync.</p>
+      <div class="card-title">{{ icon('link') }} Paste one post URL</div>
+      <p class="hint">YouTube / TikTok resolve title + thumbnail automatically. Instagram / Facebook register the post id only.</p>
       <input type="url" name="url" required placeholder="https://www.youtube.com/watch?v=…" style="margin-top:10px;">
       <div class="btn-row"><button type="submit" class="btn btn-primary btn-sm">{{ icon('plus') }} Add post</button></div>
     </form>
     <form class="card" method="post" action="/client/{{ d.client.client_id }}/content/import" enctype="multipart/form-data">
       <div class="card-title">{{ icon('upload') }} Import a CSV</div>
-      <p class="hint">Columns: <code>platform, platform_post_id | url, published_at, views, likes, comments, shares, reach, engagement_rate</code>. Metrics stored as source <code>csv</code>.</p>
+      <p class="hint">Columns: <code>platform, platform_post_id | url, published_at, views, likes, comments, shares, reach, engagement_rate</code>. For Instagram / TikTok / Facebook, or a client's own analytics export.</p>
       <input type="file" name="file" accept=".csv,text/csv" style="margin-top:10px;">
       <div class="btn-row"><button type="submit" class="btn btn-sm">{{ icon('upload') }} Import</button></div>
     </form>
   </div>
 </details>
+<script>
+(function(){
+  var el = document.getElementById('ci-state');
+  if (!el) return;
+  function tick(){
+    fetch('/api/client/{{ d.client.client_id }}/import_channel/state')
+      .then(function(r){ return r.json(); })
+      .then(function(s){
+        if (s.status === 'running'){ el.textContent = 'Import running… reload in a minute.'; setTimeout(tick, 5000); }
+        else if (s.status === 'done'){ el.textContent = '✓ Imported ' + s.added + ' videos from ' + (s.channel||'the channel') + ' (' + s.metric_rows + ' with metrics). Reload to see them.'; }
+        else if (s.status === 'error'){ el.textContent = '✗ ' + (s.error || 'import failed'); }
+      }).catch(function(){});
+  }
+  tick();
+})();
+</script>
 
 {% if not d.content %}
 <div class="dv-empty">

@@ -1140,7 +1140,7 @@ CREATE TABLE IF NOT EXISTS content_items (
     media_type         TEXT,                        -- video | image | carousel
     published_at       TEXT,
     source             TEXT NOT NULL DEFAULT 'zernio_external'
-                       CHECK(source IN ('zernio_external','zernio_late','manual_url','csv')),
+                       CHECK(source IN ('zernio_external','zernio_late','manual_url','csv','public')),
     created_at         TEXT NOT NULL,
     updated_at         TEXT NOT NULL,
     UNIQUE(platform, platform_post_id)

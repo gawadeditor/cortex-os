@@ -38,7 +38,7 @@
 {% call hero(
      eyebrow='Client · overview',
      title=d.client.name,
-     lede=(d.client.brief and d.client.brief.get('note')) or 'Performance across every account you manage for this client.',
+     lede='Performance across every account you manage for this client.',
      figure="{:,}".format(k.total_views or 0),
      figure_label='total views tracked',
      pill=(k.tracked ~ ' / ' ~ k.content_items ~ ' posts with analytics'),
@@ -52,6 +52,14 @@
 {% endcall %}
 
 {% if flash %}<div class="flash" style="font-size:12px;padding:9px 11px;border-radius:8px;margin-bottom:var(--space-md);background:var(--overlay);border:1px solid var(--border);color:var(--text);">{{ flash }}</div>{% endif %}
+
+{% set _brief = d.client.brief and d.client.brief.get('note') %}
+{% if _brief %}
+<details class="card" style="margin-bottom:var(--space-md);">
+  <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--muted);">{{ icon('review') }} Client brief</summary>
+  <p style="font-size:12.5px;line-height:1.65;color:var(--text);white-space:pre-wrap;margin-top:12px;max-width:74ch;">{{ _brief }}</p>
+</details>
+{% endif %}
 
 {% set _pending = d.accounts | rejectattr('provider_account_id') | list | length %}
 {% if _pending %}

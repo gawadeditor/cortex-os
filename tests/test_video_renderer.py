@@ -319,7 +319,7 @@ class TestBuildFfmpegConcatCommand:
     def test_bounded_stretch_applied_within_editorial_limit(self, tmp_path):
         """
         Given entry.duration_seconds=8.8s and clip_duration_seconds=8.0s, factor=1.1
-        is within MAX_EDITORIAL_SPEED_FACTOR (1.15) — a bounded sync-correction
+        is within MAX_EDITORIAL_SPEED_FACTOR (1.10) — a bounded sync-correction
         setpts is used. No reverse/loop/tpad filter is present.
         """
         clip_path = tmp_path / "clip.mp4"
@@ -714,7 +714,7 @@ class TestNoReverseOrPingPong:
     out-of-limit factors raise rather than stretch.
     """
 
-    @pytest.mark.parametrize("hold_factor", [1.0, 1.05, 1.1, 1.15])
+    @pytest.mark.parametrize("hold_factor", [1.0, 1.05, 1.08, 1.1])
     def test_no_reverse_filter_within_editorial_limit(self, tmp_path, hold_factor):
         """No `reverse` ffmpeg filter is ever emitted for an in-limit factor."""
         clip_path = tmp_path / "clip.mp4"
@@ -742,7 +742,7 @@ class TestNoReverseOrPingPong:
         assert "]reverse[" not in cmd_str
         assert "split=2" not in cmd_str
 
-    @pytest.mark.parametrize("hold_factor", [1.16, 1.5, 2.0, 2.5, 3.0, 5.0, 10.0, 50.0])
+    @pytest.mark.parametrize("hold_factor", [1.11, 1.16, 1.5, 2.0, 2.5, 3.0, 5.0, 10.0, 50.0])
     def test_large_factor_raises_rather_than_conceals_gap(self, tmp_path, hold_factor):
         """A factor beyond MAX_EDITORIAL_SPEED_FACTOR must raise
         InsufficientCoverageError — Video Renderer is not permitted to
@@ -767,7 +767,7 @@ class TestNoReverseOrPingPong:
                 episode_id="ep_test",
             )
 
-    @pytest.mark.parametrize("hold_factor", [1.0, 1.05, 1.1, 1.15])
+    @pytest.mark.parametrize("hold_factor", [1.0, 1.05, 1.08, 1.1])
     def test_no_negative_time_playback(self, tmp_path, hold_factor):
         """Every setpts multiplier used for an in-limit sync correction must
         be strictly positive — a negative or zero PTS multiplier is the

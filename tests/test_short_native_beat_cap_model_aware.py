@@ -94,4 +94,5 @@ def test_slowest_beat_plus_elevenlabs_tail_still_fits_one_clip(monkeypatch):
     _enforce_short_native_budget(sp, _cfg(), _Log(), channel_id="twinkle")
     kept = len(sp["sections"][0]["narration_beats"][0]["text"].split())
     worst_case_real_seconds = kept / 1.8 + 0.21   # slowest voice + EL tail
-    assert worst_case_real_seconds <= 5.0 * 1.15, (kept, worst_case_real_seconds)
+    from hypogeum.agents.coverage_check import MAX_EDITORIAL_SPEED_FACTOR
+    assert worst_case_real_seconds <= 5.0 * MAX_EDITORIAL_SPEED_FACTOR, (kept, worst_case_real_seconds)

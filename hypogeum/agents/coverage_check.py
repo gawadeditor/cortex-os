@@ -44,16 +44,22 @@ from typing import List, Optional, Tuple
 
 from hypogeum.agents.timeline_builder import TimelineEntry
 
-# Approved editorial speed-adjustment range (2026-08-01 policy). 1.00 = no
-# change. Anything above 1.00 slows the clip down (stretches it in time) to
-# smooth a sub-beat mismatch — e.g. a clip that natively runs 7.8s against
-# an 8.0s beat. This is a minor sync correction, not a coverage strategy:
-# it is capped low enough that it is not perceptible as "slow motion," and
-# Video Renderer treats any factor above this ceiling as a hard failure
-# rather than silently applying it. Do not raise this value to paper over a
-# real coverage gap — request more footage instead.
+# Approved editorial speed-adjustment range. 1.00 = no change; a factor
+# above 1.00 slows the clip down (stretches it in time) to smooth a
+# sub-beat mismatch — e.g. a clip that natively runs 7.8s against an 8.0s
+# beat. This is a minor sync correction, not a coverage strategy: Video
+# Renderer treats any factor above this ceiling as a hard failure rather
+# than silently applying it. Do not raise this value to paper over a real
+# coverage gap — request more footage (or tighten the per-beat narration
+# budget) instead.
+#
+# 2026-09-06 (operator): "لو هنلعب في السرعة اقصي حاجة مسموحة 90%-110%،
+# اكتر من كدة الكليب هيبوظ" — playback may run between 90% and 110% of
+# real time; beyond that the motion visibly breaks. 90% playback = a
+# 1/0.9 ≈ 1.11x time-stretch, so the ceiling is 1.10 (was 1.15). A
+# residual-absorb that would push a single beat past this was rejected.
 MIN_EDITORIAL_SPEED_FACTOR = 1.0
-MAX_EDITORIAL_SPEED_FACTOR = 1.15
+MAX_EDITORIAL_SPEED_FACTOR = 1.10
 
 
 @dataclass

@@ -15,9 +15,10 @@ commit 44ae397): Video Renderer must never compensate for missing visual
 duration. Every beat it renders is concatenated from real, distinct,
 forward-only clips (TimelineEntry.clip_path + .extra_clip_paths), each
 shown exactly once. The only permitted adjustment is a bounded speed
-correction within coverage_check.MAX_EDITORIAL_SPEED_FACTOR (≈15%), applied
-only to smooth a sub-beat mismatch on the last clip in a beat — never to
-fill a real gap. If a beat still doesn't have enough duration at that
+correction within coverage_check.MAX_EDITORIAL_SPEED_FACTOR (1.10x =
+90% playback, the operator-approved floor; 2026-09-06), applied only to
+smooth a sub-beat mismatch on the last clip in a beat — never to fill a
+real gap. If a beat still doesn't have enough duration at that
 point, that is an upstream contract violation (Assembly Agent's coverage
 gate should have already halted or filled it — see
 hypogeum/agents/coverage_check.py and clip_repair_agent.fill_coverage_deficits())

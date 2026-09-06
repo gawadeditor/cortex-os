@@ -50,17 +50,16 @@
   <div class="card-title">{{ icon('plus') }} Add an account that's not listed</div>
   <div class="steps" style="margin-top:12px;">
     <div class="step"><b>1</b><span>Connect the client's social account on <a href="https://app.zernio.com" target="_blank" rel="noopener">zernio.com</a> (that's where the login / OAuth happens — Cortex never handles social passwords).</span></div>
-    <div class="step"><b>2</b><span>Come back here and press <b>Sync from Zernio</b> — the new account drops into the pool below.</span></div>
-    <div class="step"><b>3</b><span>Press <b>Link to {{ d.client.name }}</b> next to it.</span></div>
+    <div class="step"><b>2</b><span>Come back here and press <b>Sync now</b> — the new account is matched up and its posts start pulling in.</span></div>
+    <div class="step"><b>3</b><span>If it's not linked automatically, press <b>Link to {{ d.client.name }}</b> next to it in the pool.</span></div>
   </div>
-  <form class="inline-form" method="post" action="/client/{{ d.client.client_id }}/accounts/link">
-    <input type="hidden" name="action" value="sync">
-    <button type="submit" class="btn btn-primary">{{ icon('refresh') }} Sync from Zernio</button>
+  <form class="inline-form" method="post" action="/client/{{ d.client.client_id }}/sync">
+    <button type="submit" class="btn btn-primary">{{ icon('refresh') }} Sync now</button>
   </form>
 
   <div style="margin-top:18px; padding-top:14px; border-top:1px solid var(--hairline);">
     <div class="card-title" style="font-size:11px;">{{ icon('pencil') }} …or add it by hand now</div>
-    <p class="note" style="margin-top:4px;">Use this when the account isn't on Zernio yet. Cortex records it and attaches analytics automatically once Zernio starts reporting it.</p>
+    <p class="note" style="margin-top:4px;">Use this when the account isn't on Zernio yet. It shows as <b>pending Zernio</b> and starts pulling data automatically once you connect it on zernio.com and press <b>Sync now</b> (Cortex matches it by platform + handle).</p>
     <form class="manual-form" method="post" action="/client/{{ d.client.client_id }}/accounts/link">
       <input type="hidden" name="action" value="manual">
       <div>
@@ -106,9 +105,8 @@
 <div class="card" style="margin-top: var(--space-md);">
   <div class="card-head">
     <div class="card-title">{{ icon('link') }} Zernio account pool</div>
-    <form class="inline-form" method="post" action="/client/{{ d.client.client_id }}/accounts/link">
-      <input type="hidden" name="action" value="sync">
-      <button type="submit" class="btn btn-sm btn-ghost">{{ icon('refresh') }} Sync</button>
+    <form class="inline-form" method="post" action="/client/{{ d.client.client_id }}/sync">
+      <button type="submit" class="btn btn-sm btn-ghost">{{ icon('refresh') }} Sync now</button>
     </form>
   </div>
   {% if d.zernio_pool %}

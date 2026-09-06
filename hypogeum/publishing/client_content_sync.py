@@ -106,12 +106,19 @@ def sync_client_content(client_id: str, *, provider=None, analyze: bool = False,
 
     out: dict = {"client_id": client_id, "ok": False, "accounts": 0,
                  "content_items": 0, "metric_rows": 0, "retention": 0,
-                 "audience_rows": 0, "comments": 0, "profiled": 0, "errors": {}}
+                 "audience_rows": 0, "comments": 0, "profiled": 0,
+                 "reconciled": 0, "pending_accounts": 0, "errors": {}}
 
     client = cm.get_client(client_id, db_path=db_path)
     if not client or client.get("status") == "archived":
         out["errors"]["client"] = "no active client"
         return out
+    # Resolve any manually-added accounts against the Zernio roster first, so a
+    # pending (handle-only) account starts syncing as soon as Zernio reports it.
+    try:
+        out["reconciled"] = cm.reconcile_pending_accounts(client_id, db_path=db_path)
+    except Exception as exc:  # noqa: BLE001
+        out["errors"]["reconcile"] = str(exc)[:120]
     accounts = cm.list_managed_accounts(client_id, db_path=db_path)
     out["accounts"] = len(accounts)
     if not accounts:
@@ -124,7 +131,9 @@ def sync_client_content(client_id: str, *, provider=None, analyze: bool = False,
         aid = acct.get("provider_account_id")
         plat = acct.get("platform")
         if not aid:
-            out["errors"][f"{plat}:no_provider_account_id"] = "link an account first"
+            # Manually-added, not yet matched to a Zernio account — nothing to
+            # pull until it's connected on Zernio and reconciled.
+            out["pending_accounts"] += 1
             continue
 
         # ---- per-post ----

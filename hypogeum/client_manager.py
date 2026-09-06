@@ -259,6 +259,64 @@ def list_managed_accounts(client_id: str, *, enabled_only: bool = True,
     return [dict(r) for r in rows]
 
 
+def _norm_handle(h: Optional[str]) -> str:
+    return (h or "").strip().lstrip("@").lower()
+
+
+def reconcile_pending_accounts(client_id: str, *,
+                               db_path: Optional[Path] = None) -> int:
+    """Back-fill provider_account_id / provider_profile_id on this client's
+    manually-added managed_accounts (provider_account_id IS NULL) by matching
+    (platform, handle) against the synced provider_accounts roster. Returns
+    the number of rows resolved. Idempotent."""
+    conn = _conn(db_path)
+    resolved = 0
+    try:
+        pending = conn.execute(
+            "SELECT managed_account_id, platform, handle FROM managed_accounts "
+            "WHERE client_id=? AND enabled=1 AND (provider_account_id IS NULL "
+            "OR provider_account_id='')", (client_id,),
+        ).fetchall()
+        if not pending:
+            return 0
+        pa = conn.execute(
+            "SELECT provider_account_id, provider_profile_id, platform, "
+            "display_label, metadata_json FROM provider_accounts "
+            "WHERE provider_id='zernio'",
+        ).fetchall()
+        index: dict = {}
+        for r in pa:
+            try:
+                meta = _json.loads(r["metadata_json"] or "{}")
+            except Exception:  # noqa: BLE001
+                meta = {}
+            profile = (r["provider_profile_id"]
+                       or meta.get("zernio_profile_id") or meta.get("profile_id"))
+            for cand in (meta.get("username"), r["display_label"],
+                         meta.get("handle"), meta.get("name")):
+                if cand:
+                    index[(r["platform"], _norm_handle(cand))] = (r, profile)
+        now = _now()
+        for m in pending:
+            hit = index.get((m["platform"], _norm_handle(m["handle"])))
+            if not hit:
+                continue
+            row, profile = hit
+            conn.execute(
+                "UPDATE managed_accounts SET provider_account_id=?, "
+                "provider_profile_id=COALESCE(provider_profile_id, ?), updated_at=? "
+                "WHERE managed_account_id=?",
+                (row["provider_account_id"], profile, now, m["managed_account_id"]),
+            )
+            resolved += 1
+        conn.commit()
+    finally:
+        conn.close()
+    if resolved:
+        log.info("managed_accounts_reconciled", client_id=client_id, resolved=resolved)
+    return resolved
+
+
 # ---------------------------------------------------------------------------
 # content items
 # ---------------------------------------------------------------------------

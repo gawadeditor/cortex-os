@@ -8406,7 +8406,7 @@ def client_overview_page(client_id):
     d = get_client_overview(client_id, db_path=_db_path())
     if not d.get("client"):
         return render_template("not_found.html", kind="Client", id=client_id), 404
-    return render_template("client_detail.html", d=d)
+    return render_template("client_detail.html", d=d, flash=request.args.get("flash"))
 
 
 @app.route("/client/<client_id>/content")
@@ -8460,6 +8460,46 @@ def client_accounts_page(client_id):
     if not d.get("client"):
         return render_template("not_found.html", kind="Client", id=client_id), 404
     return render_template("client_accounts.html", d=d, flash=request.args.get("flash"))
+
+
+@app.route("/client/<client_id>/sync", methods=["POST"])
+def client_sync_now(client_id):
+    """Operator-triggered pull for one client: refresh the Zernio roster,
+    reconcile any pending manual accounts, then pull content + performance."""
+    from hypogeum.client_manager import get_client
+    if not get_client(client_id, db_path=_db_path()):
+        return render_template("not_found.html", kind="Client", id=client_id), 404
+    parts = []
+    try:
+        from hypogeum.publishing.zernio_accounts import sync_zernio_accounts
+        zr = sync_zernio_accounts(_db_path())
+        if not zr.get("ok"):
+            parts.append(f"Zernio roster sync failed ({zr.get('error')})")
+    except Exception as exc:  # noqa: BLE001
+        parts.append(f"Zernio roster sync error: {exc}")
+    try:
+        from hypogeum.publishing.client_content_sync import sync_client_content
+        r = sync_client_content(client_id, analyze=False, db_path=_db_path())
+        if r.get("reconciled"):
+            parts.append(f"matched {r['reconciled']} pending account(s) to Zernio")
+        if r.get("content_items") or r.get("metric_rows"):
+            parts.append(f"{r['content_items']} posts, {r['metric_rows']} metric rows, "
+                         f"{r.get('retention', 0)} retention, {r.get('audience_rows', 0)} audience")
+        if r.get("pending_accounts"):
+            parts.append(f"{r['pending_accounts']} account(s) still waiting for Zernio — "
+                         "connect them on zernio.com")
+        if not r.get("ok") and not r.get("pending_accounts"):
+            parts.append("no data returned yet")
+        for k, v in list(r.get("errors", {}).items())[:3]:
+            parts.append(f"{k}: {v}")
+    except Exception as exc:  # noqa: BLE001
+        parts.append(f"content sync error: {exc}")
+    msg = "Sync — " + "; ".join(parts) if parts else "Sync complete"
+    back = request.form.get("back")
+    if back is None:
+        back = "accounts"
+    suffix = f"/{back}" if back else ""
+    return redirect(f"/client/{client_id}{suffix}?scope=client:{client_id}&flash={msg}", 302)
 
 
 @app.route("/client/<client_id>/accounts/link", methods=["POST"])

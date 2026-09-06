@@ -43,9 +43,22 @@
      figure_label='total views tracked',
      pill=(k.tracked ~ ' / ' ~ k.content_items ~ ' posts with analytics'),
      pill_class='is-good' if k.tracked else 'is-warn') %}
+  <form method="post" action="/client/{{ d.client.client_id }}/sync" style="display:inline;">
+    <input type="hidden" name="back" value="">
+    <button type="submit" class="btn btn-primary">{{ icon('refresh') }} Sync now</button>
+  </form>
   <a class="btn" href="/client/{{ d.client.client_id }}/content?scope=client:{{ d.client.client_id }}">{{ icon('grid') }} All content</a>
   <a class="btn" href="/client/{{ d.client.client_id }}/accounts?scope=client:{{ d.client.client_id }}">{{ icon('plug') }} Accounts</a>
 {% endcall %}
+
+{% if flash %}<div class="flash" style="font-size:12px;padding:9px 11px;border-radius:8px;margin-bottom:var(--space-md);background:var(--overlay);border:1px solid var(--border);color:var(--text);">{{ flash }}</div>{% endif %}
+
+{% set _pending = d.accounts | rejectattr('provider_account_id') | list | length %}
+{% if _pending %}
+<div class="flash" style="font-size:12px;padding:9px 11px;border-radius:8px;margin-bottom:var(--space-md);background:var(--warn-bg);border:1px solid color-mix(in srgb, var(--warn) 40%, var(--border));color:var(--text);">
+  {{ _pending }} account(s) added by hand aren't connected to Zernio yet — no data will pull for them. Connect them on zernio.com, then press <b>Sync now</b>.
+</div>
+{% endif %}
 
 {% if not d.accounts %}
 <div class="dv-empty">

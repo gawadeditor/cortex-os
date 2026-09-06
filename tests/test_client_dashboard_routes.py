@@ -88,6 +88,30 @@ def test_account_manual_add(app_client):
     assert not [a for a in cm.list_managed_accounts(cid, db_path=db) if a["platform"] == "facebook"]
 
 
+def test_pending_account_reconciles_to_zernio(app_client):
+    import json
+    from hypogeum.db import get_connection
+    cl, cid, db = app_client
+    cl.post(f"/client/{cid}/accounts/link",
+            data={"action": "manual", "platform": "tiktok", "handle": "@acmefund"})
+    conn = get_connection(db)
+    conn.execute(
+        "INSERT INTO provider_accounts (provider_account_id, provider_id, platform, "
+        "external_account_id, display_label, status, needs_reconnection, metadata_json, "
+        "created_at, updated_at) VALUES ('pa_tt','zernio','tiktok','z9','Acme','active',0,?,"
+        "datetime('now'),datetime('now'))",
+        (json.dumps({"username": "AcmeFund", "zernio_profile_id": "prof1"}),))
+    conn.commit()
+    conn.close()
+    from hypogeum.client_manager import reconcile_pending_accounts
+    assert reconcile_pending_accounts(cid, db_path=db) == 1
+    tt = [a for a in cm.list_managed_accounts(cid, db_path=db) if a["platform"] == "tiktok"][0]
+    assert tt["provider_account_id"] == "pa_tt"
+    assert tt["provider_profile_id"] == "prof1"
+    # idempotent
+    assert reconcile_pending_accounts(cid, db_path=db) == 0
+
+
 def test_manual_url_add(app_client):
     cl, cid, db = app_client
     r = cl.post(f"/client/{cid}/content/add",

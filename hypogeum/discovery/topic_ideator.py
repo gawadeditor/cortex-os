@@ -168,10 +168,20 @@ def run_topic_ideator(
     """
     batch_id = str(uuid.uuid4())
 
-    # ── 1. Signal context from DB ──────────────────────────────────────────
+    # ── 1. Signal context + already-covered topics from DB ─────────────────
     conn = get_connection(db_path)
     try:
         signal_ctx = _build_signal_context(channel_id, conn)
+        if existing_topics is None:
+            # The v2 director calls run() without this; load it here so the
+            # LLM is told what NOT to re-propose AND near-dupes are dropped
+            # below. Without this the v2 path did zero novelty filtering and
+            # looped on the same subjects (Antikythera / Herculaneum).
+            from hypogeum.topic_discovery import _get_existing_topics  # noqa: PLC0415
+            try:
+                existing_topics = _get_existing_topics(channel_id, conn)
+            except Exception:  # noqa: BLE001
+                existing_topics = set()
     finally:
         conn.close()
 
@@ -206,12 +216,17 @@ def run_topic_ideator(
     except Exception:  # noqa: BLE001
         _topic_learning = []
 
+    # Subjects this channel has already produced, queued, or deliberately
+    # set aside — the LLM must propose genuinely new ground (prompt rule 14).
+    _avoid_subjects = sorted(t for t in (existing_topics or set()) if t)[:80]
+
     input_package = {
         "channel_id": channel_id,
         "batch_id":   batch_id,
         "production_format": production_format,
         "channel_brief": _brief,
         "channel_topic_learning": _topic_learning,
+        "avoid_subjects": _avoid_subjects,
         "signal_context": {
             "has_real_analytics":     signal_ctx.get("has_real_analytics", False),
             "avg_ctr":                signal_ctx.get("avg_ctr"),

@@ -43,6 +43,7 @@ Rules you must never break:
 8. differentiation_claim must name something specific that distinguishes this production (a dataset, a source, a technique, a framing). Generic claims like "this has never been covered" are not acceptable.
 9. Generate between 6 and 10 opportunities. Do not generate fewer than 6.
 10. Every opportunity must be on a distinct subject — no duplicates, no near-duplicates.
+    If the input contains "avoid_subjects" (titles this channel has already produced, queued, or set aside), do NOT propose any subject that matches or closely overlaps one of them — find genuinely new ground.
 11. All six string fields must be non-empty.
 12. Scores must be genuinely differentiated — do not assign the same score to every candidate on the same dimension. Score based on how THIS specific topic performs relative to a strong channel of the kind `channel_brief` describes.
 13. If the input contains "production_format": "short", every opportunity must be a standalone vertical short of ~45–60 seconds: ONE self-contained idea that can be told fully in ~150 spoken words, built around a single startling fact or unresolved question that lands in the first three seconds. topic_text stays a concise title; mystery_hook is the three-second opener that makes someone stop scrolling; visual_signal must work full-frame vertical. Do NOT propose broad topics that need a long-form treatment. Score click_potential and curiosity_gap for the scroll-stopping context of a Shorts feed.

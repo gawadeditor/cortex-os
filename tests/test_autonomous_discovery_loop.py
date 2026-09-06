@@ -346,6 +346,39 @@ class TestSignalContext:
 # Score boost / penalty tests
 # ---------------------------------------------------------------------------
 
+class TestExistingTopicsIncludesSetAside:
+    """_get_existing_topics() must fold in skipped / cancelled / superseded
+    rows, not just active ones — a topic that failed repeatedly and was
+    skip_topic()'d is exactly what discovery kept re-proposing on a loop
+    (Antikythera for hypogeum, 2026-09-06)."""
+
+    def _seed(self, conn, ch, text, status):
+        conn.execute(
+            "INSERT INTO episode_topics (topic_id, channel_id, topic_text, status, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (str(uuid.uuid4()), ch, text, status, _now(), _now()),
+        )
+        conn.commit()
+
+    def test_skipped_and_cancelled_topics_are_returned(self):
+        from hypogeum.topic_discovery import _get_existing_topics
+        conn = _make_db()
+        _add_channel(conn, "ch_x")
+        self._seed(conn, "ch_x", "Queued One", "queued")
+        self._seed(conn, "ch_x", "Consumed One", "consumed")
+        self._seed(conn, "ch_x", "The Antikythera Mechanism", "skipped")
+        self._seed(conn, "ch_x", "Cancelled One", "cancelled")
+        self._seed(conn, "ch_x", "Superseded One", "superseded")
+        self._seed(conn, "ch_other", "Other Channel Topic", "skipped")
+
+        got = _get_existing_topics("ch_x", conn)
+        assert "The Antikythera Mechanism" in got
+        assert "Cancelled One" in got
+        assert "Superseded One" in got
+        assert "Queued One" in got and "Consumed One" in got
+        assert "Other Channel Topic" not in got
+
+
 class TestScoreSignalBoost:
 
     _SEED_ANCIENT_UNDERGROUND = {

@@ -272,14 +272,37 @@ def _score_seed(seed: dict, existing_topics: set[str], signal_ctx: dict | None =
 
 
 def _get_existing_topics(channel_id: str, conn) -> set[str]:
-    """Return recently used topic texts for this channel (consumed + queued)."""
+    """Return topic texts this channel has already used, is using, OR
+    deliberately set aside — so discovery never re-proposes them.
+
+    Includes 'skipped' / 'cancelled' / 'superseded' (2026-09-06): a topic
+    that failed repeatedly and was skip_topic()'d, or an episode that was
+    superseded, is exactly what discovery kept re-suggesting on a loop
+    ("Antikythera" for hypogeum). If an operator genuinely wants a
+    set-aside topic retried they re-queue it by hand, which flips its row
+    back to 'queued' and it lands in this set anyway. Also folds in the
+    channel's recently-produced episode titles.
+    """
     rows = conn.execute(
         """SELECT topic_text FROM episode_topics
-           WHERE channel_id = ? AND status IN ('queued','claimed','consumed')
-           ORDER BY created_at DESC LIMIT 50""",
+           WHERE channel_id = ?
+             AND status IN ('queued','claimed','consumed','skipped','cancelled','superseded')
+           ORDER BY created_at DESC LIMIT 120""",
         (channel_id,),
     ).fetchall()
-    return {r[0] for r in rows}
+    out = {r[0] for r in rows if r[0]}
+    try:
+        titles = conn.execute(
+            """SELECT e.title FROM episodes e
+               JOIN episode_topics t ON t.episode_id = e.episode_id
+               WHERE t.channel_id = ? AND e.title IS NOT NULL
+               ORDER BY e.created_at DESC LIMIT 60""",
+            (channel_id,),
+        ).fetchall()
+        out.update(r[0] for r in titles if r[0])
+    except Exception:  # noqa: BLE001 — episodes/title shape varies across envs
+        pass
+    return out
 
 
 def _get_signal_hints(channel_id: str, conn) -> list[str]:

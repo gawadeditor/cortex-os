@@ -78,24 +78,44 @@ def _normalise_demographics(raw: dict) -> dict:
         norm = []
         for r in rows:
             label = r.get("dimension") or r.get("label")
-            pct = r.get("value") if r.get("value") is not None else r.get("pct")
-            if label is not None and isinstance(pct, (int, float)):
-                norm.append({"label": str(label), "pct": round(float(pct), 2)})
-        if norm:
-            out[dim] = norm
+            val = r.get("value") if r.get("value") is not None else r.get("pct")
+            if label is not None and isinstance(val, (int, float)):
+                norm.append({"label": str(label), "value": float(val)})
+        if not norm:
+            continue
+        # YouTube returns age/gender as viewerPercentage but city/country as
+        # absolute view counts — normalise everything to a percent of the
+        # dimension total so downstream can treat "pct" uniformly.
+        total = sum(x["value"] for x in norm)
+        if total > 0 and (total > 101 or dim in ("city", "country")):
+            for x in norm:
+                x["value"] = x["value"] / total * 100.0
+        out[dim] = [{"label": x["label"], "pct": round(x["value"], 2)} for x in norm]
     return out
 
 
 def _retention_avg_view_pct(curve: list) -> Optional[float]:
-    """Mean watchRatio across the retention curve = average % of the video
-    watched. Returns 0.0–1.0 or None for an empty/garbage curve."""
+    """Average fraction of the video watched, from YouTube's retention
+    curve. Each point's `audienceWatchRatio` is segment views / video views
+    (can exceed 1 on a re-watched segment); clamp to 1 and take the mean —
+    a monotonic proxy for average view percentage. Returns 0.0–1.0 or None
+    for an empty curve.
+
+    Accepts either YouTube's raw key (`audienceWatchRatio`) or a
+    pre-normalised `watchRatio` (what our own tests / a future normaliser
+    might pass)."""
     if not isinstance(curve, list) or not curve:
         return None
-    vals = [p.get("watchRatio") for p in curve
-            if isinstance(p.get("watchRatio"), (int, float))]
+    vals = []
+    for p in curve:
+        v = p.get("audienceWatchRatio")
+        if v is None:
+            v = p.get("watchRatio")
+        if isinstance(v, (int, float)):
+            vals.append(min(max(float(v), 0.0), 1.0))
     if not vals:
         return None
-    return round(min(max(sum(vals) / len(vals), 0.0), 1.0), 4)
+    return round(sum(vals) / len(vals), 4)
 
 
 # ---------------------------------------------------------------------------
@@ -216,47 +236,54 @@ def sync_zernio_native_analytics(*, provider=None, db_path: Optional[Path] = Non
             return None
         return res["data"]
 
+    # ---- PHASE 1: fetch everything into memory (NO db connection held —
+    # these are ~20 HTTP calls and must not straddle a write lock) ----
+    pi_rows: list[tuple] = []          # (channel_id, platform, metrics)
+    aud_specs: list[tuple] = []        # (channel_id, platform, demographics)
+    for (cid, plat), aid in acct_map.items():
+        if plat == "youtube":
+            d = _fetch("get_youtube_channel_insights", account_id=aid)
+            if d:
+                pi_rows.append((cid, plat, _flatten_metrics(d)))
+            dm = _fetch("get_youtube_demographics", account_id=aid)
+            if dm:
+                aud_specs.append((cid, plat, _normalise_demographics(dm)))
+        elif plat == "instagram":
+            d = _fetch("get_instagram_account_insights", account_id=aid)
+            fh = _fetch("get_instagram_follower_history", account_id=aid)
+            merged = {**_flatten_metrics(d or {}), **_flatten_metrics(fh or {})}
+            if merged:
+                pi_rows.append((cid, plat, merged))
+            dm = _fetch("get_instagram_demographics", account_id=aid)
+            if dm:
+                aud_specs.append((cid, plat, _normalise_demographics(dm)))
+        elif plat == "tiktok":
+            d = _fetch("get_tiktok_account_insights", account_id=aid)
+            if d:
+                pi_rows.append((cid, plat, _flatten_metrics(d)))
+        elif plat == "facebook":
+            d = _fetch("get_facebook_page_insights", account_id=aid)
+            if d:
+                pi_rows.append((cid, plat, _flatten_metrics(d)))
+
+    retention_updates = _fetch_youtube_retention(provider, acct_map, out, db_path)
+
+    # ---- PHASE 2: one short write transaction ----
     conn = get_connection(Path(db_path) if db_path else None)
     try:
-        for (cid, plat), aid in acct_map.items():
-            if plat == "youtube":
-                d = _fetch("get_youtube_channel_insights", account_id=aid)
-                if d:
-                    _store_platform_insights(conn, channel_id=cid, platform=plat,
-                                             metrics=_flatten_metrics(d))
-                    out["platform_insights"] += 1
-                dm = _fetch("get_youtube_demographics", account_id=aid)
-                if dm:
-                    out["audience_rows"] += _store_audience(
-                        conn, channel_id=cid, platform=plat,
-                        demographics=_normalise_demographics(dm))
-            elif plat == "instagram":
-                d = _fetch("get_instagram_account_insights", account_id=aid)
-                fh = _fetch("get_instagram_follower_history", account_id=aid)
-                merged = {**_flatten_metrics(d or {}), **_flatten_metrics(fh or {})}
-                if merged:
-                    _store_platform_insights(conn, channel_id=cid, platform=plat, metrics=merged)
-                    out["platform_insights"] += 1
-                dm = _fetch("get_instagram_demographics", account_id=aid)
-                if dm:
-                    out["audience_rows"] += _store_audience(
-                        conn, channel_id=cid, platform=plat,
-                        demographics=_normalise_demographics(dm))
-            elif plat == "tiktok":
-                d = _fetch("get_tiktok_account_insights", account_id=aid)
-                if d:
-                    _store_platform_insights(conn, channel_id=cid, platform=plat,
-                                             metrics=_flatten_metrics(d))
-                    out["platform_insights"] += 1
-            elif plat == "facebook":
-                d = _fetch("get_facebook_page_insights", account_id=aid)
-                if d:
-                    _store_platform_insights(conn, channel_id=cid, platform=plat,
-                                             metrics=_flatten_metrics(d))
-                    out["platform_insights"] += 1
-
-        # YouTube per-video retention — every episode with a YouTube video id
-        out["retention_videos"] += _sync_youtube_retention(conn, provider, acct_map, out, db_path)
+        for cid, plat, metrics in pi_rows:
+            _store_platform_insights(conn, channel_id=cid, platform=plat, metrics=metrics)
+            out["platform_insights"] += 1
+        for cid, plat, demo in aud_specs:
+            out["audience_rows"] += _store_audience(
+                conn, channel_id=cid, platform=plat, demographics=demo)
+        for record_id, curve, avp in retention_updates:
+            conn.execute(
+                "UPDATE platform_analytics SET retention_curve_json = ?, "
+                "avg_view_pct = COALESCE(avg_view_pct, ?) WHERE record_id = ?",
+                (_json.dumps(curve), avp, record_id),
+            )
+        out["retention_videos"] = len({rid for rid, _, _ in retention_updates})
         conn.commit()
     except Exception as exc:  # noqa: BLE001
         out["errors"]["store"] = str(exc)[:200]
@@ -271,49 +298,63 @@ def sync_zernio_native_analytics(*, provider=None, db_path: Optional[Path] = Non
     return out
 
 
-def _sync_youtube_retention(conn, provider, acct_map: dict, out: dict, db_path) -> int:
-    """For each episode that has a YouTube platform_analytics row with a
-    video id, pull the retention curve and write it back (curve + a mean
-    watchRatio into avg_view_pct — the metric the YT INSIGHT_RULES key off,
-    which is otherwise always NULL for YouTube)."""
-    yt_account = next((aid for (cid, plat), aid in acct_map.items() if plat == "youtube"), None)
-    # need a per-channel account id — map channel -> its yt account
+_MAX_RETENTION_CALLS_PER_SYNC = 12   # incremental — the rest catch up next run
+
+
+def _fetch_youtube_retention(provider, acct_map: dict, out: dict, db_path) -> list:
+    """Pull retention curves for YouTube videos still missing one. Returns
+    [(record_id, curve, avg_view_pct)] to apply in the write phase.
+
+    ONE call per (channel, video) — platform_analytics has many rows per
+    video (snapshots); they all get the same curve. Only the video's OWN
+    channel's YouTube account is queried (a cross-account query is a
+    guaranteed 404). Capped per run and holds no DB connection during the
+    HTTP calls."""
+    from hypogeum.db import get_connection
     yt_by_channel = {cid: aid for (cid, plat), aid in acct_map.items() if plat == "youtube"}
     if not yt_by_channel:
-        return 0
-    rows = conn.execute(
-        "SELECT pa.record_id, pa.episode_id, pa.platform_video_id, "
-        "       (SELECT et.channel_id FROM episode_topics et "
-        "        WHERE et.episode_id = pa.episode_id LIMIT 1) AS channel_id "
-        "FROM platform_analytics pa "
-        "WHERE pa.platform='youtube' AND pa.source='api' "
-        "AND pa.platform_video_id IS NOT NULL "
-        "AND (pa.retention_curve_json IS NULL OR pa.avg_view_pct IS NULL)"
-    ).fetchall()
-    done = 0
+        return []
+
+    conn = get_connection(Path(db_path) if db_path else None)
+    try:
+        rows = conn.execute(
+            "SELECT pa.record_id, pa.platform_video_id, "
+            "       (SELECT et.channel_id FROM episode_topics et "
+            "        WHERE et.episode_id = pa.episode_id LIMIT 1) AS channel_id "
+            "FROM platform_analytics pa "
+            "WHERE pa.platform='youtube' AND pa.source='api' "
+            "AND pa.platform_video_id IS NOT NULL "
+            "AND pa.retention_curve_json IS NULL"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    # group record_ids by (channel, video); skip videos whose channel has no
+    # YouTube account mapped.
+    by_video: dict = {}
     for r in rows:
         cid = r["channel_id"]
-        aid = yt_by_channel.get(cid) or yt_account
-        if not aid:
+        if cid not in yt_by_channel:
             continue
+        by_video.setdefault((cid, r["platform_video_id"]), []).append(r["record_id"])
+
+    updates: list = []
+    for i, ((cid, vid), record_ids) in enumerate(by_video.items()):
+        if i >= _MAX_RETENTION_CALLS_PER_SYNC:
+            break
         try:
             res = provider.get_youtube_video_retention(
-                account_id=aid, video_id=r["platform_video_id"], db_path=db_path)
+                account_id=yt_by_channel[cid], video_id=vid, db_path=db_path)
         except Exception as exc:  # noqa: BLE001
-            out["errors"][f"retention:{r['platform_video_id']}"] = str(exc)[:120]
+            out["errors"][f"retention:{vid}"] = str(exc)[:120]
             continue
-        data = res.get("data") or {}
-        curve = data.get("retentionCurve") or []
+        curve = (res.get("data") or {}).get("retentionCurve") or []
         if not curve:
             continue
         avp = _retention_avg_view_pct(curve)
-        conn.execute(
-            "UPDATE platform_analytics SET retention_curve_json = ?, "
-            "avg_view_pct = COALESCE(avg_view_pct, ?) WHERE record_id = ?",
-            (_json.dumps(curve), avp, r["record_id"]),
-        )
-        done += 1
-    return done
+        for rid in record_ids:
+            updates.append((rid, curve, avp))
+    return updates
 
 
 # ---------------------------------------------------------------------------

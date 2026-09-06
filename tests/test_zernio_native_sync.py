@@ -110,7 +110,7 @@ def test_channel_insights_and_demographics_stored_per_channel(db_path):
     assert tt["metrics"]["video_count"] == 9
 
     aud = zns.get_channel_audience("hypogeum", platform="youtube", db_path=db_path)
-    assert aud["youtube"]["age"][1]["label"] == "65-"
+    assert aud["youtube"]["age"][1]["label"] == "65+"  # normalised from YouTube's "65-"
     assert aud["youtube"]["gender"][0]["pct"] == 78.7
 
 

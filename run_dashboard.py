@@ -8285,6 +8285,14 @@ def intelligence_learning_page():
     return render_template("learning.html", state=state, changelog=changelog)
 
 
+@app.route("/intelligence/monetization")
+def intelligence_monetization_page():
+    from hypogeum.dashboard_analytics import get_growth_dashboard
+    ch = request.args.get("channel_id") or _scope_channel()
+    d = get_growth_dashboard(channel_id=ch or None, db_path=_db_path())
+    return render_template("monetization.html", d=d)
+
+
 @app.route("/intelligence/sync")
 def intelligence_sync_page():
     from hypogeum.platform_sync import get_sync_log, get_last_sync_by_platform

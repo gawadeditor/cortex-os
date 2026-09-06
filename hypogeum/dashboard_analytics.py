@@ -498,3 +498,110 @@ def get_learning_state(db_path: Optional[Path] = None) -> dict:
             "recommendations":      {},
             "learning_records":     [],
         }
+
+
+# ---------------------------------------------------------------------------
+# Growth & Monetization dashboard (2026-09-06) — where each channel stands
+# against every platform's payout bar, plus who is actually watching.
+# ---------------------------------------------------------------------------
+
+_DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def get_growth_dashboard(channel_id: Optional[str] = None,
+                         db_path: Optional[Path] = None) -> dict:
+    """Read-only. Assembles the Monetization / Growth page:
+      - monetization: per (channel, platform) distance from the payout bar
+      - audience: demographics + native platform metrics per channel
+      - best_time: the channel's own best-time-to-post slots
+      - comments: recent audience comments
+      - content_decay: how fast a post's engagement lands (factory-wide)
+    Scopes to one channel when channel_id is given, else every channel."""
+    out: dict = {"channel_scoped": bool(channel_id), "channels": []}
+
+    try:
+        from hypogeum.monetization_eligibility import (
+            compute_channel_monetization, compute_factory_monetization,
+        )
+        from hypogeum.channel_config import list_channel_profiles
+    except Exception:  # noqa: BLE001
+        return out
+
+    if channel_id:
+        target_ids = [channel_id]
+    else:
+        try:
+            target_ids = [c.channel_id for c in list_channel_profiles(db_path=db_path)]
+        except Exception:  # noqa: BLE001
+            target_ids = []
+
+    try:
+        from hypogeum.publishing.zernio_native_sync import (
+            get_channel_audience, get_channel_platform_insights,
+            get_recent_audience_comments,
+        )
+        from hypogeum.publishing.zernio_aggregate_sync import get_rollup
+        from hypogeum.audience_profile import summarize_observed_audience
+    except Exception:  # noqa: BLE001
+        get_channel_audience = get_channel_platform_insights = None  # type: ignore
+        get_recent_audience_comments = get_rollup = summarize_observed_audience = None  # type: ignore
+
+    for cid in target_ids:
+        row: dict = {"channel_id": cid}
+        try:
+            row["monetization"] = compute_channel_monetization(cid, db_path=db_path)
+        except Exception:  # noqa: BLE001
+            row["monetization"] = {"platforms": {}}
+        try:
+            row["audience"] = get_channel_audience(cid, db_path=db_path) if get_channel_audience else {}
+        except Exception:  # noqa: BLE001
+            row["audience"] = {}
+        try:
+            row["observed_audience"] = (summarize_observed_audience(cid, db_path=db_path)
+                                        if summarize_observed_audience else None)
+        except Exception:  # noqa: BLE001
+            row["observed_audience"] = None
+        row["platform_insights"] = {}
+        if get_channel_platform_insights:
+            for p in ("youtube", "tiktok", "instagram", "facebook"):
+                try:
+                    v = get_channel_platform_insights(cid, p, db_path=db_path)
+                    if v:
+                        row["platform_insights"][p] = v
+                except Exception:  # noqa: BLE001
+                    pass
+        try:
+            bt = get_rollup("best_time", scope=cid, db_path=db_path) if get_rollup else None
+            slots = sorted(
+                [s for s in (bt or {}).get("payload", []) if (s.get("post_count") or 0) >= 2],
+                key=lambda s: -(s.get("avg_engagement") or 0),
+            )[:5] if bt else []
+            row["best_time"] = [
+                {"day": _DOW[int(s["day_of_week"])] if 0 <= int(s["day_of_week"]) < 7 else "?",
+                 "hour": int(s["hour"]), "engagement": round(s.get("avg_engagement") or 0, 1),
+                 "posts": s.get("post_count")}
+                for s in slots
+            ]
+        except Exception:  # noqa: BLE001
+            row["best_time"] = []
+        try:
+            row["comments"] = (get_recent_audience_comments(cid, limit=8, db_path=db_path)
+                               if get_recent_audience_comments else [])
+        except Exception:  # noqa: BLE001
+            row["comments"] = []
+        out["channels"].append(row)
+
+    try:
+        fac = compute_factory_monetization(db_path=db_path)
+        out["eligible_pairs"] = fac.get("eligible_pairs", 0)
+        out["total_pairs"] = fac.get("total_pairs", 0)
+    except Exception:  # noqa: BLE001
+        out["eligible_pairs"] = out["total_pairs"] = 0
+
+    try:
+        decay = get_rollup("content_decay", scope="factory", db_path=db_path) if get_rollup else None
+        out["content_decay"] = (decay or {}).get("payload", []) if decay else []
+    except Exception:  # noqa: BLE001
+        out["content_decay"] = []
+
+    return out

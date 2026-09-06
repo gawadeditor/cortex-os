@@ -83,7 +83,10 @@ def _normalise_demographics(raw: dict) -> dict:
             label = r.get("dimension") or r.get("label")
             val = r.get("value") if r.get("value") is not None else r.get("pct")
             if label is not None and isinstance(val, (int, float)):
-                norm.append({"label": str(label), "value": float(val)})
+                # YouTube's oldest age bucket comes back as "65-" meaning
+                # "65 and over" — read it the way a human would.
+                lbl = "65+" if str(label) in ("65-", "65-100") else str(label)
+                norm.append({"label": lbl, "value": float(val)})
         if not norm:
             continue
         # YouTube returns age/gender as viewerPercentage but city/country as

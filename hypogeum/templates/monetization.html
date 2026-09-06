@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Monetization — Cortex</title>
+  {% include '_base_style.html' %}
+  {% from '_charts.html' import hbar, radial %}
+  <style>
+    .mon-req { display: grid; grid-template-columns: 1fr; gap: 10px; margin-top: 12px; }
+    .mon-req-row { display: grid; grid-template-columns: 1fr; gap: 4px; }
+    .mon-req-top { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 12px; }
+    .mon-req-label { color: var(--text); }
+    .mon-req-nums { font-family: var(--font-mono); font-size: 11px; color: var(--faint); white-space: nowrap; }
+    .mon-req-nums b { color: var(--text); font-weight: 600; }
+    .mon-oneof { font-size: 10px; color: var(--faint); text-transform: uppercase; letter-spacing: .06em; margin: 6px 0 2px; }
+    .mon-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .mon-headline { font-size: 12px; line-height: 1.5; margin-top: 12px; padding: 9px 11px;
+                    background: var(--overlay); border-radius: 8px; border: 1px solid var(--border); }
+    .mon-headline.is-good { background: var(--good-bg); border-color: color-mix(in srgb, var(--good) 40%, var(--border)); color: var(--good); }
+    .mon-note { font-size: 10.5px; color: var(--faint); line-height: 1.5; margin-top: 10px; }
+    .demo-row { display: grid; grid-template-columns: 92px 1fr 46px; gap: 10px; align-items: center;
+                font-size: 11.5px; margin-bottom: 7px; }
+    .demo-row .demo-lbl { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+    .demo-row .demo-pct { font-family: var(--font-mono); font-size: 11px; color: var(--text); text-align: right; }
+    .demo-group + .demo-group { margin-top: 14px; }
+    .demo-group-title { font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: var(--faint); margin-bottom: 8px; }
+    .bt-list { display: flex; flex-direction: column; gap: 6px; }
+    .bt-slot { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+               font-size: 12px; padding: 7px 10px; background: var(--overlay); border-radius: 7px; }
+    .bt-slot .bt-when { font-family: var(--font-mono); color: var(--text); }
+    .bt-slot .bt-eng { font-size: 10.5px; color: var(--faint); }
+    .bt-slot.is-top { border: 1px solid var(--accent-line); background: var(--accent-bg); }
+    .cmt { font-size: 12px; line-height: 1.55; padding: 9px 0; border-bottom: 1px solid var(--border); }
+    .cmt:last-child { border-bottom: 0; }
+    .cmt-meta { font-size: 10px; color: var(--faint); margin-top: 3px; text-transform: uppercase; letter-spacing: .05em; }
+    .decay-bars { display: flex; gap: 6px; align-items: flex-end; height: 84px; margin-top: 8px; }
+    .decay-bar { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 5px; }
+    .decay-bar .db-fill { width: 100%; background: var(--accent); border-radius: 3px 3px 0 0; min-height: 3px; }
+    .decay-bar .db-lbl { font-size: 9.5px; color: var(--faint); }
+    .decay-bar .db-val { font-family: var(--font-mono); font-size: 10px; color: var(--text); }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+{% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
+
+<div class="container">
+
+<div class="sub-nav">
+  <a href="/intelligence/learning"     class="sub-nav-link">Learning</a>
+  <a href="/intelligence/performance"  class="sub-nav-link">Performance</a>
+  <a href="/intelligence/monetization" class="sub-nav-link active">Monetization</a>
+  <a href="/intelligence/sync"         class="sub-nav-link">Sync health</a>
+</div>
+
+{% set _pairs = d.total_pairs or 0 %}
+{% call hero(
+     eyebrow='Monetization' ~ (' · this channel' if d.channel_scoped else ''),
+     title='How close each channel is to earning on each platform',
+     lede='Every platform pays out only above an audience-size and recent-activity bar. This is where each channel stands, measured from the analytics Cortex already collects — and the single number to move next.',
+     figure=(d.eligible_pairs ~ ' / ' ~ _pairs) if _pairs else '—',
+     figure_label='channel-platform pairs eligible',
+     pill=('All bars still ahead' if not d.eligible_pairs else (d.eligible_pairs ~ ' eligible')),
+     pill_class='is-warn' if not d.eligible_pairs else 'is-good') %}
+  <a class="btn" href="/intelligence/performance">{{ icon('analytics') }} Performance detail</a>
+{% endcall %}
+
+{% if not d.channels %}
+<div class="dv-empty">
+  {{ icon('dollar') }}
+  <div class="dv-empty-title">No channels to measure yet</div>
+  <div class="dv-empty-sub">Once a channel is configured and its platform accounts are connected, its distance to every payout bar shows up here.</div>
+</div>
+{% endif %}
+
+{% for ch in d.channels %}
+{% set mon = ch.monetization.platforms %}
+<section class="stack" style="margin-bottom: var(--space-2xl);">
+  {% if not d.channel_scoped %}
+  <h2 style="font-family:var(--font-display); font-size:16px; margin: var(--space-lg) 0 2px;">{{ ch.channel_id }}</h2>
+  {% endif %}
+
+  {# ── Eligibility grid ─────────────────────────────────────────────── #}
+  <div class="grid grid-2">
+    {% for platform, p in mon.items() %}
+    <div class="card {{ 'is-good' if p.eligible else 'is-warn' }}">
+      <div class="mon-head">
+        <div class="card-title">{{ icon('channels') }} {{ platform | friendly_platform }}</div>
+        {% if p.eligible %}
+          <span class="pill is-good">Eligible</span>
+        {% else %}
+          <span class="pill is-warn">Not yet</span>
+        {% endif %}
+      </div>
+      <div class="muted" style="font-size:11px; margin-top:4px;">{{ p.program }}</div>
+
+      {% set _all = p.requirements | rejectattr('one_of') | list %}
+      {% set _one = p.requirements | selectattr('one_of') | list %}
+      <div class="mon-req">
+        {% for r in _all %}
+        {% set _tone = 'good' if r.met else ('critical' if (r.pct or 0) < 33 else 'warn') %}
+        <div class="mon-req-row">
+          <div class="mon-req-top">
+            <span class="mon-req-label">{{ r.label }}</span>
+            <span class="mon-req-nums">
+              {% if r.tracked %}<b>{{ "{:,}".format(r.current | int) }}</b> / {{ "{:,}".format(r.target | int) }} {{ r.unit }}
+              {% else %}not tracked{% endif %}
+            </span>
+          </div>
+          {{ hbar(r.current if r.tracked else 0, r.target, tone=_tone) }}
+        </div>
+        {% endfor %}
+
+        {% if _one %}
+        <div class="mon-oneof">plus any one of</div>
+        {% for r in _one %}
+        {% set _tone = 'good' if r.met else ('critical' if (r.pct or 0) < 33 else 'warn') %}
+        <div class="mon-req-row">
+          <div class="mon-req-top">
+            <span class="mon-req-label">{{ r.label }}</span>
+            <span class="mon-req-nums">
+              {% if r.tracked %}<b>{{ "{:,}".format(r.current | int) }}</b> / {{ "{:,}".format(r.target | int) }} {{ r.unit }}
+              {% else %}not tracked{% endif %}
+            </span>
+          </div>
+          {{ hbar(r.current if r.tracked else 0, r.target, tone=_tone) }}
+        </div>
+        {% endfor %}
+        {% endif %}
+      </div>
+
+      <div class="mon-headline {{ 'is-good' if p.eligible }}">
+        {% if not p.eligible %}<b>Next:</b> {% endif %}{{ p.headline }}
+      </div>
+      <p class="mon-note">{{ p.note }}</p>
+    </div>
+    {% endfor %}
+  </div>
+
+  {# ── Who's watching + best time ───────────────────────────────────── #}
+  <div class="grid grid-2">
+    <div class="card">
+      <div class="card-title">{{ icon('review') }} Who's actually watching</div>
+      {% if ch.observed_audience %}
+        <p style="font-size:12px; line-height:1.55; margin:8px 0 14px; color:var(--text);">{{ ch.observed_audience }}</p>
+      {% endif %}
+      {% set _yt = ch.audience.get('youtube') or ch.audience.get('instagram') or {} %}
+      {% if _yt %}
+        {% for dim in ['age', 'gender', 'country'] %}
+          {% set rows = _yt.get(dim) %}
+          {% if rows %}
+          <div class="demo-group">
+            <div class="demo-group-title">{{ dim }}</div>
+            {% for row in rows[:6] %}
+            <div class="demo-row">
+              <span class="demo-lbl">{{ row.label }}</span>
+              {{ hbar(row.pct, 100, tone='accent') }}
+              <span class="demo-pct">{{ row.pct | round | int }}%</span>
+            </div>
+            {% endfor %}
+          </div>
+          {% endif %}
+        {% endfor %}
+      {% else %}
+        <div class="mon-note" style="margin-top:12px;">No demographic data yet — a platform needs roughly 100+ followers before it reports audience age, gender or geography.</div>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <div class="card-title">{{ icon('calendar') }} Best time to post <span class="muted" style="font-weight:400; text-transform:none; letter-spacing:0;">— UTC, this channel's own history</span></div>
+      {% if ch.best_time %}
+        <div class="bt-list" style="margin-top:12px;">
+          {% for s in ch.best_time %}
+          <div class="bt-slot {{ 'is-top' if loop.first }}">
+            <span class="bt-when">{{ s.day }} {{ "%02d:00"|format(s.hour) }}</span>
+            <span class="bt-eng">engagement {{ s.engagement }} · {{ s.posts }} posts</span>
+          </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="mon-note" style="margin-top:12px;">Not enough posting history yet to rank time slots.</div>
+      {% endif %}
+
+      {% if d.content_decay %}
+      <div class="card-title" style="margin-top:20px;">{{ icon('clock') }} When engagement lands</div>
+      <div class="decay-bars">
+        {% for b in d.content_decay %}
+        <div class="decay-bar">
+          <span class="db-val">{{ b.avg_pct_of_final | round | int }}%</span>
+          <span class="db-fill" style="height: {{ (b.avg_pct_of_final or 0) * 0.7 }}px;"></span>
+          <span class="db-lbl">{{ b.bucket_label }}</span>
+        </div>
+        {% endfor %}
+      </div>
+      <p class="mon-note">Share of a post's eventual engagement it has by each age. Judging a post before ~24h is judging noise.</p>
+      {% endif %}
+    </div>
+  </div>
+
+  {# ── Audience comments ────────────────────────────────────────────── #}
+  <div class="card">
+    <div class="card-title">{{ icon('mic') }} What the audience is saying</div>
+    {% if ch.comments %}
+      {% for c in ch.comments %}
+      <div class="cmt">
+        {{ c.text }}
+        <div class="cmt-meta">{{ c.platform | friendly_platform }}{% if c.like_count %} · {{ c.like_count }} likes{% endif %}{% if c.author %} · {{ c.author }}{% endif %}</div>
+      </div>
+      {% endfor %}
+    {% else %}
+      <div class="mon-note" style="margin-top:12px;">No audience comments yet. Every comment so far is the channel's own pinned reply — real viewer comments will appear here as they arrive.</div>
+    {% endif %}
+  </div>
+</section>
+{% endfor %}
+
+</div>
+</body>
+</html>

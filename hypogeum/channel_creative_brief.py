@@ -35,6 +35,7 @@ _FALLBACK = {
     "genre": "short-form informative video",
     "format": "a short narrated video",
     "audience": "a general audience",
+    "observed_audience": None,
     "tone": "clear and engaging",
     "language": "en",
     "content_pillars": [],
@@ -239,12 +240,20 @@ def build_creative_brief(channel_id: str, *, db_path: Optional[Path] = None) -> 
 
         fmt = "a one-minute vertical animated short" if short_native else "a narrated video episode"
 
+        observed_audience = None
+        try:
+            from hypogeum.audience_profile import summarize_observed_audience
+            observed_audience = summarize_observed_audience(channel_id, db_path=db_path)
+        except Exception:  # noqa: BLE001
+            pass
+
         return {
             "channel_id": channel_id,
             "channel_name": ch.name,
             "genre": genre,
             "format": fmt,
             "audience": audience or "this channel's audience",
+            "observed_audience": observed_audience,
             "tone": tone or "clear and engaging",
             "language": bp.language or "en",
             "content_pillars": pillars,

@@ -70,6 +70,16 @@ def _investigative(tone: str) -> bool:
                                 "analytical", "rigorous", "documentary"))
 
 
+def _hook_library(kind: str) -> str:
+    """The Hook Pattern Library text, appended to the virality directive so
+    NA / SE / EP all inherit it (they already read virality_directive)."""
+    try:
+        from hypogeum.hook_patterns import render_hook_library
+        return render_hook_library(kind)
+    except Exception:  # noqa: BLE001 -- never break brief assembly over the hook menu
+        return ""
+
+
 def _virality_directive(tone: str, audience: str, short_native: bool) -> str:
     """What "built to be watched to the last second and worth sharing" means
     for THIS channel. Read by the Narrative Architect and Script Engine —
@@ -101,6 +111,7 @@ def _virality_directive(tone: str, audience: str, short_native: bool) -> str:
             f"- VOICE: tense, vivid, concrete, present tense where it can be, second "
             f"person allowed. No hedging, no throat-clearing; every sentence earns the "
             f"next."
+            + _hook_library("investigative")
         )
     if _gentle(tone):
         return (
@@ -140,6 +151,7 @@ def _virality_directive(tone: str, audience: str, short_native: bool) -> str:
             f"- VOICE: short sentences, simple words a {audience or 'child aged 2-6'} "
             f"already knows, soft sounds, a slow lullaby cadence with room to breathe "
             f"between lines. Present tense. Concrete over abstract every time."
+            + _hook_library("gentle")
         )
     return (
         f"Every script for this channel is built to be watched to the end and to be "
@@ -147,6 +159,7 @@ def _virality_directive(tone: str, audience: str, short_native: bool) -> str:
         f"story — never a generic setup. Keep one clear through-line the whole way, "
         f"pay off what the opening promised, and end on a line that lands rather than "
         f"trailing off. Concrete and specific beats vague and comprehensive."
+        + _hook_library("neutral")
     )
 
 

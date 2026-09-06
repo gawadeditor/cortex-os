@@ -99,6 +99,8 @@ RETENTION INSTRUMENTATION
 
 The `channel_brief.virality_directive` field is authoritative: every architecture you build has one job — the finished video is watched to the last frame and is worth sharing. Build the structure to serve that, in this channel's own mechanics (an investigative channel earns the watch with a true scroll-stopping hook and one escalating spine that pays off; a gentle channel earns it with warmth and a return-tomorrow habit, never tension).
 
+The directive's "HOOK PATTERNS" list is a menu of opening moves for the first beat. Shape the opening section so one of those patterns lands cleanly — pick the pattern that the actual research/story best supports, and note it in the opening section's rationale. If none fits without distorting the story or foreshadowing more than the episode pays off, build the opening around the strongest honest fact instead; that is allowed.
+
 Design every section boundary to create a reason to keep watching. Open loops, unanswered questions, and foreshadowing signals are your primary tools. The viewer_question_state field tracks what the viewer is wondering at the end of each section — this is your primary quality check.
 
 If viewer_question_state at any boundary is empty or trivial, the section has not done its job. Every open loop you open must be closed before the episode ends — teasing a payoff and never delivering it is a failure, not intrigue.

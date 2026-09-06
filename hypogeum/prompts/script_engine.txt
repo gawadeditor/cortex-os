@@ -389,6 +389,14 @@ If the input package contains "production_mode": "short_native", you are writing
   - The opening hook line must NOT contain a year, a full date, or a place-name-first
     clause on an investigative channel. If the strongest fact is tied to a year, lead
     with the fact and let the year arrive later.
+  - HOOK PATTERN: write beat 1 to one of the patterns in `channel_brief.virality_directive`'s
+    "HOOK PATTERNS" list, choosing the best fit for this topic. Record it in
+    script_integrity.short_native.hook_pattern (the [id]). If no pattern fits without
+    distorting the story or promising more than the episode delivers, write the
+    strongest honest opening line, set hook_pattern to "none", and put a one-line
+    note of what you considered in script_integrity.short_native.hook_pattern_note.
+    "none" is acceptable and never fails the script — only the year/date/place and
+    spine/stinger rules do.
   - CTA: no separate spoken subscribe beat, and no closing subscribe/follow narration
     beat of any kind — the STINGER is the last thing the viewer hears. cta_count = 0.
     Put the follow ask in exactly ONE text_overlay instead: overlay_type
@@ -397,7 +405,8 @@ If the input package contains "production_mode": "short_native", you are writing
     posting cadence ("every week", "every day") — the input package does not tell
     you how often this channel actually publishes, and a wrong claim is worse than
     none. This is the only text_overlay a short-native script carries.
-  - Fill script_integrity.short_native: hook_opener_type, spine_question,
+  - Fill script_integrity.short_native: hook_opener_type, hook_pattern (a [id] from
+    the virality_directive HOOK PATTERNS list, or "none"), spine_question,
     spine_paid_off (true only if a payoff beat actually closes spine_question),
     has_stinger (true only if the final beat meets the STINGER / RETURN LINE rules),
     story_problem (one short phrase naming the small problem/obstacle — required on a

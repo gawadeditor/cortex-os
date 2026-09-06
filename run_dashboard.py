@@ -8468,10 +8468,24 @@ def client_accounts_link(client_id):
     platform = request.form.get("platform") or ""
     action = request.form.get("action") or "link"
     try:
-        if action == "unlink":
+        if action == "sync":
+            from hypogeum.publishing.zernio_accounts import sync_zernio_accounts
+            res = sync_zernio_accounts(_db_path())
+            msg = (f"Synced {res.get('synced', 0)} Zernio accounts"
+                   if res.get("ok") else f"Zernio sync failed: {res.get('error')}")
+        elif action == "unlink":
             unlink_managed_account(request.form.get("managed_account_id") or "",
                                    db_path=_db_path())
             msg = f"Unlinked {platform}"
+        elif action == "manual":
+            handle = (request.form.get("handle") or "").strip()
+            if not platform or not handle:
+                msg = "Pick a platform and enter the account handle."
+            else:
+                link_managed_account(client_id, platform, handle=handle,
+                                     db_path=_db_path())
+                msg = (f"Added {platform} {handle} — analytics attach once Zernio "
+                       "reports this account (Sync after connecting it there).")
         else:
             link_managed_account(
                 client_id, platform,

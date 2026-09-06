@@ -71,6 +71,23 @@ def test_account_link_unlink_route(app_client):
     assert cm.list_managed_accounts(cid, db_path=db) == []
 
 
+def test_account_manual_add(app_client):
+    cl, cid, db = app_client
+    r = cl.post(f"/client/{cid}/accounts/link",
+                data={"action": "manual", "platform": "tiktok", "handle": "@northwind"})
+    assert r.status_code == 302
+    accts = cm.list_managed_accounts(cid, db_path=db)
+    tt = [a for a in accts if a["platform"] == "tiktok"]
+    assert tt and tt[0]["handle"] == "@northwind"
+    assert tt[0]["provider_account_id"] is None  # pending Zernio
+
+    # missing handle → no row created, no crash
+    r2 = cl.post(f"/client/{cid}/accounts/link",
+                 data={"action": "manual", "platform": "facebook", "handle": ""})
+    assert r2.status_code == 302
+    assert not [a for a in cm.list_managed_accounts(cid, db_path=db) if a["platform"] == "facebook"]
+
+
 def test_manual_url_add(app_client):
     cl, cid, db = app_client
     r = cl.post(f"/client/{cid}/content/add",

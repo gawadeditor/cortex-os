@@ -1057,17 +1057,42 @@ class TestBlackTailDetection:
 
 class TestQualifyAssetRejectsBlackTail:
 
-    def test_rejects_clip_with_black_tail(self, tmp_path):
-        """The exact real-world shape: an otherwise-valid, correctly-
-        resolved clip whose content goes black 4.83s into an 8s duration
-        and never recovers must be rejected -- and, since there is
-        nothing valid to enhance, the provider must never be called."""
+    def test_trims_black_tail_when_enough_real_content_remains(self, tmp_path):
+        """2026-09-06: a trailing black region that still leaves >=3s of
+        real content is TRIMMED off (not rejected) -- the clip then
+        continues down the normal enhancement path. Regression for
+        ep_be6dc4f7 s06/s08 (veo3-image-to-video fading to black 1-2s
+        early), which lost the whole episode to an outright reject."""
         clip_path = tmp_path / "sc_black_tail.mp4"
-        _make_black_tail_clip(clip_path, 1920, 1080, real_seconds=4.83, black_seconds=3.17)
+        _make_black_tail_clip(clip_path, 1920, 1080, real_seconds=5.0, black_seconds=3.0)
+        from hypogeum.source_enhancement import _probe_video_stream
+        assert _probe_video_stream(clip_path)["duration"] > 7.5   # ~8s before trim
 
         provider = FakeEnhancementProvider()
         register_provider("fake_black_tail", lambda: provider)
         config = _make_config(ENHANCEMENT_PROVIDER="fake_black_tail")
+        asset = {"scene_id": "s06", "source_enhancement": None}
+
+        changed = qualify_asset(asset, clip_path, "short", config, "ep_q", MagicMock())
+
+        assert changed is True
+        se = asset["source_enhancement"]
+        # NOT rejected for the tail — trimmed, then handed to the enhancer
+        assert se["validation_result"] != "rejected_black_tail"
+        assert provider.calls == ["s06"]                    # provider WAS called on the clean clip
+        assert not _clip_has_black_tail(clip_path)           # tail is gone
+        assert _probe_video_stream(clip_path)["duration"] < 5.5   # trimmed shorter
+
+    def test_rejects_clip_that_is_mostly_black(self, tmp_path):
+        """Below the real-content floor (only ~2s real of an 8s clip) there
+        is nothing worth trimming to -- still an outright reject, provider
+        never called."""
+        clip_path = tmp_path / "sc_mostly_black.mp4"
+        _make_black_tail_clip(clip_path, 1920, 1080, real_seconds=2.0, black_seconds=6.0)
+
+        provider = FakeEnhancementProvider()
+        register_provider("fake_mostly_black", lambda: provider)
+        config = _make_config(ENHANCEMENT_PROVIDER="fake_mostly_black")
         asset = {"scene_id": "s06__extra1", "source_enhancement": None}
 
         changed = qualify_asset(asset, clip_path, "short", config, "ep_q", MagicMock())

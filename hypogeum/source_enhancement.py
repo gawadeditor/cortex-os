@@ -406,34 +406,36 @@ def check_and_trim_reference_frame_leak(asset: dict, clip_path: Path, log) -> bo
 
 _BLACK_TAIL_MIN_BLACK_SECONDS = 0.5   # ffmpeg blackdetect's own minimum run length
 _BLACK_TAIL_END_TOLERANCE_S = 0.2     # a black region ending within this of EOF counts as "the tail"
+_BLACK_TAIL_MIN_KEPT_SECONDS = 3.0    # below this much real content left, a trim can't credibly cover a beat — reject
+_BLACK_TAIL_TRIM_SAFETY_MARGIN_S = 0.15  # cut slightly before black_start so no black bleeds past the trim
 
 
-def _clip_has_black_tail(clip_path: Path) -> bool:
+def _detect_black_tail_start(clip_path: Path) -> Optional[float]:
     """
-    True if `clip_path`'s content fades/cuts to black and stays black
-    through (or almost through) the end of the file — the real
-    ep_f3619022 Short 001 defect: an 8s provider-generated clip played
-    real content for ~4.8s then held pure black for its remaining ~3.1s.
+    The `black_start` of a black region that runs to (or within
+    _BLACK_TAIL_END_TOLERANCE_S of) `clip_path`'s end — i.e. the timestamp
+    at which real content stops and the trailing-black defect begins.
+    None if there is no such trailing-black region.
 
-    A clip like this is technically valid (decodable, correct resolution,
-    correct duration) so no other check in this module catches it. It
-    matters specifically because hypogeum.agents.video_renderer only
-    trims/stretches the LAST clip in a multi-clip beat — any EARLIER clip
-    is trusted to play in full, so a black tail on a non-last clip reaches
-    the final render completely unexamined.
+    The real ep_f3619022 Short 001 defect: an 8s provider-generated clip
+    played real content for ~4.8s then held pure black for its remaining
+    ~3.1s. Also seen 2026-09-06 on veo3-image-to-video (ep_be6dc4f7 s06/s08
+    fading to black 1-2s early). Such a clip is technically valid
+    (decodable, correct resolution, correct duration) so no other check in
+    this module catches it; it matters because hypogeum.agents.
+    video_renderer only trims/stretches the LAST clip in a multi-clip beat,
+    so a black tail on any earlier clip reaches the final render unexamined.
 
-    Uses ffmpeg's blackdetect filter (the same primitive already used
-    elsewhere in this codebase for pixel-level black-region evidence) and
-    checks only whether the LAST detected black region's end lands at or
-    near the clip's own end — a black flash or dark passage earlier in the
-    clip, or one that recovers to real content before the file ends, is
-    not this defect and is not flagged.
+    Uses ffmpeg's blackdetect filter and looks only at the LAST detected
+    black region — a black flash or dark passage earlier in the clip, or
+    one that recovers to real content before the file ends, is not this
+    defect and returns None.
     """
     try:
         probe = _probe_video_stream(clip_path)
         duration = probe["duration"] if probe else 0.0
         if duration <= 0:
-            return False  # corrupt/unreadable source — the dedicated check above handles this
+            return None  # corrupt/unreadable source — the dedicated check handles this
 
         result = subprocess.run(
             [
@@ -444,18 +446,63 @@ def _clip_has_black_tail(clip_path: Path) -> bool:
             capture_output=True, text=True, timeout=60,
         )
         stderr = result.stderr or ""
+        last_black_start: Optional[float] = None
         last_black_end: Optional[float] = None
         for line in stderr.splitlines():
-            if "black_end:" not in line:
+            if "black_start:" not in line or "black_end:" not in line:
                 continue
             try:
-                last_black_end = float(line.split("black_end:", 1)[1].split()[0])
+                bs = float(line.split("black_start:", 1)[1].split()[0])
+                be = float(line.split("black_end:", 1)[1].split()[0])
             except (IndexError, ValueError):
                 continue
-        if last_black_end is None:
-            return False
-        return (duration - last_black_end) <= _BLACK_TAIL_END_TOLERANCE_S
+            last_black_start, last_black_end = bs, be
+        if last_black_end is None or last_black_start is None:
+            return None
+        if (duration - last_black_end) <= _BLACK_TAIL_END_TOLERANCE_S:
+            return last_black_start
+        return None
     except Exception:
+        return None
+
+
+def _clip_has_black_tail(clip_path: Path) -> bool:
+    """True if `clip_path`'s content fades/cuts to black and stays black
+    through (or almost through) the end — thin bool wrapper over
+    _detect_black_tail_start()."""
+    return _detect_black_tail_start(clip_path) is not None
+
+
+def _trim_trailing_to_duration(clip_path: Path, keep_seconds: float, log) -> bool:
+    """Re-encode `clip_path` keeping only its first `keep_seconds`, replacing
+    it in place — discards a trailing-black region the provider generated
+    instead of real content, the mirror of _trim_leading_seconds() for the
+    reference-frame leak. Never raises; leaves the original untouched on any
+    failure."""
+    if keep_seconds <= 0:
+        return False
+    tmp = clip_path.with_suffix(".blacktrim.tmp.mp4")
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", str(clip_path),
+                "-t", f"{keep_seconds:.3f}",
+                "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+                "-an",
+                str(tmp),
+            ],
+            capture_output=True, timeout=60,
+        )
+        if result.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+            tmp.unlink(missing_ok=True)
+            log.warn("black_tail_trim_failed", clip=str(clip_path),
+                     stderr=(result.stderr or b"").decode("utf-8", "ignore")[-300:])
+            return False
+        tmp.replace(clip_path)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        tmp.unlink(missing_ok=True)
+        log.warn("black_tail_trim_error", clip=str(clip_path), error=str(exc))
         return False
 
 
@@ -870,24 +917,47 @@ def qualify_asset(
         log.warn("source_enhancement_rejected_corrupt", scene_id=scene_id, clip_path=str(clip_path))
         return True
 
-    # --- Trailing black content is never usable coverage (2026-08-07) ---
-    # Real production defect found in ep_f3619022 Short 001: a coverage-
-    # fill extra clip's own generated content faded to pure black 4.83s
-    # into its 8s duration and never recovered. hypogeum.agents.
-    # video_renderer only trims/stretches the LAST clip in a multi-clip
-    # beat -- every earlier clip is trusted to play in full, so a black
-    # tail on a non-last clip reached the final render unexamined. A clip
-    # is technically decodable and correctly resolved here (not corrupt),
-    # so the corrupt-source check above does not catch it; this is a
-    # distinct content-quality defect, checked independently.
-    if _clip_has_black_tail(clip_path):
-        asset["source_enhancement"] = _record(
-            applied=False, required=False,
-            validation_result="rejected_black_tail",
-            required_width=required_width, required_height=required_height,
-        )
-        log.warn("source_enhancement_rejected_black_tail", scene_id=scene_id, clip_path=str(clip_path))
-        return True
+    # --- Trailing black content (2026-08-07 detection, 2026-09-06 trim) ---
+    # Real defect: ep_f3619022 Short 001 played real content for 4.83s of an
+    # 8s clip then held pure black; ep_be6dc4f7 s06/s08 (veo3-image-to-video)
+    # faded to black 1-2s early. Technically decodable and correctly
+    # resolved (not corrupt), and hypogeum.agents.video_renderer only
+    # trims/stretches the LAST clip in a multi-clip beat, so a black tail on
+    # any earlier clip would reach the final render unexamined.
+    # A trailing-black region is TRIMMED off when >= _BLACK_TAIL_MIN_KEPT_
+    # SECONDS of real content remains (the renderer stretches a short clip
+    # to its beat, setpts <=2x, and coverage_check still bounds an
+    # over-short one). Only below that floor is the clip rejected outright
+    # — the old behavior was an unconditional reject, which threw away 5-7s
+    # of usable content over a 1-2s black tail and lost whole episodes.
+    # Not model-branched (a blackdetect result), so qualify_asset()'s
+    # "never branch on model name" rule is intact.
+    _black_start = _detect_black_tail_start(clip_path)
+    if _black_start is not None:
+        _kept = max(0.0, _black_start - _BLACK_TAIL_TRIM_SAFETY_MARGIN_S)
+        if _kept >= _BLACK_TAIL_MIN_KEPT_SECONDS and _trim_trailing_to_duration(clip_path, _kept, log):
+            log.info(
+                "source_enhancement_black_tail_trimmed", scene_id=scene_id,
+                black_start=round(_black_start, 3), kept_seconds=round(_kept, 3),
+            )
+            # clip is now clean; width/height are unchanged by a duration
+            # trim, so the checks below continue from here unaffected.
+        else:
+            asset["source_enhancement"] = _record(
+                applied=False, required=False,
+                validation_result="rejected_black_tail",
+                failure_reason=(
+                    f"trailing black from {_black_start:.2f}s leaves only "
+                    f"{_kept:.2f}s real content (min {_BLACK_TAIL_MIN_KEPT_SECONDS:.1f}s)"
+                ),
+                required_width=required_width, required_height=required_height,
+            )
+            log.warn(
+                "source_enhancement_rejected_black_tail", scene_id=scene_id,
+                clip_path=str(clip_path), black_start=round(_black_start, 3),
+                kept_seconds=round(_kept, 3),
+            )
+            return True
 
     original_resolution = f"{width}x{height}"
 

@@ -197,6 +197,59 @@ class TestExtractInsights:
 
 
 # ===========================================================================
+# TestSkipRateAndEngagementRateRules — signals that actually have Zernio data
+# ===========================================================================
+
+class TestSkipRateAndEngagementRateRules:
+    def test_high_instagram_skip_rate_fires_negative_hook_insight(self, db_path):
+        store_platform_metrics("ep_skip", "instagram",
+                               {"views": 200, "skip_rate": 92.0},
+                               source="api", db_path=db_path)
+        insights = extract_insights("ep_skip", db_path=db_path)
+        by_type = {i["insight_type"]: i for i in insights}
+        assert "reel_skipped_immediately" in by_type
+        # higher skip = worse → strength must be negative despite the `gt` rule
+        assert by_type["reel_skipped_immediately"]["signal_strength"] < 0
+        assert by_type["reel_skipped_immediately"]["affected_dim"] == "hook"
+
+    def test_low_instagram_skip_rate_fires_positive_insight(self, db_path):
+        store_platform_metrics("ep_ok", "instagram",
+                               {"views": 200, "skip_rate": 38.0},
+                               source="api", db_path=db_path)
+        insights = extract_insights("ep_ok", db_path=db_path)
+        by_type = {i["insight_type"]: i for i in insights}
+        assert "low_reel_skip" in by_type
+        assert by_type["low_reel_skip"]["signal_strength"] > 0
+
+    def test_weak_youtube_engagement_rate_fires_topic_insight(self, db_path):
+        store_platform_metrics("ep_er", "youtube",
+                               {"views": 1000, "engagement_rate": 0.8},
+                               source="api", db_path=db_path)
+        insights = extract_insights("ep_er", db_path=db_path)
+        by = {(i["insight_type"], i["affected_dim"]) for i in insights}
+        assert ("weak_engagement", "topic") in by
+
+    def test_strong_tiktok_engagement_rate_fires_positive(self, db_path):
+        store_platform_metrics("ep_tt", "tiktok",
+                               {"views": 500, "engagement_rate": 7.5},
+                               source="api", db_path=db_path)
+        insights = extract_insights("ep_tt", db_path=db_path)
+        by_type = {i["insight_type"]: i for i in insights}
+        assert "strong_engagement" in by_type
+        assert by_type["strong_engagement"]["signal_strength"] > 0
+
+    def test_skip_rate_only_applies_to_instagram(self, db_path):
+        # a youtube row with a skip_rate value must not fire the IG rule
+        store_platform_metrics("ep_yt", "youtube",
+                               {"views": 1000, "skip_rate": 95.0},
+                               source="api", db_path=db_path)
+        insights = extract_insights("ep_yt", db_path=db_path)
+        assert not any(i["insight_type"].endswith("reel_skip")
+                       or i["insight_type"] == "reel_skipped_immediately"
+                       for i in insights)
+
+
+# ===========================================================================
 # TestEngagementInsights
 # ===========================================================================
 

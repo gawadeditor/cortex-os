@@ -81,6 +81,9 @@ class InsightRule:
     affected_dim:  str
     strength_scale: float = 1.0
     detail_tpl:    str    = ""
+    # For metrics where "higher is worse" (e.g. skip_rate): flip the sign of
+    # compute_strength so a `gt` rule still yields a NEGATIVE signal.
+    invert_sign:   bool  = False
 
     def fires(self, value: Optional[float]) -> bool:
         """Return True if this rule fires for the given metric value."""
@@ -105,10 +108,13 @@ class InsightRule:
         thr = max(abs(self.threshold), 1e-9)
         if self.comparator in ("lt", "le"):
             dist = (self.threshold - value) / thr
-            return round(-min(1.0, dist * self.strength_scale), 3)
+            strength = -min(1.0, dist * self.strength_scale)
         else:
             dist = (value - self.threshold) / thr
-            return round(min(1.0, dist * self.strength_scale), 3)
+            strength = min(1.0, dist * self.strength_scale)
+        if self.invert_sign:
+            strength = -strength
+        return round(strength, 3)
 
     def format_detail(self, value: float) -> str:
         try:
@@ -213,6 +219,73 @@ INSIGHT_RULES: list[InsightRule] = [
         insight_type="strong_fb_watch", affected_dim="pacing",
         strength_scale=1.0,
         detail_tpl="Avg watch {val:.0f}s > 45s — good retention signal on Facebook feed",
+    ),
+    # ── Instagram Reels skip rate ───────────────────────────────────────────
+    # Zernio reports reelsSkipRate directly for Instagram — unlike
+    # avg_view_pct (which needs a watch-time echo Zernio only sends for IG)
+    # this is a first-class retention signal. Higher = worse → invert_sign.
+    InsightRule(
+        platform="instagram", metric="skip_rate", comparator="gt", threshold=80.0,
+        insight_type="reel_skipped_immediately", affected_dim="hook",
+        strength_scale=1.5, invert_sign=True,
+        detail_tpl="Reel skip rate {val:.0f}% — most viewers scroll past in the first seconds; the opening frame and first line need a full rework",
+    ),
+    InsightRule(
+        platform="instagram", metric="skip_rate", comparator="gt", threshold=60.0,
+        insight_type="high_reel_skip", affected_dim="hook",
+        strength_scale=1.0, invert_sign=True,
+        detail_tpl="Reel skip rate {val:.0f}% > 60% — the hook is losing the majority of viewers early",
+    ),
+    InsightRule(
+        platform="instagram", metric="skip_rate", comparator="lt", threshold=45.0,
+        insight_type="low_reel_skip", affected_dim="hook",
+        strength_scale=1.2, invert_sign=True,
+        detail_tpl="Reel skip rate {val:.0f}% < 45% — the opening is holding the scroll; preserve this hook style",
+    ),
+    # ── Platform engagement rate (Zernio-computed, in percent) ──────────────
+    # This is the signal that actually has data on YouTube / TikTok /
+    # Facebook, where Zernio reports no watch-time so every avg_view_pct rule
+    # above is permanently dark. Mapped to `topic`: engagement rate is the
+    # audience telling us whether they care about the subject/angle at all.
+    InsightRule(
+        platform="youtube", metric="engagement_rate", comparator="lt", threshold=1.5,
+        insight_type="weak_engagement", affected_dim="topic", strength_scale=1.3,
+        detail_tpl="Engagement {val:.1f}% < 1.5% on YouTube — the view isn't converting into a like or comment; topic pull or framing is weak",
+    ),
+    InsightRule(
+        platform="youtube", metric="engagement_rate", comparator="gt", threshold=4.0,
+        insight_type="strong_engagement", affected_dim="topic", strength_scale=1.2,
+        detail_tpl="Engagement {val:.1f}% > 4% on YouTube — this topic and angle resonate; do more of it",
+    ),
+    InsightRule(
+        platform="tiktok", metric="engagement_rate", comparator="lt", threshold=2.0,
+        insight_type="weak_engagement", affected_dim="topic", strength_scale=1.3,
+        detail_tpl="Engagement {val:.1f}% < 2% on TikTok — content isn't provoking a reaction",
+    ),
+    InsightRule(
+        platform="tiktok", metric="engagement_rate", comparator="gt", threshold=6.0,
+        insight_type="strong_engagement", affected_dim="topic", strength_scale=1.2,
+        detail_tpl="Engagement {val:.1f}% > 6% on TikTok — strong reaction; preserve this subject and format",
+    ),
+    InsightRule(
+        platform="instagram", metric="engagement_rate", comparator="lt", threshold=1.0,
+        insight_type="weak_engagement", affected_dim="topic", strength_scale=1.3,
+        detail_tpl="Engagement {val:.1f}% < 1% on Instagram — the reel isn't driving saves or comments",
+    ),
+    InsightRule(
+        platform="instagram", metric="engagement_rate", comparator="gt", threshold=3.0,
+        insight_type="strong_engagement", affected_dim="topic", strength_scale=1.2,
+        detail_tpl="Engagement {val:.1f}% > 3% on Instagram — strong reel engagement for this subject",
+    ),
+    InsightRule(
+        platform="facebook", metric="engagement_rate", comparator="lt", threshold=0.3,
+        insight_type="weak_engagement", affected_dim="topic", strength_scale=1.0,
+        detail_tpl="Engagement {val:.2f}% < 0.3% on Facebook — the views are passive autoplay, not real attention",
+    ),
+    InsightRule(
+        platform="facebook", metric="engagement_rate", comparator="gt", threshold=1.0,
+        insight_type="strong_engagement", affected_dim="topic", strength_scale=1.0,
+        detail_tpl="Engagement {val:.2f}% > 1% on Facebook — unusually strong for the FB feed",
     ),
 ]
 

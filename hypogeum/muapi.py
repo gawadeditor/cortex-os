@@ -1770,6 +1770,63 @@ def submit_scene(
                     scene_id=scene_id, attempt=_attempt + 1, reason=failure_reason,
                 )
                 break
+
+        # Stranded-authorization recovery (2026-09-06). A ':primary'/':fallback'
+        # attempt whose poll timed out post-submission leaves that identity's
+        # AuthorizationRecord permanently at 'submitting' (an honest
+        # "acceptance unknown"), and reconcile_stuck_scene_authorization()
+        # deliberately will NOT clear it when the job turns out to have
+        # completed. submission_gate check 03_authorization_active_and_unconsumed
+        # then denies EVERY retry on that same identity identically
+        # ("authorization state is 'submitting', not 'authorized'") — losing a
+        # whole otherwise-complete episode to one scene (observed live:
+        # ep_f1b11fed s09 2026-09-06, and the ep_e736775e / ep_4a982634 class
+        # before it). Unlike a flaky-scene retry this is deterministic on those
+        # identities but a FRESH ':recovery{n}' identity — its own clean
+        # authorization/envelope/budget rows — fixes it deterministically, so
+        # spend up to _MAX_STRANDED_AUTH_RECOVERIES extra paid attempts on it
+        # even after the ordinary MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE budget is
+        # spent. Still bounded by the grant ledger, the plan weekly reservation
+        # and hypogeum.muapi_spend_breaker. A systemic failure never reaches
+        # here (the loop above already broke on it).
+        _STRANDED_AUTH_MARKERS = (
+            "03_authorization_active_and_unconsumed",
+            "authorization state is 'submitting'",
+        )
+        _MAX_STRANDED_AUTH_RECOVERIES = 1
+        _stranded_recoveries = 0
+        while (
+            manifest is None
+            and any(mk in str(failure_reason) for mk in _STRANDED_AUTH_MARKERS)
+            and not _scene_failure_is_systemic(failure_reason)
+            and _stranded_recoveries < _MAX_STRANDED_AUTH_RECOVERIES
+        ):
+            _stranded_recoveries += 1
+            _recovery_generation = _max_attempts + _stranded_recoveries  # always a fresh :recovery{n}
+            log.info(
+                "muapi_gate_path_stranded_auth_recovery",
+                scene_id=scene_id, recovery_generation=_recovery_generation,
+                prior_reason=failure_reason,
+            )
+            manifest, failure_reason = _submit_scene_via_gate(
+                channel_id=channel_id, grant=grant, prompt=fallback_prompt, tier=primary_tier,
+                reference_image_url=reference_image_url, scene_id=scene_id, short_id=short_id,
+                aspect_ratio=aspect_ratio, requested_duration=requested_duration, episode_id=eid,
+                output_dir=output_dir, config=config, log=log, is_fallback=False,
+                repair_fallback_ok=allow_i2v_to_t2v_repair_fallback,
+                recovery_generation=_recovery_generation,
+            )
+            if manifest is not None:
+                log.info(
+                    "muapi_gate_path_recovered_via_stranded_auth_recovery",
+                    scene_id=scene_id, recovery_generation=_recovery_generation,
+                )
+                return manifest
+            log.warn(
+                "muapi_gate_path_attempt_failed",
+                scene_id=scene_id, attempt=f"recovery{_recovery_generation}", reason=failure_reason,
+            )
+
         return {
             "scene_id": scene_id, "asset_id": None, "generation_status": "generation_failed",
             "provider": "muapi", "tier_used": None, "model_used": None, "prompt_used": None,

@@ -641,6 +641,42 @@ class TestPerSceneRetryLoop:
         assert res["generation_status"] == "generation_failed"
         assert calls == [("PRIMARY", False, 0)]
 
+    def test_stranded_submitting_auth_escalates_to_a_fresh_recovery_key(self, monkeypatch):
+        # attempts=1: the ordinary loop runs once (:primary), is denied by
+        # the gate because that identity's prior authorization stranded at
+        # 'submitting' -> one FRESH :recovery key is still tried.
+        cfg = make_config()
+        cfg.MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE = 1
+        ok = {"scene_id": "s01b01", "asset_id": "a", "generation_status": "generated"}
+        res, calls = self._run(monkeypatch, cfg, [
+            (None, "gate_denied[03_authorization_active_and_unconsumed]: authorization "
+                   "state is 'submitting', not 'authorized' (terminal=False)"),
+            (ok, None),
+        ])
+        assert res["generation_status"] == "generated"
+        assert calls[0] == ("PRIMARY", False, 0)
+        assert calls[1][1] is False and calls[1][2] >= 1  # a fresh :recovery{n} identity
+
+    def test_stranded_auth_recovery_is_bounded_not_infinite(self, monkeypatch):
+        cfg = make_config()
+        cfg.MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE = 1
+        stuck = (None, "gate_denied[03_authorization_active_and_unconsumed]: "
+                       "authorization state is 'submitting', not 'authorized'")
+        res, calls = self._run(monkeypatch, cfg, [stuck, stuck, stuck, stuck])
+        assert res["generation_status"] == "generation_failed"
+        assert len(calls) == 2  # :primary + exactly ONE recovery escalation
+
+    def test_stranded_auth_escalation_still_stops_on_systemic(self, monkeypatch):
+        cfg = make_config()
+        cfg.MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE = 1
+        res, calls = self._run(monkeypatch, cfg, [
+            (None, "gate_denied[03_authorization_active_and_unconsumed]: authorization "
+                   "state is 'submitting', not 'authorized'"),
+            (None, "job_status_failed: Insufficient credits. Please top up your account."),
+        ])
+        assert res["generation_status"] == "generation_failed"
+        assert len(calls) == 2  # one recovery try, then the systemic result halts it
+
 
 class TestPhase2PlanBoundAuthorization:
     """Phase 2: financial authorization is bound to the exact verified

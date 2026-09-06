@@ -1267,26 +1267,22 @@ class TestPostVPDAuthorization:
     def _make_plan_and_vpd(self, *, scene_count: int, tier: int = 2, ceiling: float = 50.0):
         from hypogeum.production_plan import compile_production_plan
 
+        # hypogeum's deliverable_contract_v1.json compiles exactly
+        # ['main_episode'] for a short-native run — no separately-compiled
+        # shorts (updated 2026; this helper's old shorts_scripts tripped
+        # validate_deliverable_shape).
         script_package = {
             "sections": [{"section_id": "s1", "narration_beats": [
                 {"beat_id": f"b_{i:03d}", "text": "x"} for i in range(scene_count)
             ]}],
-            "shorts_scripts": [
-                {"short_id": sid, "narration_beats": [{"beat_id": f"b_{sid}", "text": "x"}]}
-                for sid in ("short_001", "short_002", "short_003")
-            ],
         }
         narration_segments = [
             {"beat_reference": f"b_{i:03d}", "duration_seconds": 8.0, "character_cost": 50}
             for i in range(scene_count)
         ]
-        for sid in ("short_001", "short_002", "short_003"):
-            narration_segments.append({"beat_reference": f"b_{sid}", "duration_seconds": 8.0, "character_cost": 30})
         narration_package = {"narration_segments": narration_segments}
 
         scenes = [self._make_scene(f"s{i:02d}", f"b_{i:03d}", tier=tier) for i in range(scene_count)]
-        for sid in ("short_001", "short_002", "short_003"):
-            scenes.append(self._make_scene(f"sh_{sid}", f"b_{sid}", tier=tier, short_id=sid, aspect_ratio="9:16"))
         visual_package = {
             "package_metadata": {"visual_package_id": "vp_test"},
             "episode_metadata": {"episode_id": "ep_test"},

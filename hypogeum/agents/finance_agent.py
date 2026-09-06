@@ -48,7 +48,7 @@ from typing import Optional
 
 from hypogeum.config import Config
 from hypogeum.failure_policy import FailurePolicy
-from hypogeum.policy_cascade import get_effective_budget_ceiling
+from hypogeum.policy_cascade import get_effective_budget_ceiling, get_per_episode_ceilings
 from hypogeum.production_plan import (
     ROLE_CONTINGENCY,
     ROLE_REQUIRED,
@@ -669,23 +669,41 @@ def run_post_vpd_authorization(
             persisted_hash=_persisted_plan.content_hash,
         )
 
-    # P3-05: cascade factory policy ceiling (non-blocking fallback to env value)
+    # Two-tier per-episode ceiling (2026-09-06). The compiled plan reports a
+    # normal_expected_cost_usd and a much larger maximum_bounded_cost_usd
+    # (every scene exhausting its paid-retry budget). Gate them SEPARATELY:
+    #   * normal_expected  <=  operator_ceiling  (the channel's own
+    #     cost_ceiling_usd_per_episode, threaded in as FINANCE_BUDGET_CEILING_USD
+    #     after hypogeum.pipeline's per-run override) — "a normally-priced episode"
+    #   * maximum_bounded   <=  factory_ceiling  (monthly_ceiling_usd /
+    #     episodes_per_month) — the higher hard bound that still contains a
+    #     genuine runaway, alongside the channel WEEKLY reservation and
+    #     hypogeum.muapi_spend_breaker.
+    # The old min()-collapse gated the operator's dial on the worst case,
+    # making a sane per-episode ceiling impossible (an operator had to
+    # budget ~2x a normal episode to allow one) — which blocked EVERY
+    # hypogeum episode once per-scene paid retry was enabled (ep_734076a3).
     try:
-        ceiling = get_effective_budget_ceiling(
-            env_ceiling=config.FINANCE_BUDGET_CEILING_USD,
-            db_path=db_path,
+        operator_ceiling, factory_ceiling = get_per_episode_ceilings(
+            env_ceiling=config.FINANCE_BUDGET_CEILING_USD, db_path=db_path,
         )
     except Exception:
-        ceiling = config.FINANCE_BUDGET_CEILING_USD
+        operator_ceiling, factory_ceiling = config.FINANCE_BUDGET_CEILING_USD, 0.0
+    # the ceiling the MAXIMUM bounded total is judged against — factory when
+    # configured, else fall back to the operator ceiling (unchanged behavior
+    # for a factory with no monthly policy).
+    bounded_ceiling = factory_ceiling if factory_ceiling > 0.0 else operator_ceiling
+    ceiling = bounded_ceiling  # kept for the record's budget_ceiling_usd / remaining_budget_usd
     warn_pct = config.FINANCE_WARNING_THRESHOLD_PCT
 
     # ----------------------------------------------------------------
     # Check 1 — ceiling configured
     # ----------------------------------------------------------------
-    if ceiling > 0.0:
+    if operator_ceiling > 0.0 or bounded_ceiling > 0.0:
         _add_check(checks, failures, warnings,
                    "c_budget_ceiling_configured", "pass",
-                   f"Budget ceiling set to ${ceiling:.2f} USD")
+                   f"Per-episode ceilings: expected ≤ ${operator_ceiling:.2f} USD "
+                   f"(operator), bounded ≤ ${bounded_ceiling:.2f} USD (factory)")
     else:
         _add_check(checks, failures, warnings,
                    "c_budget_ceiling_configured", "pass",
@@ -752,37 +770,60 @@ def run_post_vpd_authorization(
         "declared_contingency_cost_usd": contingency_usd,
         "bounded_technical_retry_allowance": bounded_technical_retry_allowance,
         "maximum_bounded_cost_usd": round(total_estimated, 4),
+        "operator_ceiling_usd": round(operator_ceiling, 4),
+        "factory_ceiling_usd": round(bounded_ceiling, 4),
         "remaining_budget_usd": round(ceiling - total_estimated, 4) if ceiling > 0 else None,
     }
 
     # ----------------------------------------------------------------
-    # Check 3 — within ceiling (against the plan's own MAXIMUM bounded total)
+    # Check 3 — within ceiling: expected vs operator, bounded vs factory
     # ----------------------------------------------------------------
-    if ceiling <= 0.0:
+    expected_ok = operator_ceiling <= 0.0 or normal_expected_usd <= operator_ceiling
+    bounded_ok = bounded_ceiling <= 0.0 or maximum_bounded_usd <= bounded_ceiling
+    within_ceiling = expected_ok and bounded_ok
+    if operator_ceiling <= 0.0 and bounded_ceiling <= 0.0:
         _add_check(checks, failures, warnings,
                    "c_within_ceiling", "pass",
                    f"No ceiling configured; estimated spend ${total_estimated:.4f} USD is unrestricted")
-        within_ceiling = True
-    elif total_estimated <= ceiling:
+    elif within_ceiling:
         _add_check(checks, failures, warnings,
                    "c_within_ceiling", "pass",
-                   f"Estimated spend ${total_estimated:.4f} USD ≤ ceiling ${ceiling:.2f} USD")
-        within_ceiling = True
+                   f"Expected ${normal_expected_usd:.4f} ≤ operator ${operator_ceiling:.2f}; "
+                   f"bounded ${maximum_bounded_usd:.4f} ≤ factory ${bounded_ceiling:.2f} USD")
     else:
+        _reasons = []
+        if not expected_ok:
+            _reasons.append(
+                f"expected ${normal_expected_usd:.4f} exceeds operator ceiling "
+                f"${operator_ceiling:.2f} (over ${normal_expected_usd - operator_ceiling:.4f})"
+            )
+        if not bounded_ok:
+            _reasons.append(
+                f"maximum bounded ${maximum_bounded_usd:.4f} exceeds factory ceiling "
+                f"${bounded_ceiling:.2f} (over ${maximum_bounded_usd - bounded_ceiling:.4f})"
+            )
         _add_check(checks, failures, warnings,
-                   "c_within_ceiling", "fail",
-                   f"Estimated spend ${total_estimated:.4f} USD exceeds ceiling ${ceiling:.2f} USD "
-                   f"(overage: ${total_estimated - ceiling:.4f} USD)")
-        within_ceiling = False
+                   "c_within_ceiling", "fail", "; ".join(_reasons))
 
     # ----------------------------------------------------------------
-    # Check 4 — warning threshold
+    # Check 4 — warning threshold: the retry contingency alone pushes the
+    # worst case past the operator's normal-episode budget (not a block —
+    # the factory ceiling above is the hard bound — but worth surfacing).
     # ----------------------------------------------------------------
-    if ceiling > 0.0 and within_ceiling and total_estimated > ceiling * warn_pct:
+    if (
+        within_ceiling and operator_ceiling > 0.0
+        and maximum_bounded_usd > operator_ceiling
+    ):
         _add_check(checks, failures, warnings,
                    "c_warning_threshold", "warn",
-                   f"Estimated spend ${total_estimated:.4f} USD exceeds {warn_pct*100:.0f}% "
-                   f"of ceiling ${ceiling:.2f} USD")
+                   f"Worst-case bounded spend ${maximum_bounded_usd:.4f} USD exceeds the "
+                   f"operator per-episode ceiling ${operator_ceiling:.2f} USD "
+                   f"(expected ${normal_expected_usd:.4f} is within it)")
+    elif within_ceiling and operator_ceiling > 0.0 and normal_expected_usd > operator_ceiling * warn_pct:
+        _add_check(checks, failures, warnings,
+                   "c_warning_threshold", "warn",
+                   f"Expected spend ${normal_expected_usd:.4f} USD exceeds {warn_pct*100:.0f}% "
+                   f"of the operator ceiling ${operator_ceiling:.2f} USD")
     else:
         _add_check(checks, failures, warnings,
                    "c_warning_threshold", "pass",

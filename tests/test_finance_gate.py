@@ -139,10 +139,12 @@ class TestFinanceGateBlocks:
         # authorizes against first.
         persist_production_plan(production_plan, tmp_path)
 
-        # Patch policy cascade to a ceiling BELOW the persisted plan's own
-        # maximum bounded cost ($0.32) so the gate genuinely returns BLOCKED.
-        with patch("hypogeum.agents.finance_agent.get_effective_budget_ceiling",
-                   return_value=0.05), \
+        # Patch the two-tier per-episode ceilings BELOW the persisted plan's
+        # own expected/maximum cost ($0.32) so the gate genuinely returns
+        # BLOCKED (and does not fall through to the real production DB's
+        # factory policy).
+        with patch("hypogeum.agents.finance_agent.get_per_episode_ceilings",
+                   return_value=(0.05, 0.05)), \
              patch("hypogeum.ois.emit_signal"):
             record = run_post_vpd_authorization(
                 visual_package=vp, episode_id="ep_test_gate",

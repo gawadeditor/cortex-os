@@ -214,6 +214,44 @@ def get_effective_budget_ceiling(
     return env_ceiling   # may be 0.0 (no ceiling)
 
 
+def get_per_episode_ceilings(
+    env_ceiling: float          = 0.0,
+    channel_id:  Optional[str]  = None,
+    factory_id:  Optional[str]  = None,
+    db_path:     Optional[Path] = None,
+) -> tuple:
+    """
+    Return ``(operator_ceiling, factory_ceiling)`` for a per-episode finance
+    gate that wants to judge the two costs a compiled Production Plan
+    reports SEPARATELY:
+
+      * ``normal_expected_cost_usd``  — "a normally-priced episode" — is
+        gated against ``operator_ceiling`` (the channel's own
+        ``cost_ceiling_usd_per_episode`` when set, threaded in here as
+        ``env_ceiling`` after hypogeum.pipeline's per-run override, else the
+        raw ``FINANCE_BUDGET_CEILING_USD``);
+      * ``maximum_bounded_cost_usd`` — the worst case where every scene
+        exhausts its paid-retry budget — is gated against
+        ``factory_ceiling`` (``monthly_ceiling_usd / episodes_per_month``),
+        the higher hard bound that also protects against a genuine runaway.
+
+    Gating the operator's dial on the worst-case number instead (the old
+    ``get_effective_budget_ceiling`` ``min()`` collapse) made a sane
+    per-episode ceiling impossible — an operator had to budget ~2x a
+    normal episode just to allow one. The catastrophe is still contained:
+    the factory ceiling, the channel WEEKLY reservation (which commits the
+    plan maximum on first scene acceptance) and hypogeum.muapi_spend_breaker
+    all still apply.
+
+    Either value is ``0.0`` when that tier is not configured — the caller
+    treats ``<= 0`` as "no ceiling at this tier" and skips that check.
+    """
+    policies = _load_policies(factory_id, db_path)
+    factory_ceiling = _per_episode_ceiling(policies)
+    operator_ceiling = env_ceiling if env_ceiling and env_ceiling > 0.0 else 0.0
+    return operator_ceiling, factory_ceiling
+
+
 def validate_factory_policy_constraints(
     channel_config,
     factory_id:  Optional[str]  = None,

@@ -356,15 +356,24 @@ def run_script_engine(
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
 # Slowest sustained narration cadence observed across ElevenLabs voices: a calm
-# bedtime read runs ~2.0 words/sec, a documentary narrator ~2.9.
-# SHORT_NATIVE_WORDS_PER_SECOND assumes the fast end, so the per-beat word cap
-# is additionally clamped against this floor at the editorial-speed ceiling — a
-# beat must stay sayable inside ONE clip even when stretched to
-# MAX_EDITORIAL_SPEED_FACTOR by the slowest plausible voice. Without this a
-# slow-voiced channel (e.g. twinkle's bedtime narrator on ~5s seedance clips)
-# over-runs every clip and forces Assembly's coverage-fill — the exact path
-# short-native exists to avoid.
-_SLOW_VOICE_WPS_FLOOR = 1.9
+# bedtime read runs ~1.8 words/sec on an emphatic line (measured live: twinkle
+# b_013 "He yawns one last, long, slow yawn." at 1.83 wps), a documentary
+# narrator ~2.9. SHORT_NATIVE_WORDS_PER_SECOND assumes the fast end, so the
+# per-beat word cap is additionally clamped against this floor at the
+# editorial-speed ceiling — a beat must stay sayable inside ONE clip even when
+# stretched to MAX_EDITORIAL_SPEED_FACTOR by the slowest plausible voice.
+# Without this a slow-voiced channel (twinkle's bedtime narrator on ~5s
+# wan2.7 clips) over-runs a clip and forces Assembly's coverage-fill — the
+# exact path short-native exists to avoid, and one it CANNOT resolve for a
+# single-shot beat (2026-09-06: ep_e51a43ef lost whole over 0.24s on b_013).
+_SLOW_VOICE_WPS_FLOOR = 1.8
+
+# Headroom subtracted from the clip's editorial-speed ceiling when sizing the
+# per-beat word cap: ElevenLabs appends ~0.13-0.21s of trailing silence to
+# every generated beat (see hypogeum.agents.timeline_builder — the timeline
+# anchors on the real probed .mp3, tail included), plus ffprobe/measurement
+# noise. Sizing the cap to the bare ceiling left b_013 landing 0.24s over.
+_BEAT_BUDGET_HEADROOM_SECONDS = 0.45
 
 
 def _short_native_beat_budget(
@@ -388,7 +397,11 @@ def _short_native_beat_budget(
     except Exception:  # noqa: BLE001
         pass
     wps = float(getattr(config, "SHORT_NATIVE_WORDS_PER_SECOND", 2.9) or 2.9)
-    hard_cap = int(beat_secs * MAX_EDITORIAL_SPEED_FACTOR * _SLOW_VOICE_WPS_FLOOR)
+    # Max SPEECH seconds one clip can carry: its editorial-speed ceiling minus
+    # the ElevenLabs-tail / measurement headroom. The word cap is whatever the
+    # slowest plausible voice fits into that.
+    sayable_secs = max(1.0, beat_secs * MAX_EDITORIAL_SPEED_FACTOR - _BEAT_BUDGET_HEADROOM_SECONDS)
+    hard_cap = int(sayable_secs * _SLOW_VOICE_WPS_FLOOR)
     max_beat_words = max(8, min(int(beat_secs * wps), hard_cap))
     return beat_secs, max_beat_words, wps
 

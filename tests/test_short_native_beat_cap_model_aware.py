@@ -76,5 +76,22 @@ def test_slow_voice_hard_cap_bounds_a_fast_wps_setting(monkeypatch):
     sp = _one_beat_script(60)
     _enforce_short_native_budget(sp, c, _Log(), channel_id="twinkle")
     kept = len(sp["sections"][0]["narration_beats"][0]["text"].split())
-    # 5.04 * 1.15 (editorial) * 1.9 (slow-voice floor) ~= 11
     assert kept <= 12, kept
+
+
+def test_slowest_beat_plus_elevenlabs_tail_still_fits_one_clip(monkeypatch):
+    """2026-09-06 regression (ep_e51a43ef b_013): the word cap left NO
+    headroom for ElevenLabs' ~0.2s trailing silence, so the slowest,
+    most-emphatic bedtime line ('He yawns one last, long, slow yawn.' at
+    ~1.83 wps) rendered 0.24s over one clip's editorial ceiling and lost
+    the whole episode to an unfixable single-shot coverage deficit. The cap
+    must now keep even a 1.8-wps beat + a 0.21s tail inside clip*1.15."""
+    monkeypatch.setattr("hypogeum.channel_config.resolve_channel_video_model",
+                        lambda cid, db_path=None: ("wan2.7-text-to-video", 0.10))
+    monkeypatch.setattr("hypogeum.channel_config.resolve_channel_video_duration",
+                        lambda cid, db_path=None: 5.0)
+    sp = _one_beat_script(60)
+    _enforce_short_native_budget(sp, _cfg(), _Log(), channel_id="twinkle")
+    kept = len(sp["sections"][0]["narration_beats"][0]["text"].split())
+    worst_case_real_seconds = kept / 1.8 + 0.21   # slowest voice + EL tail
+    assert worst_case_real_seconds <= 5.0 * 1.15, (kept, worst_case_real_seconds)

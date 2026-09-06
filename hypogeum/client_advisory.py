@@ -172,12 +172,14 @@ def generate_client_advisory(client_id: str, *,
     bcl = Counter((r["profile"].get("caption") or {}).get("length") for r in bottom
                   if (r["profile"].get("caption") or {}).get("length"))
     if tcl and bcl and tcl.most_common(1)[0][0] != bcl.most_common(1)[0][0]:
+        tw, bw = tcl.most_common(1)[0][0], bcl.most_common(1)[0][0]
+        _cap = lambda v: "no caption" if v == "none" else f"a {v} caption"
         works.append({
             "axis": "caption length",
-            "finding": f"Top posts tend to use a {tcl.most_common(1)[0][0]} caption; "
-                       f"weaker ones a {bcl.most_common(1)[0][0]} one.",
+            "finding": f"Top posts tend to have {_cap(tw)}; weaker ones {_cap(bw)}.",
             "evidence": f"{sum(tcl.values())} vs {sum(bcl.values())} profiled captions."})
-        recs.append(f"Write {tcl.most_common(1)[0][0]} captions.")
+        if tw != "none":
+            recs.append(f"Write {tw} captions.")
 
     # ---- format / topic tags ----
     for key, label in (("format_tags", "format"), ("topic_tags", "topic")):

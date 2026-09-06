@@ -115,6 +115,23 @@ def salvage_preconditions(
         out["admission_status"] = adm["status"] if adm else None
 
         d = _episode_dir(episode_id, assets_root)
+
+        # Topic fallback: an orphaned episode (no episodes row) can still be
+        # salvaged — its topic string is in the persisted topic_brief on
+        # disk (episode_title / logline). run_pipeline resumes from the
+        # existing packages regardless, so this only needs to be a
+        # recognisable label.
+        if not out["topic"]:
+            for _tb in (d / f"topic_brief_{episode_id}.json", d / "topic_brief.json"):
+                if _tb.exists():
+                    try:
+                        import json  # noqa: PLC0415
+                        _b = json.loads(_tb.read_text(encoding="utf-8"))
+                        out["topic"] = _b.get("episode_title") or _b.get("logline") or _b.get("topic")
+                    except Exception:  # noqa: BLE001
+                        pass
+                    break
+
         out["plan_file"] = bool(
             glob.glob(str(d / f"production_plan_{episode_id}.json"))
             or glob.glob(str(d / f"*production_plan*{episode_id}.json"))

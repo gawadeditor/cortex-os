@@ -1080,6 +1080,100 @@ CREATE INDEX IF NOT EXISTS idx_pcmt_ep ON post_comments(episode_id, is_owner);
 CREATE INDEX IF NOT EXISTS idx_pcmt_ch ON post_comments(channel_id, is_owner, published_at DESC);
 
 -- ---------------------------------------------------------------------------
+-- Cortex Advisory (2026-09-06): performance intelligence for content Cortex
+-- did NOT produce — external clients whose social accounts the operator
+-- manages. A client is a tenant; its published posts are content_items;
+-- the analytics/learning stack runs on them exactly as it does on episodes
+-- (content_id doubles as the platform_analytics episode_id key). No
+-- production, no pipeline — observe + advise.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS clients (
+    client_id        TEXT NOT NULL PRIMARY KEY,
+    name             TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'active'
+                     CHECK(status IN ('active','paused','archived')),
+    engagement_mode  TEXT NOT NULL DEFAULT 'observe'
+                     CHECK(engagement_mode IN ('observe','manage')),
+    analysis_depth   TEXT NOT NULL DEFAULT 'metadata'
+                     CHECK(analysis_depth IN ('metadata','full_video')),
+    timezone         TEXT NOT NULL DEFAULT 'UTC',
+    brief_json       TEXT,                 -- who the client is, goals, brand notes
+    monthly_analysis_budget_usd REAL NOT NULL DEFAULT 5.0,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+);
+
+-- One connected social account for a client. Points at an existing
+-- provider_accounts row (reuses sync_zernio_accounts / the Zernio roster).
+CREATE TABLE IF NOT EXISTS managed_accounts (
+    managed_account_id  TEXT NOT NULL PRIMARY KEY,
+    client_id           TEXT NOT NULL,
+    platform            TEXT NOT NULL
+                        CHECK(platform IN ('youtube','tiktok','instagram','facebook')),
+    handle              TEXT,
+    provider_id         TEXT NOT NULL DEFAULT 'zernio',
+    provider_account_id TEXT,              -- provider_accounts.provider_account_id (Zernio _id)
+    provider_profile_id TEXT,              -- Zernio profileId
+    native_account_id   TEXT,              -- YouTube channel id, etc.
+    enabled             INTEGER NOT NULL DEFAULT 1,
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    UNIQUE(client_id, platform, handle)
+);
+CREATE INDEX IF NOT EXISTS idx_macct_client ON managed_accounts(client_id, enabled);
+CREATE INDEX IF NOT EXISTS idx_macct_provacct ON managed_accounts(provider_account_id);
+
+-- One published post for a client, from any source.
+CREATE TABLE IF NOT EXISTS content_items (
+    content_id         TEXT NOT NULL PRIMARY KEY,   -- 'ci_' + sha1(platform + ':' + platform_post_id)[:16]
+    client_id          TEXT NOT NULL,
+    managed_account_id TEXT,
+    platform           TEXT NOT NULL
+                       CHECK(platform IN ('youtube','tiktok','instagram','facebook')),
+    platform_post_id   TEXT,
+    zernio_post_id     TEXT,
+    url                TEXT,
+    title              TEXT,
+    caption            TEXT,
+    thumbnail_url      TEXT,
+    media_type         TEXT,                        -- video | image | carousel
+    published_at       TEXT,
+    source             TEXT NOT NULL DEFAULT 'zernio_external'
+                       CHECK(source IN ('zernio_external','zernio_late','manual_url','csv')),
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL,
+    UNIQUE(platform, platform_post_id)
+);
+CREATE INDEX IF NOT EXISTS idx_citem_client ON content_items(client_id, published_at DESC);
+
+-- The content-analysis agent's read of one content_item (metadata + thumbnail).
+CREATE TABLE IF NOT EXISTS content_profiles (
+    profile_id      TEXT NOT NULL PRIMARY KEY,
+    content_id      TEXT NOT NULL UNIQUE,
+    analysis_json   TEXT NOT NULL,
+    analysis_depth  TEXT NOT NULL DEFAULT 'metadata'
+                    CHECK(analysis_depth IN ('metadata','full_video')),
+    model_slug      TEXT,
+    cost_usd        REAL,
+    created_at      TEXT NOT NULL
+);
+
+-- Registry of the raw shot material available for a client (P5). No processing.
+CREATE TABLE IF NOT EXISTS client_assets (
+    asset_id    TEXT NOT NULL PRIMARY KEY,
+    client_id   TEXT NOT NULL,
+    kind        TEXT NOT NULL DEFAULT 'other'
+                CHECK(kind IN ('footage','photo','graphic','audio','other')),
+    label       TEXT NOT NULL,
+    location    TEXT,                       -- Drive folder path / uploaded file ref
+    note        TEXT,
+    used        INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_casset_client ON client_assets(client_id);
+
+-- ---------------------------------------------------------------------------
 -- analytics_insights
 -- Derived signals extracted from platform_analytics by the learning engine.
 -- Rule-based on configurable thresholds; one row per fired rule per episode.

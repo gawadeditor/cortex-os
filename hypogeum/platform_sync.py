@@ -290,6 +290,14 @@ def run_platform_sync(
                 sync_zernio_native_analytics(db_path=db_path)
             except Exception:  # noqa: BLE001
                 pass
+            # Cortex Advisory: pull every active client's externally-published
+            # content + performance. Own tables (content_items, client-scoped
+            # platform_analytics); failure-isolated.
+            try:
+                from hypogeum.publishing.client_content_sync import sync_all_clients
+                sync_all_clients(db_path=db_path)
+            except Exception:  # noqa: BLE001
+                pass
 
         for platform in target:
             if platform == "youtube":

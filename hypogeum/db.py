@@ -332,6 +332,22 @@ _V2_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         # Populated only for YouTube rows once the video has enough views
         # and YouTube has finalised the data (2-3 day delay).
         ("retention_curve_json", "TEXT"),
+        # Cortex Advisory (2026-09-06): rows for an external client's
+        # published post. `content_id` == the row's episode_id key (opaque);
+        # `client_id` gives exact attribution without the title-match
+        # heuristic in dashboard_analytics._analytics_key_channel_map.
+        # channel_analytics_rollup uses scope='client:<id>'; the
+        # channel_id-NOT-NULL account tables (channel_platform_insights /
+        # channel_audience / post_comments) store channel_id=<client_id>
+        # for client accounts, so their existing readers work unchanged.
+        ("client_id",  "TEXT"),
+        ("content_id", "TEXT"),
+    ],
+    "analytics_insights": [
+        ("client_id", "TEXT"),   # Cortex Advisory — client whose content this insight is about
+    ],
+    "learning_actions": [
+        ("client_id", "TEXT"),
     ],
     "run_queue": [
         ("source",               "TEXT"),  # 'rerun' | 'schedule' | 'manual' | 'auto_retry'

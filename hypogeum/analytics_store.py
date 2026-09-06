@@ -449,10 +449,16 @@ def store_platform_metrics(
     snapshot_date: Optional[str]  = None,
     window_days:   int            = 7,
     db_path:       Optional[Path] = None,
+    client_id:     Optional[str]  = None,
+    content_id:    Optional[str]  = None,
 ) -> str:
     """
     Upsert one analytics record. Returns record_id.
     Idempotent: same (episode_id, platform, snapshot_date) → same record_id.
+
+    `client_id` / `content_id` are set for a Cortex Advisory content item
+    (the caller passes `episode_id == content_id`); they give exact
+    attribution without the title-match heuristic used for produced content.
     """
     if platform not in VALID_PLATFORMS:
         raise ValueError(f"Unknown platform {platform!r}")
@@ -476,8 +482,9 @@ def store_platform_metrics(
                 views, impressions, ctr, avg_view_pct, avg_watch_time_s,
                 total_watch_time_s, likes, comments, shares, saves,
                 reach, follows, reposts, engagement_rate, skip_rate,
-                platform_video_id, raw_json, source, imported_at, metadata_version)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                platform_video_id, raw_json, source, imported_at, metadata_version,
+                client_id, content_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 record_id, episode_id, platform, snap_date, window_days,
                 metrics.get("views"),
@@ -500,12 +507,34 @@ def store_platform_metrics(
                 source,
                 now,
                 "v1",
+                client_id,
+                content_id,
             ),
         )
         conn.commit()
     finally:
         conn.close()
     return record_id
+
+
+def store_content_metrics(
+    content_id:    str,
+    client_id:     str,
+    platform:      str,
+    metrics:       dict,
+    source:        str            = "api",
+    snapshot_date: Optional[str]  = None,
+    window_days:   int            = 7,
+    db_path:       Optional[Path] = None,
+) -> str:
+    """Cortex Advisory: store one snapshot for a client's content item.
+    `content_id` is used as the platform_analytics episode_id key so the
+    learning engine picks it up unchanged."""
+    return store_platform_metrics(
+        content_id, platform, metrics, source=source,
+        snapshot_date=snapshot_date, window_days=window_days, db_path=db_path,
+        client_id=client_id, content_id=content_id,
+    )
 
 
 def get_episode_analytics(

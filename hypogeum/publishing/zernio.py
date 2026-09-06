@@ -702,11 +702,25 @@ class ZernioProvider:
         return {"status_code": response.status_code, "post": response.json_body.get("post", response.json_body), "error": None}
 
     def get_analytics(self, *, page: int = 1, limit: int = 100,
+                      source: Optional[str] = None,
+                      post_id: Optional[str] = None,
+                      account_id: Optional[str] = None,
+                      profile_id: Optional[str] = None,
+                      from_date: Optional[str] = None,
+                      to_date: Optional[str] = None,
                       db_path: Optional[Path] = None) -> dict:
         """
         Read-only GET /v1/analytics (operationId `getAnalytics`) -- one
         page of the account's published-post performance, exactly as
         Zernio returns it. Never mutates, never credential-logs.
+
+        Optional filters (all threaded straight into the query string):
+          source     -- 'all' | 'late' (published via Zernio) | 'external'
+                        (synced from the platform, i.e. NOT published by us).
+                        Cortex Advisory passes 'external'.
+          post_id    -- single-post mode; accepts a Zernio or an External id.
+          account_id / profile_id -- scope to one connected account / profile.
+          from_date / to_date     -- ISO date bounds (YYYY-MM-DD).
 
         Response shape (verified live 2026-08-21, see
         docs/operations/audits/ZERNIO_CONTRACT_AUDIT_2026-08-21.md):
@@ -731,7 +745,13 @@ class ZernioProvider:
             )
         headers = {"Authorization": f"Bearer {credential}"}
         del credential
-        url = f"{_ZERNIO_BASE_URL}/analytics?page={int(page)}&limit={int(limit)}"
+        from urllib.parse import urlencode
+        q = {"page": int(page), "limit": int(limit)}
+        for k, v in (("source", source), ("postId", post_id), ("accountId", account_id),
+                     ("profileId", profile_id), ("fromDate", from_date), ("toDate", to_date)):
+            if v is not None:
+                q[k] = v
+        url = f"{_ZERNIO_BASE_URL}/analytics?{urlencode(q)}"
         response = self._transport.get(url=url, headers=headers, timeout=_DEFAULT_TIMEOUT_SECONDS)
         if response.status_code != 200 or not isinstance(response.json_body, dict):
             return {"status_code": response.status_code, "data": None, "error": response.json_body}

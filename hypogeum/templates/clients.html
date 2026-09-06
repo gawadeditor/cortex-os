@@ -49,8 +49,8 @@
   {% for c in d.clients %}
   <a class="card cl-card" href="/client/{{ c.client_id }}?scope=client:{{ c.client_id }}">
     <div>
-      <div class="cl-name">{{ c.name }}</div>
-      <div class="cl-mode">{{ c.engagement_mode }} · {{ c.status }}</div>
+      <div class="cl-name">{{ c.name }}{% if c.stage == 'prospect' %} <span class="pill is-warn" style="font-size:9px;padding:1px 7px;vertical-align:middle;">prospect</span>{% endif %}</div>
+      <div class="cl-mode">{{ c.engagement_mode }} · {{ c.status }}{% if c.managed_since %} · since {{ c.managed_since[:10] }}{% endif %}</div>
     </div>
     <div class="cl-stats">
       <div class="cl-stat"><b>{{ c.content_items }}</b><span>posts</span></div>

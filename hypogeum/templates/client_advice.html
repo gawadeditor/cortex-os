@@ -44,6 +44,29 @@
 
 <div class="adv-sum">{{ d.summary }}</div>
 
+{% set ba = d.before_after %}
+{% if ba and ba.available %}
+<div class="card" style="margin-bottom: var(--space-md);">
+  <div class="card-title">{{ icon('learning') }} Before vs after you took over ({{ ba.managed_since }})</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:12px;">
+    {% for label, ph in [('Before', ba.before), ('After', ba.after)] %}
+    <div style="border:1px solid var(--border);border-radius:8px;padding:12px;">
+      <div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);">{{ label }} · {{ ph.posts }} posts</div>
+      <div style="font-size:12.5px;line-height:1.9;margin-top:6px;">
+        Engagement <b>{{ '%.1f'|format(ph.engagement) if ph.engagement is not none else '—' }}%</b><br>
+        {% if ph.retention is not none %}Retention <b>{{ (ph.retention*100)|round|int }}%</b><br>{% endif %}
+        Posting <b>{{ ph.per_week }}/wk</b><br>
+        Avg views <b>{{ "{:,}".format(ph.avg_views) if ph.avg_views is not none else '—' }}</b>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  <p style="font-size:12.5px;line-height:1.55;margin-top:12px;color:var(--text);">{{ ba.verdict }}</p>
+</div>
+{% elif ba and ba.reason %}
+<p class="note" style="margin-bottom:var(--space-md);">Before/after comparison: {{ ba.reason }}. Set a "Managed since" date on the client to enable it.</p>
+{% endif %}
+
 {% if d.what_works %}
 <div class="card">
   <div class="card-title">{{ icon('sparkle') }} What the top posts have in common</div>

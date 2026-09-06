@@ -78,10 +78,14 @@ def _client_row(r) -> dict:
 # clients
 # ---------------------------------------------------------------------------
 
+_STAGE = ("prospect", "active")
+
+
 def create_client(name: str, *, engagement_mode: str = "observe",
                   analysis_depth: str = "metadata", timezone: str = "UTC",
                   brief: Optional[dict] = None,
                   monthly_analysis_budget_usd: float = 5.0,
+                  stage: str = "active", managed_since: Optional[str] = None,
                   client_id: Optional[str] = None,
                   db_path: Optional[Path] = None) -> dict:
     """Create a client. Returns the stored row. Raises ValueError on a bad
@@ -90,6 +94,8 @@ def create_client(name: str, *, engagement_mode: str = "observe",
         raise ValueError(f"engagement_mode must be one of {_ENGAGEMENT}")
     if analysis_depth not in _ANALYSIS:
         raise ValueError(f"analysis_depth must be one of {_ANALYSIS}")
+    if stage not in _STAGE:
+        raise ValueError(f"stage must be one of {_STAGE}")
     cid = client_id or f"{_slug(name)}_{uuid.uuid4().hex[:6]}"
     now = _now()
     conn = _conn(db_path)
@@ -99,9 +105,10 @@ def create_client(name: str, *, engagement_mode: str = "observe",
         conn.execute(
             "INSERT INTO clients (client_id, name, status, engagement_mode, "
             "analysis_depth, timezone, brief_json, monthly_analysis_budget_usd, "
-            "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "stage, managed_since, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (cid, name, "active", engagement_mode, analysis_depth, timezone,
-             _json.dumps(brief or {}), float(monthly_analysis_budget_usd), now, now),
+             _json.dumps(brief or {}), float(monthly_analysis_budget_usd),
+             stage, (managed_since or None), now, now),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM clients WHERE client_id=?", (cid,)).fetchone()
@@ -136,7 +143,7 @@ def list_clients(status: Optional[str] = None, *,
 
 
 _UPDATABLE = {"name", "status", "engagement_mode", "analysis_depth", "timezone",
-              "monthly_analysis_budget_usd"}
+              "monthly_analysis_budget_usd", "stage", "managed_since"}
 
 
 def update_client(client_id: str, *, db_path: Optional[Path] = None, **fields) -> bool:
@@ -151,8 +158,10 @@ def update_client(client_id: str, *, db_path: Optional[Path] = None, **fields) -
             raise ValueError(f"engagement_mode must be one of {_ENGAGEMENT}")
         if k == "analysis_depth" and v not in _ANALYSIS:
             raise ValueError(f"analysis_depth must be one of {_ANALYSIS}")
+        if k == "stage" and v not in _STAGE:
+            raise ValueError(f"stage must be one of {_STAGE}")
         sets.append(f"{k} = ?")
-        params.append(v)
+        params.append(v or None if k == "managed_since" else v)
     if brief is not None:
         sets.append("brief_json = ?")
         params.append(_json.dumps(brief))

@@ -481,7 +481,8 @@ def _nav_clients():
         try:
             from hypogeum.client_manager import list_clients
             g._nav_clients = [
-                {"client_id": c["client_id"], "name": c.get("name") or c["client_id"]}
+                {"client_id": c["client_id"], "name": c.get("name") or c["client_id"],
+                 "stage": c.get("stage") or "active"}
                 for c in list_clients(status="active", db_path=_db_path())
             ]
         except Exception:  # noqa: BLE001
@@ -8358,6 +8359,8 @@ def api_clients_create():
             engagement_mode=(payload.get("engagement_mode") or "observe"),
             analysis_depth=(payload.get("analysis_depth") or "metadata"),
             timezone=((payload.get("timezone") or "UTC").strip() or "UTC"),
+            stage=(payload.get("stage") or "active"),
+            managed_since=((payload.get("managed_since") or "").strip() or None),
             brief={"note": brief_note} if brief_note else None,
             db_path=_db_path())
     except Exception as exc:  # noqa: BLE001
@@ -8460,6 +8463,24 @@ def client_accounts_page(client_id):
     if not d.get("client"):
         return render_template("not_found.html", kind="Client", id=client_id), 404
     return render_template("client_accounts.html", d=d, flash=request.args.get("flash"))
+
+
+@app.route("/client/<client_id>/settings", methods=["POST"])
+def client_settings_save(client_id):
+    from hypogeum.client_manager import get_client, update_client
+    if not get_client(client_id, db_path=_db_path()):
+        return render_template("not_found.html", kind="Client", id=client_id), 404
+    fields = {}
+    for k in ("stage", "managed_since", "engagement_mode", "timezone"):
+        if k in request.form:
+            fields[k] = request.form.get(k) or ("" if k == "managed_since" else None)
+    try:
+        update_client(client_id, db_path=_db_path(), **{k: v for k, v in fields.items() if v is not None})
+        msg = "Settings saved"
+    except Exception as exc:  # noqa: BLE001
+        msg = f"Error: {exc}"
+    back = request.form.get("back") or "accounts"
+    return redirect(f"/client/{client_id}/{back}?scope=client:{client_id}&flash={msg}", 302)
 
 
 @app.route("/client/<client_id>/sync", methods=["POST"])

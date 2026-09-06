@@ -73,6 +73,38 @@ def test_advisory_honest_when_nothing_separates(client):
     assert "nothing yet separates them" in adv["summary"]
 
 
+def test_before_after_split_on_managed_since(tmp_path):
+    db = tmp_path / "adv.db"
+    initialize_schema(db)
+    c = cm.create_client("Fund", stage="active", managed_since="2026-08-01", db_path=db)
+    cid = c["client_id"]
+    for i, (dt, er) in enumerate([
+            ("2026-06-05", 1.8), ("2026-06-20", 2.1), ("2026-07-05", 1.5),
+            ("2026-08-05", 4.2), ("2026-08-12", 5.1), ("2026-08-25", 4.8)]):
+        ccid = cm.upsert_content_item(cid, "youtube", platform_post_id=f"V{i}",
+                                      published_at=dt + "T12:00:00Z",
+                                      source="manual_url", db_path=db)
+        store_content_metrics(ccid, cid, "youtube",
+                              {"views": 1000, "engagement_rate": er},
+                              source="manual", db_path=db)
+    adv = generate_client_advisory(cid, db_path=db)
+    ba = adv["before_after"]
+    assert ba["available"] is True
+    assert ba["before"]["posts"] == 3 and ba["after"]["posts"] == 3
+    assert ba["after"]["engagement"] > ba["before"]["engagement"]
+    assert "took over" in ba["verdict"]
+    assert any(w["axis"].startswith("before vs after") for w in adv["what_works"])
+
+
+def test_before_after_absent_without_managed_since(tmp_path):
+    db = tmp_path / "adv.db"
+    initialize_schema(db)
+    c = cm.create_client("NoDate", db_path=db)
+    adv = generate_client_advisory(c["client_id"], db_path=db)
+    assert adv["before_after"]["available"] is False
+    assert "managed_since" in adv["before_after"]["reason"]
+
+
 def test_learning_content_volume_action_is_advisory_for_clients(tmp_path):
     db = tmp_path / "adv.db"
     initialize_schema(db)

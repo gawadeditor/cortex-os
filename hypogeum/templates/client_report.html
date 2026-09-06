@@ -77,11 +77,28 @@
     </div>
   </section>
 
-  {% if adv.what_works %}
+  {% set ba = adv.before_after %}
+  {% if ba and ba.available %}
+  <section class="rep-sec">
+    <h2>Before vs after — since {{ ba.managed_since }}</h2>
+    <div class="rep-kpis" style="grid-template-columns:repeat(4,1fr);">
+      <div class="rep-kpi"><b>{{ '%.1f'|format(ba.before.engagement) if ba.before.engagement is not none else '—' }}% → {{ '%.1f'|format(ba.after.engagement) if ba.after.engagement is not none else '—' }}%</b><span>Engagement</span></div>
+      <div class="rep-kpi"><b>{{ ba.before.per_week }} → {{ ba.after.per_week }}</b><span>Posts / week</span></div>
+      {% if ba.before.retention is not none and ba.after.retention is not none %}
+      <div class="rep-kpi"><b>{{ (ba.before.retention*100)|round|int }}% → {{ (ba.after.retention*100)|round|int }}%</b><span>Retention</span></div>
+      {% endif %}
+      <div class="rep-kpi"><b>{{ ba.before.posts }} → {{ ba.after.posts }}</b><span>Posts each side</span></div>
+    </div>
+    <p class="rep-lede">{{ ba.verdict }}</p>
+  </section>
+  {% endif %}
+
+  {% set _works = adv.what_works | rejectattr('axis', 'equalto', 'before vs after you took over') | list %}
+  {% if _works %}
   <section class="rep-sec">
     <h2>What is working</h2>
     <div class="rep-list">
-      {% for w in adv.what_works %}
+      {% for w in _works %}
       <div class="rep-item">
         <div class="ri-axis">{{ w.axis }}</div>
         <div class="ri-find">{{ w.finding }}</div>

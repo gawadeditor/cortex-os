@@ -86,6 +86,7 @@
     <a href="/client/{{ cl.client_id }}?scope=client:{{ cl.client_id }}"
        class="rail-item {{ 'active' if scope_client == cl.client_id }}">
       {{ icon('briefcase') }}<span>{{ cl.name or cl.client_id }}</span>
+      {% if cl.stage == 'prospect' %}<span class="rail-tag">prospect</span>{% endif %}
     </a>
     {% endfor %}
     <a href="/clients/new?scope=factory" class="rail-item rail-new">
@@ -271,6 +272,8 @@
   .rail-channels { display: flex; flex-direction: column; gap: 2px; }
   .rail-new { color: var(--faint); }
   .rail-new:hover { color: var(--accent); }
+  .rail-tag { margin-left: auto; font-size: 8.5px; text-transform: uppercase; letter-spacing: .05em;
+    padding: 1px 5px; border-radius: 4px; background: var(--warn-bg); color: var(--warn); flex-shrink: 0; }
 
   .rail-foot { margin-top: auto; padding-top: 14px; display: flex; flex-direction: column;
     gap: 8px; align-items: stretch; }

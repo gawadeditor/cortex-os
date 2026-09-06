@@ -51,14 +51,44 @@ def test_assets_register_and_toggle(app_client):
 
 def test_create_client_api(app_client):
     cl, _, db = app_client
-    r = cl.post("/api/clients/create", json={"name": "Beta Co", "timezone": "UTC"})
+    r = cl.post("/api/clients/create", json={"name": "Beta Co", "timezone": "UTC",
+                                             "stage": "prospect",
+                                             "managed_since": "2026-08-15"})
     assert r.status_code == 200
     body = r.get_json()
     assert body["ok"] and "/accounts" in body["next"]
-    assert any(x["name"] == "Beta Co" for x in cm.list_clients(db_path=db))
+    beta = [x for x in cm.list_clients(db_path=db) if x["name"] == "Beta Co"][0]
+    assert beta["stage"] == "prospect" and beta["managed_since"] == "2026-08-15"
 
     bad = cl.post("/api/clients/create", json={"name": ""})
     assert bad.status_code == 400 and bad.get_json()["ok"] is False
+
+
+def test_client_settings_route(app_client):
+    cl, cid, db = app_client
+    r = cl.post(f"/client/{cid}/settings",
+                data={"stage": "prospect", "managed_since": "2026-07-01",
+                      "engagement_mode": "observe"})
+    assert r.status_code == 302
+    c = cm.get_client(cid, db_path=db)
+    assert c["stage"] == "prospect" and c["managed_since"] == "2026-07-01"
+
+
+def test_channel_import_route_kicks_off(app_client, monkeypatch):
+    cl, cid, db = app_client
+    import hypogeum.public_ingest as pi
+    calls = []
+    monkeypatch.setattr(pi, "import_public_channel",
+                        lambda *a, **k: calls.append(a) or
+                        {"ok": True, "channel": "X", "added": 3, "metric_rows": 3, "error": None})
+    r = cl.post(f"/client/{cid}/content/import_channel", data={"url": "@acme"})
+    assert r.status_code == 302
+    import time
+    for _ in range(50):
+        if calls:
+            break
+        time.sleep(0.05)
+    assert calls, "background import was not invoked"
 
 
 def test_account_link_unlink_route(app_client):

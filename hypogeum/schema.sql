@@ -1100,6 +1100,8 @@ CREATE TABLE IF NOT EXISTS clients (
     timezone         TEXT NOT NULL DEFAULT 'UTC',
     brief_json       TEXT,                 -- who the client is, goals, brand notes
     monthly_analysis_budget_usd REAL NOT NULL DEFAULT 5.0,
+    stage            TEXT NOT NULL DEFAULT 'active',   -- 'prospect' (pre-contract, public data only) | 'active'
+    managed_since    TEXT,                 -- ISO date the operator took over; before/after split point
     created_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL
 );

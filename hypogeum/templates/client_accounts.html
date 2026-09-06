@@ -45,6 +45,34 @@
 
 {% if flash %}<div class="flash">{{ flash }}</div>{% endif %}
 
+<div class="card">
+  <div class="card-title">{{ icon('settings') }} Client settings</div>
+  <form method="post" action="/client/{{ d.client.client_id }}/settings"
+        style="display:grid;grid-template-columns:180px 200px 1fr auto;gap:12px;align-items:end;margin-top:12px;">
+    <input type="hidden" name="back" value="accounts">
+    <div>
+      <label for="stage">Stage</label>
+      <select id="stage" name="stage">
+        <option value="active" {{ 'selected' if d.client.stage != 'prospect' }}>Active</option>
+        <option value="prospect" {{ 'selected' if d.client.stage == 'prospect' }}>Prospect (public data only)</option>
+      </select>
+    </div>
+    <div>
+      <label for="managed_since">Managed since</label>
+      <input type="date" id="managed_since" name="managed_since" value="{{ (d.client.managed_since or '')[:10] }}">
+    </div>
+    <div>
+      <label for="engagement_mode">Engagement</label>
+      <select id="engagement_mode" name="engagement_mode">
+        <option value="observe" {{ 'selected' if d.client.engagement_mode == 'observe' }}>Observe</option>
+        <option value="manage" {{ 'selected' if d.client.engagement_mode == 'manage' }}>Manage</option>
+      </select>
+    </div>
+    <button type="submit" class="btn">{{ icon('check') }} Save</button>
+  </form>
+  <p class="note">"Managed since" splits the catalogue into before/after on the Advice &amp; Report pages.</p>
+</div>
+
 {# ── How to add an account that isn't in the pool yet ─────────────── #}
 <div class="card">
   <div class="card-title">{{ icon('plus') }} Add an account that's not listed</div>

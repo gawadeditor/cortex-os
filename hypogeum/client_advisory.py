@@ -81,6 +81,65 @@ def _tag_share(rows: list[dict], key: str) -> Counter:
     return Counter({t: v / total for t, v in c.items()})
 
 
+def _median(xs):
+    xs = [x for x in xs if x is not None]
+    return statistics.median(xs) if xs else None
+
+
+def _span_weeks(dates: list[str]) -> float:
+    ds = sorted(d for d in dates if d)
+    if len(ds) < 2:
+        return 1.0
+    try:
+        from datetime import datetime
+        a = datetime.fromisoformat(ds[0].replace("Z", "+00:00"))
+        b = datetime.fromisoformat(ds[-1].replace("Z", "+00:00"))
+        return max((b - a).days / 7.0, 1.0)
+    except Exception:  # noqa: BLE001
+        return 1.0
+
+
+def _phase_stats(rows: list[dict]) -> dict:
+    dates = [r.get("published_at") for r in rows if r.get("published_at")]
+    ers = [_num(r.get("engagement_rate")) for r in rows]
+    rets = [_num(r.get("avg_view_pct")) for r in rows]
+    return {
+        "posts": len(rows),
+        "engagement": _median(ers),
+        "retention": _median(rets),
+        "avg_views": (round(_mean(r.get("total_views") or 0 for r in rows)) if rows else None),
+        "per_week": round(len(rows) / _span_weeks(dates), 2) if rows else None,
+    }
+
+
+def _before_after(client: dict, rows: list[dict]) -> Optional[dict]:
+    ms = client.get("managed_since")
+    if not ms:
+        return {"available": False, "reason": "no managed_since date set on the client"}
+    dated = [r for r in rows if r.get("published_at")]
+    before = [r for r in dated if r["published_at"][:10] < ms[:10]]
+    after = [r for r in dated if r["published_at"][:10] >= ms[:10]]
+    if len(before) < 2 or len(after) < 2:
+        return {"available": False,
+                "reason": f"need >=2 posts each side of {ms[:10]} "
+                          f"(have {len(before)} before, {len(after)} after)"}
+    b, a = _phase_stats(before), _phase_stats(after)
+    deltas = {}
+    for key in ("engagement", "retention", "avg_views", "per_week"):
+        if b.get(key) is not None and a.get(key) is not None:
+            deltas[key] = round(a[key] - b[key], 4)
+    bits = []
+    if "engagement" in deltas:
+        bits.append(f"engagement {b['engagement']:.1f}% → {a['engagement']:.1f}%")
+    if "per_week" in deltas:
+        bits.append(f"posting {b['per_week']}/wk → {a['per_week']}/wk")
+    if a.get("retention") is not None and b.get("retention") is not None:
+        bits.append(f"retention {b['retention']*100:.0f}% → {a['retention']*100:.0f}%")
+    return {"available": True, "managed_since": ms[:10],
+            "before": b, "after": a, "deltas": deltas,
+            "verdict": "Since you took over (" + ms[:10] + "): " + ", ".join(bits) + "."}
+
+
 def generate_client_advisory(client_id: str, *,
                              db_path: Optional[Path] = None) -> dict:
     from hypogeum import client_manager as cm
@@ -89,7 +148,8 @@ def generate_client_advisory(client_id: str, *,
     out: dict = {"subject": client_id, "ok": False, "reason": None,
                  "catalogue": {}, "summary": "", "what_works": [],
                  "recommendations": [], "best_time": [], "audience": {},
-                 "monetization": None, "directives": [], "unused_raw_assets": None}
+                 "monetization": None, "directives": [], "unused_raw_assets": None,
+                 "before_after": None}
 
     client = cm.get_client(client_id, db_path=db_path)
     if not client:
@@ -102,6 +162,9 @@ def generate_client_advisory(client_id: str, *,
         r["profile"] = (prof or {}).get("analysis") or {}
         r["hour"], r["dow"] = _hour_dow(r.get("published_at"))
 
+    # before/after the operator took over (needs client.managed_since)
+    out["before_after"] = _before_after(client, rows)
+
     scored = [r for r in rows if _num(r.get("engagement_rate")) is not None]
     for r in scored:
         r["engagement_rate"] = _num(r["engagement_rate"])
@@ -110,12 +173,26 @@ def generate_client_advisory(client_id: str, *,
     # context blocks are always safe to attach
     _attach_context(out, client_id, db_path)
 
+    ba = out["before_after"]
+    if ba and ba.get("available"):
+        out["what_works"].append({
+            "axis": "before vs after you took over",
+            "finding": ba["verdict"],
+            "evidence": f"{ba['before']['posts']} posts before {ba['managed_since']}, "
+                        f"{ba['after']['posts']} after."})
+        if ba["deltas"].get("engagement", 0) < 0:
+            out["recommendations"].append(
+                "Engagement is down since takeover — revisit hook and thumbnail on recent posts.")
+
     if len(scored) < _MIN_SCORED:
         out["reason"] = f"only {len(scored)} posts have analytics — need {_MIN_SCORED} to compare"
         out["summary"] = (
+            (ba["verdict"] + " ") if (ba and ba.get("available")) else ""
+        ) + (
             f"{client['name']} has {len(rows)} tracked posts, {len(scored)} with "
             "performance data. Once a few more have metrics, Cortex can tell you "
             "what the best ones have in common.")
+        out["ok"] = bool(ba and ba.get("available"))
         return out
 
     top, bottom = _split(scored)
@@ -211,13 +288,14 @@ def generate_client_advisory(client_id: str, *,
     if gap_line:
         recs.append(gap_line)
 
+    _ba_pre = (ba["verdict"] + " ") if (ba and ba.get("available")) else ""
     if works:
-        out["summary"] = (
+        out["summary"] = _ba_pre + (
             f"{client['name']}: top posts average {top_er:.1f}% engagement vs "
             f"{bot_er:.1f}% for the weakest. {len(works)} clear "
             f"difference{'s' if len(works) != 1 else ''} between them — see below.")
     else:
-        out["summary"] = (
+        out["summary"] = _ba_pre + (
             f"{client['name']}: top posts average {top_er:.1f}% engagement vs "
             f"{bot_er:.1f}% for the weakest, but nothing yet separates them on a "
             "single measurable axis. More posts (and thumbnails to analyse) will sharpen this.")

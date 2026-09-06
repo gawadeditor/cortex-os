@@ -349,6 +349,12 @@ _V2_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "learning_actions": [
         ("client_id", "TEXT"),
     ],
+    "clients": [
+        # Cortex Advisory: prospect (pre-contract, public data only) vs active;
+        # managed_since is the before/after split point for the advisory.
+        ("stage",         "TEXT NOT NULL DEFAULT 'active'"),
+        ("managed_since", "TEXT"),
+    ],
     "run_queue": [
         ("source",               "TEXT"),  # 'rerun' | 'schedule' | 'manual' | 'auto_retry'
         ("recovery_from_run_id", "TEXT"),  # FK → runs.run_id; set for reruns/auto_retry only

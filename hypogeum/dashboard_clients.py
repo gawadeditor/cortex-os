@@ -82,6 +82,8 @@ def get_clients_overview(db_path: Optional[Path] = None) -> dict:
         out["clients"].append({
             "client_id": c["client_id"], "name": c["name"], "status": c["status"],
             "engagement_mode": c["engagement_mode"],
+            "stage": c.get("stage") or "active",
+            "managed_since": c.get("managed_since"),
             "accounts": len(accts),
             "platforms": sorted({a["platform"] for a in accts}),
             "content_items": len(rows),

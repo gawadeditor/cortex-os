@@ -58,8 +58,20 @@
   </div>
 
   <div class="cb-step" data-step="1">
-    <h2>How Cortex engages</h2>
-    <p class="sub">Observe is the safe default — Cortex only reads and advises. Manage additionally lets Cortex schedule the client's posts (behind an approval step).</p>
+    <h2>Stage &amp; engagement</h2>
+    <p class="sub">A prospect is pre-contract — you don't have account access yet, so Cortex works from public data only (paste a channel URL on the Content page). Switch to active after you sign.</p>
+    <div class="cb-field">
+      <label for="stage">Stage</label>
+      <select id="stage" name="stage">
+        <option value="active" selected>Active — you manage their accounts</option>
+        <option value="prospect">Prospect — evaluating, public data only</option>
+      </select>
+    </div>
+    <div class="cb-field">
+      <label for="managed_since">Managed since <span style="text-transform:none;">(optional)</span></label>
+      <input type="date" id="managed_since" name="managed_since">
+      <span class="hint">The date you took over. Cortex splits the catalogue here to show before/after.</span>
+    </div>
     <div class="cb-field">
       <label for="engagement_mode">Engagement mode</label>
       <select id="engagement_mode" name="engagement_mode">
@@ -78,9 +90,10 @@
   </div>
 
   <div class="cb-step" data-step="2">
-    <h2>Connect accounts</h2>
-    <p class="sub">You'll connect the social accounts you manage for this client right after creating it — on the client's Accounts page, from the shared Zernio pool.</p>
-    <p class="sub" style="color:var(--faint);">Nothing to do here now. This step is a reminder of what comes next.</p>
+    <h2>Get their content in</h2>
+    <p class="sub">After creating the client, on the <b>Content</b> tab:</p>
+    <p class="sub">• <b>Prospect / no access:</b> paste their YouTube channel URL — Cortex pulls the public catalogue.<br>
+       • <b>Active:</b> connect accounts on the Accounts tab, or import a CSV / paste post URLs for Instagram, TikTok, Facebook.</p>
   </div>
 
   <div class="cb-step" data-step="3">
@@ -113,6 +126,8 @@
     if (step === LAST){
       document.getElementById('cb-review').innerHTML =
         '<div><b>Name</b> ' + (f.name.value || '—') + '</div>' +
+        '<div><b>Stage</b> ' + f.stage.value + '</div>' +
+        (f.managed_since.value ? '<div><b>Managed since</b> ' + f.managed_since.value + '</div>' : '') +
         '<div><b>Timezone</b> ' + (f.timezone.value || 'UTC') + '</div>' +
         '<div><b>Engagement</b> ' + f.engagement_mode.value + '</div>' +
         '<div><b>Analysis</b> ' + f.analysis_depth.value + '</div>';
@@ -130,6 +145,7 @@
       body: JSON.stringify({
         name: f.name.value.trim(), brief: f.brief.value.trim(),
         timezone: f.timezone.value.trim() || 'UTC',
+        stage: f.stage.value, managed_since: f.managed_since.value,
         engagement_mode: f.engagement_mode.value, analysis_depth: f.analysis_depth.value
       })
     }).then(function(r){ return r.json(); }).then(function(d){

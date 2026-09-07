@@ -1045,3 +1045,45 @@ class TestShortNativeGateInRunScriptEngine:
         monkeypatch.setattr("hypogeum.agents.script_engine.run_agent", lambda **kw: bad)
         with pytest.raises(ScriptViralityError):
             run_script_engine(NP, self._cfg_short_native(), EPISODE_ID, None)
+
+
+class TestShortNativeBeatBudgetEnforcement:
+    """_enforce_short_native_budget must hard-cap a beat even when its single
+    leading sentence alone exceeds max_beat_words — the miss that forced
+    Assembly's coverage-fill path on ~1s deficits (2026-09: twinkle b_013)."""
+
+    def _cfg(self):
+        return make_config()
+
+    def test_single_over_budget_sentence_is_hard_cut(self):
+        from hypogeum.agents.script_engine import (
+            _enforce_short_native_budget, _short_native_beat_budget,
+        )
+        from hypogeum.logger import get_logger
+
+        cfg = self._cfg()
+        _bs, max_words, _wps = _short_native_beat_budget(cfg, "twinkle_mini_tales")
+        long_sentence = " ".join(["word"] * (max_words + 6)) + "."
+        pkg = {"sections": [{"section_id": "s", "title": "t", "narration_beats": [
+            {"beat_id": "b1", "text": long_sentence},
+        ]}]}
+        _enforce_short_native_budget(pkg, cfg, get_logger(agent="t"),
+                                     channel_id="twinkle_mini_tales")
+        out = pkg["sections"][0]["narration_beats"][0]["text"]
+        assert len(out.split()) <= max_words
+
+    def test_multi_sentence_beat_keeps_leading_whole_sentences(self):
+        from hypogeum.agents.script_engine import (
+            _enforce_short_native_budget, _short_native_beat_budget,
+        )
+        from hypogeum.logger import get_logger
+
+        cfg = self._cfg()
+        _bs, max_words, _wps = _short_native_beat_budget(cfg, "hypogeum")
+        pkg = {"sections": [{"section_id": "s", "title": "t", "narration_beats": [
+            {"beat_id": "b1", "text": "Short first line. " + " ".join(["x"] * (max_words + 10)) + "."},
+        ]}]}
+        _enforce_short_native_budget(pkg, cfg, get_logger(agent="t"), channel_id="hypogeum")
+        out = pkg["sections"][0]["narration_beats"][0]["text"]
+        assert len(out.split()) <= max_words
+        assert out.startswith("Short first line")

@@ -369,11 +369,14 @@ _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 _SLOW_VOICE_WPS_FLOOR = 1.8
 
 # Headroom subtracted from the clip's editorial-speed ceiling when sizing the
-# per-beat word cap: ElevenLabs appends ~0.13-0.21s of trailing silence to
-# every generated beat (see hypogeum.agents.timeline_builder — the timeline
-# anchors on the real probed .mp3, tail included), plus ffprobe/measurement
-# noise. Sizing the cap to the bare ceiling left b_013 landing 0.24s over.
-_BEAT_BUDGET_HEADROOM_SECONDS = 0.45
+# per-beat word cap. Covers three things: (a) ElevenLabs appends ~0.13-0.21s of
+# trailing silence to every generated beat (timeline anchors on the real probed
+# .mp3, tail included); (b) a generated clip frequently comes back SHORT of its
+# nominal duration — veo3 "8s" clips land 7.0-8.0s, black-tail trim removes more,
+# so the real ceiling is often ~0.8-1.0s below nominal × 1.10; (c) ffprobe noise.
+# Sizing the cap to the bare nominal ceiling kept forcing Assembly's coverage-
+# fill path on ~1s deficits (2026-09: ep_d7443489 s06, ep_e51a43ef s01-s07).
+_BEAT_BUDGET_HEADROOM_SECONDS = 1.0
 
 
 def _short_native_beat_budget(
@@ -458,8 +461,15 @@ def _enforce_short_native_budget(
                         break
                     kept.append(sent)
                     count += sw
-                if not kept:  # single sentence already over budget — hard word cut
-                    kept = [" ".join(words[:max_beat_words])]
+                # A single leading sentence that is itself over budget was
+                # still appended above (we always keep at least one) — hard-cut
+                # it to the word cap. Without this a 12-word one-sentence beat
+                # stayed 12 words, ran ~1s long against the clip, and forced
+                # Assembly onto the flaky coverage-fill path (observed:
+                # ep_e51a43ef b_013, twinkle 5s clips, 2026-09).
+                if not kept or count > max_beat_words:
+                    kept = [" ".join(" ".join(kept).split()[:max_beat_words])] if kept \
+                        else [" ".join(words[:max_beat_words])]
                     count = max_beat_words
                 new_text = " ".join(kept).strip()
                 if new_text != text:

@@ -215,6 +215,37 @@ class TestFullSequence:
         assert results[0].result.status == "published"
         assert len(publish_transport.post_calls) == 1
 
+    def test_item_already_in_a_future_slot_is_not_rescheduled(self, db_path, assets_root):
+        """An episode already sitting in a future channel_publish_slots slot
+        (e.g. a partial publish still resolving) must not be compiled a
+        second slot on the next poll — regression for one old episode ending
+        up scheduled on Zernio 4 times (2026-09-07)."""
+        from hypogeum.db import get_connection
+        _setup_channel(db_path)
+        _seed_complete_episode(db_path, assets_root, "ep_sched_ahead")
+        _fully_bind(db_path)
+        conn = get_connection(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO channel_publish_slots (channel_id, slot_utc, episode_id, created_at) "
+                "VALUES (?,?,?,?)",
+                (CHANNEL_ID, "2099-01-01T15:00:00+00:00", "ep_sched_ahead", "2026-09-07T00:00:00+00:00"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        publish_transport = FakePublishTransport()
+        results = process_channel_ready_bundles(
+            CHANNEL_ID, BUNDLE, db_path=db_path, assets_root=assets_root,
+            enable_production_output_gate=False,
+            media_staging_provider=ZernioMediaStagingProvider(
+                presign_transport=FakeMediaTransport(), upload_transport=FakeMediaTransport()),
+            publishing_provider=ZernioProvider(transport=publish_transport),
+        )
+        assert results == []
+        assert publish_transport.post_calls == []
+
 
 class TestCanonicalMetadataReachesTheRealSerializedRequestBody:
     """

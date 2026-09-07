@@ -857,6 +857,33 @@ def _resolve_platform_settings_for_call(
     return build_platform_settings(platform, policy_entry)
 
 
+def _item_has_future_publish_slot(
+    channel_id: str, item_id: str, db_path: Optional[Path],
+) -> bool:
+    """True if this episode already occupies a publish slot whose time is
+    still in the future (channel_publish_slots — the Zernio-schedule
+    mirror). Used to skip re-compiling a slot for an episode that is
+    already scheduled but not yet fully live. Best-effort: False on any
+    error, so a query bug never silently blocks a legitimate release."""
+    if not channel_id or not item_id:
+        return False
+    try:
+        from hypogeum.db import get_connection  # noqa: PLC0415
+        now_iso = datetime.now(timezone.utc).isoformat()
+        conn = get_connection(Path(db_path) if db_path else None)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM channel_publish_slots "
+                "WHERE channel_id = ? AND episode_id = ? AND slot_utc > ? LIMIT 1",
+                (channel_id, item_id, now_iso),
+            ).fetchone()
+        finally:
+            conn.close()
+        return row is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def process_channel_ready_bundles(
     channel_id: str,
     bundle_definition: DeliverableBundleDefinition,
@@ -963,6 +990,18 @@ def process_channel_ready_bundles(
     results: List[ReadyBundle] = []
     for item in demand_items:
         if item.already_published:
+            continue
+        # Already sitting in a FUTURE publish slot (channel_publish_slots,
+        # the Zernio-schedule mirror) — a partial publish (YT succeeded,
+        # TikTok still pending) keeps already_published False, and without
+        # this guard every worker poll would compile a fresh slot and book
+        # the same episode again (2026-09-07: one old episode ended up
+        # scheduled on Zernio 4 times). Wait for the pending one to resolve.
+        if _item_has_future_publish_slot(channel_id, item.item_id, db_path):
+            resolved_log.info(
+                "release_trigger_skip_already_scheduled_ahead",
+                channel_id=channel_id, item_id=item.item_id,
+            )
             continue
         try:
             package = build_publish_package_from_episode_dir(

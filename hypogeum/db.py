@@ -3573,6 +3573,49 @@ def validate_lease(
 # imports decimal.Decimal so it stays a thin, generic persistence layer.
 # ---------------------------------------------------------------------------
 
+_TRUED_UP_TERMINAL_STATUSES = (
+    "complete", "completed", "published", "superseded", "archived",
+)
+
+
+def _weekly_reserved_sum_trued_up(conn, scope_ref: str, rows) -> "Decimal":
+    """Sum of a channel-week's active reservations, with a COMPLETED /
+    superseded episode's plan-weekly + preplan holds trued up to its ACTUAL
+    recorded spend (SUM costs.cost_usd), capped at what it reserved. An
+    in-flight episode still counts its full worst-case hold. Mirrors
+    channel_budget_policy._other_week_exposure — see that docstring. The
+    scope_ref is `<channel_id>:<ISO-week>`, so channel_id is scope_ref.rsplit."""
+    from decimal import Decimal
+    channel_id = scope_ref.rsplit(":", 1)[0]
+
+    per_episode: dict = {}
+    non_episode = Decimal("0")
+    for r in rows:
+        key, amt = r[0], Decimal(r[1])
+        parts = key.split(":")
+        if (len(parts) >= 3
+                and parts[0] in ("plan-weekly", "preplan", "preplan-incurred")
+                and parts[1] == channel_id):
+            per_episode[parts[2]] = per_episode.get(parts[2], Decimal("0")) + amt
+        else:
+            non_episode += amt
+
+    total = non_episode
+    for ep, held in per_episode.items():
+        st = conn.execute(
+            "SELECT status FROM episodes WHERE episode_id = ?", (ep,),
+        ).fetchone()
+        if st and (st[0] or "") in _TRUED_UP_TERMINAL_STATUSES:
+            actual_row = conn.execute(
+                "SELECT COALESCE(SUM(cost_usd), 0) FROM costs WHERE episode_id = ?", (ep,),
+            ).fetchone()
+            actual = Decimal(str(actual_row[0] or 0))
+            total += min(actual, held)
+        else:
+            total += held
+    return total
+
+
 def reserve_budget(
     conn: sqlite3.Connection,
     reservation_id: str,
@@ -3652,12 +3695,15 @@ def reserve_budget(
         # of trusting SQL's floating-point SUM() on cast text.
         rows = conn.execute(
             """
-            SELECT reserved_amount FROM budget_reservations
+            SELECT idempotency_key, reserved_amount FROM budget_reservations
             WHERE scope_kind = ? AND scope_ref = ? AND status IN ('reserved','committed')
             """,
             (scope_kind, scope_ref),
         ).fetchall()
-        total = sum((Decimal(r[0]) for r in rows), Decimal("0"))
+        if scope_kind == "channel_weekly":
+            total = _weekly_reserved_sum_trued_up(conn, scope_ref, rows)
+        else:
+            total = sum((Decimal(r[1]) for r in rows), Decimal("0"))
 
         if total + Decimal(reserved_amount) > Decimal(ceiling):
             conn.rollback()

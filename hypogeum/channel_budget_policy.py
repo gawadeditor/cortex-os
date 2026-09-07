@@ -508,7 +508,41 @@ def resolve_configured_weekly_limit(
 # 1/5/6 -- ledger reads
 # ---------------------------------------------------------------------------
 
+_TERMINAL_EPISODE_STATUSES = ("complete", "completed", "published", "superseded", "archived")
+
+
+def _episode_of_weekly_key(key: str, channel_id: str) -> Optional[str]:
+    """The episode_id embedded in a channel_weekly idempotency_key, or None.
+    plan-weekly:<ch>:<ep>:<hash> | preplan:<ch>:<ep> | preplan-incurred:<ch>:<ep>
+    (a non-episode key like manual-observation-cap:<ch>:<week> returns None)."""
+    parts = key.split(":")
+    if (len(parts) >= 3
+            and parts[0] in ("plan-weekly", "preplan", "preplan-incurred")
+            and parts[1] == channel_id):
+        return parts[2]
+    return None
+
+
+def _episode_is_terminal(conn, ep: str) -> bool:
+    row = conn.execute(
+        "SELECT status FROM episodes WHERE episode_id = ?", (ep,),
+    ).fetchone()
+    return bool(row and (row["status"] or "") in _TERMINAL_EPISODE_STATUSES)
+
+
 def _other_week_exposure(conn, channel_id: str, episode_id: str, scope_ref: str) -> Decimal:
+    """Weekly budget already taken by OTHER episodes this channel-week.
+
+    True-up (2026-09-07): a COMPLETED / superseded episode's exposure is its
+    ACTUAL recorded spend (SUM costs.cost_usd), capped at the hold it placed —
+    so a finished $9 episode stops occupying its ~$28 worst-case plan
+    reservation and the ceiling tracks real dollars. An IN-FLIGHT episode
+    still counts its full worst-case hold (its final cost isn't known yet).
+    Reservation rows are never mutated — only this read changes — so the
+    plan-weekly `reserved_amount == plan_max` invariant (capability_boundary)
+    holds.
+    """
+    from collections import defaultdict
     from hypogeum.preplan_reservation import (
         preplan_idempotency_key, preplan_incurred_idempotency_key,
     )
@@ -517,18 +551,35 @@ def _other_week_exposure(conn, channel_id: str, episode_id: str, scope_ref: str)
         preplan_idempotency_key(channel_id, episode_id),
         preplan_incurred_idempotency_key(channel_id, episode_id),
     }
-    plan_key_prefix = f"plan-weekly:{channel_id}:{episode_id}:"
+    my_plan_prefix = f"plan-weekly:{channel_id}:{episode_id}:"
     rows = conn.execute(
         "SELECT idempotency_key, reserved_amount FROM budget_reservations "
         "WHERE scope_kind = 'channel_weekly' AND scope_ref = ? AND status IN ('reserved','committed')",
         (scope_ref,),
     ).fetchall()
-    total = Decimal("0")
+
+    per_episode: dict = defaultdict(lambda: Decimal("0"))
+    non_episode = Decimal("0")
     for r in rows:
         k = r["idempotency_key"]
-        if k in own_keys or k.startswith(plan_key_prefix):
+        if k in own_keys or k.startswith(my_plan_prefix):
             continue
-        total += _q(r["reserved_amount"])
+        ep = _episode_of_weekly_key(k, channel_id)
+        if ep:
+            per_episode[ep] += _q(r["reserved_amount"])
+        else:
+            non_episode += _q(r["reserved_amount"])
+
+    total = non_episode
+    for ep, held in per_episode.items():
+        if _episode_is_terminal(conn, ep):
+            actual = _q(conn.execute(
+                "SELECT COALESCE(SUM(cost_usd), 0) AS s FROM costs WHERE episode_id = ?",
+                (ep,),
+            ).fetchone()["s"])
+            total += min(actual, held)
+        else:
+            total += held
     return total
 
 

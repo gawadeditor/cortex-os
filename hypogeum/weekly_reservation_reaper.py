@@ -137,10 +137,16 @@ def reconcile_terminal_episode_weekly_reservations(
                     "SELECT episode_id FROM episodes WHERE COALESCE(status,'') = 'superseded'"
                 ).fetchall() if r[0]
             }
+            # 'cancelled' included 2026-09-07: a run the operator stopped
+            # mid-pipeline (worker bootout) leaves the episode just as dead
+            # as a 'failed' one, but was previously never reaped — its
+            # plan-weekly hold (~$20) leaked against the ceiling forever.
+            # The `ep not in completed_run` guard below still protects an
+            # episode that was cancelled on one attempt and later completed.
             failed = {
                 r[0] for r in conn.execute(
                     "SELECT DISTINCT episode_id FROM runs "
-                    "WHERE status IN ('failed','error') AND episode_id IS NOT NULL"
+                    "WHERE status IN ('failed','error','cancelled') AND episode_id IS NOT NULL"
                 ).fetchall() if r[0]
             }
             completed_run = {

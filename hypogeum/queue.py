@@ -843,6 +843,31 @@ def _has_active_auto_retry_queue_item(
         conn.close()
 
 
+def _mark_episode_superseded(episode_id: Optional[str], db_path: Optional[Path] = None) -> None:
+    """Move a permanently-abandoned episode off 'in_progress' so it stops
+    showing as live work and the weekly-reservation reaper's superseded
+    set catches its budget hold. Only fires for a topic that was skipped
+    for good (EP/QA/Compliance/finance rejection, failure ceiling, retry
+    budget exhausted) — never for a plain release. Best-effort, never
+    raises, never touches a 'complete' or already-'superseded' row."""
+    if not episode_id:
+        return
+    try:
+        from hypogeum.db import get_connection as _gc
+        conn = _gc(db_path)
+        try:
+            conn.execute(
+                "UPDATE episodes SET status = 'superseded' WHERE episode_id = ? "
+                "AND status NOT IN ('complete', 'superseded')",
+                (episode_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _schedule_retry_queue_item(
     *,
     channel_id: str,
@@ -1538,28 +1563,18 @@ def process_next(
 
                 if _episode_hard_capped:
                     skip_topic(topic_id, reason="episode_failure_ceiling", db_path=db_path)
-                    try:
-                        from hypogeum.db import get_connection as _gc3
-                        _c3 = _gc3(db_path)
-                        try:
-                            _c3.execute(
-                                "UPDATE episodes SET status = 'superseded' WHERE episode_id = ? "
-                                "AND status NOT IN ('complete', 'superseded')",
-                                (episode_id,),
-                            )
-                            _c3.commit()
-                        finally:
-                            _c3.close()
-                    except Exception:  # noqa: BLE001
-                        pass
+                    _mark_episode_superseded(episode_id, db_path=db_path)
                 elif isinstance(exc, _pipeline_module.PipelineRejectedError):
                     skip_topic(topic_id, reason="ep_rejected", db_path=db_path)
+                    _mark_episode_superseded(episode_id, db_path=db_path)
                 elif isinstance(exc, _also_unrecoverable) or _content_is_gate_refused:
                     skip_topic(topic_id, reason=f"unrecoverable:{type(exc).__name__}", db_path=db_path)
+                    _mark_episode_superseded(episode_id, db_path=db_path)
                 elif retry_eligible:
                     mark_topic_retry(topic_id, db_path=db_path)
                 elif _max_retries is not None and _retry_count >= _max_retries:
                     skip_topic(topic_id, reason="retry_budget_exhausted", db_path=db_path)
+                    _mark_episode_superseded(episode_id, db_path=db_path)
                 else:
                     release_topic(topic_id, db_path=db_path)
             except Exception:

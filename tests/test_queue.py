@@ -2437,6 +2437,32 @@ class TestConsumerHygiene:
             f"expected 'skipped' after QA rejection; got {topic['status']!r}"
         )
 
+    def test_qa_rejection_also_supersedes_the_in_progress_episode(self, db_path):
+        """A permanently-skipped topic must also move its episode off
+        'in_progress' — otherwise the episode is stuck live forever and its
+        weekly budget hold is never reaped (2026-09-07: 5 such stuck
+        episodes, ~$34 leaked)."""
+        import hypogeum.pipeline as pl_mod
+        from hypogeum.db import get_connection
+
+        self._active_channel(db_path, "ch_qa_sup")
+        topic_id = enqueue_topic("ch_qa_sup", "qa sup topic", db_path=db_path)
+        enqueue(db_path=db_path, channel_id="ch_qa_sup", episode_id="ep_qa_sup")
+        conn = get_connection(db_path)
+        conn.execute("INSERT INTO episodes (episode_id, title, status, created_at) "
+                     "VALUES ('ep_qa_sup', 'T', 'in_progress', '2026-09-07T00:00:00+00:00')")
+        conn.commit(); conn.close()
+
+        with patch("hypogeum.pipeline.run_pipeline",
+                   side_effect=pl_mod.QARejectedError(episode_id="ep_qa_sup", report={"failures": ["x"]})):
+            process_next(worker_id=_worker(), db_path=db_path, dry_run=False,
+                         config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0))
+
+        conn = get_connection(db_path)
+        st = conn.execute("SELECT status FROM episodes WHERE episode_id='ep_qa_sup'").fetchone()[0]
+        conn.close()
+        assert st == "superseded", f"expected 'superseded'; got {st!r}"
+
     def test_topic_skipped_on_compliance_rejected_error(self, db_path):
         """Same reasoning as QARejectedError -- Rights & Compliance rejection
         is a judgment on this exact content, not infrastructure."""

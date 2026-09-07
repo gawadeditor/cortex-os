@@ -131,6 +131,33 @@ def test_failed_episode_with_no_success_is_reaped(dbp):
     assert out["reaped"][0]["to_usd"] == pytest.approx(3.0, abs=0.01)
 
 
+def test_cancelled_run_episode_is_reaped(dbp):
+    """A run the operator stopped mid-pipeline ('cancelled') leaves the
+    episode as dead as 'failed' — its plan-weekly hold must be reaped too
+    (2026-09-07: ep_ad71a178 leaked ~$20 of twinkle W37)."""
+    conn = db.get_connection(dbp)
+    _weekly(conn, "hypogeum", "ep_canc", 18.0)
+    _preplan(conn, "hypogeum", "ep_canc", 2.0)
+    _call(conn, "ep_canc", "research", 2.0)
+    _call(conn, "ep_canc", "video:s01", 4.0)          # post-plan real = 4
+    _episode(conn, "ep_canc", "in_progress")
+    _run(conn, "ep_canc", "cancelled")
+
+    out = reap(db_path=dbp)
+    assert len(out["reaped"]) == 1
+    assert out["reaped"][0]["to_usd"] == pytest.approx(4.0, abs=0.01)
+
+
+def test_cancelled_then_completed_episode_is_not_reaped(dbp):
+    conn = db.get_connection(dbp)
+    _weekly(conn, "hypogeum", "ep_cc", 18.0)
+    _episode(conn, "ep_cc", "complete")
+    _run(conn, "ep_cc", "cancelled")
+    _run(conn, "ep_cc", "completed")
+    out = reap(db_path=dbp)
+    assert out["reaped"] == []
+
+
 def test_published_episode_is_never_touched(dbp):
     conn = db.get_connection(dbp)
     _weekly(conn, "hypogeum", "ep_pub", 20.0)

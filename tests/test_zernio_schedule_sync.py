@@ -99,6 +99,35 @@ def test_unmapped_post_is_counted_not_slotted(dbp):
     assert _slots(dbp, "hypogeum") == []
 
 
+def test_attributes_via_ep_id_in_media_url_when_title_and_mapping_miss(dbp):
+    """A post whose title was edited on Zernio and that has no
+    provider_content_mappings row is still attributed via the ep_<id>
+    baked into its staged media URL — the signal present on 100% of real
+    posts and immune to title edits."""
+    conn = get_connection(dbp)
+    conn.execute(
+        "INSERT INTO episodes (episode_id, title, status, created_at) VALUES (?,?,?,?)",
+        ("ep_5f72565c", "Original Stored Title", "complete", "2026-09-05T00:00:00+00:00"),
+    )
+    conn.execute(
+        "INSERT INTO runs (run_id, episode_id, channel_id, status, started_at) VALUES (?,?,?,?,?)",
+        ("r1", "ep_5f72565c", "twinkle_mini_tales", "completed", "2026-09-05T00:00:00+00:00"),
+    )
+    conn.commit(); conn.close()
+
+    post = {
+        "_id": "p_edited", "scheduledFor": "2026-09-10T16:00:00.000Z",
+        "title": "A Completely Different Title Set On Zernio",
+        "mediaItems": [{"type": "video",
+                        "url": "https://media.zernio.com/media/123_abc_main_ep_5f72565c.mp4"}],
+        "platforms": [{"platform": "youtube", "status": "pending"}],
+    }
+    out = zss.sync_zernio_schedule(db_path=dbp, transport=_FakeTransport([post]), window_days_back=30)
+    assert out["ok"], out
+    assert out["unattributed"] == 0
+    assert _slots(dbp, "twinkle_mini_tales") == [("2026-09-10T16:00", "ep_5f72565c")]
+
+
 def test_earliest_post_wins_the_day(dbp):
     posts = [
         _post("p_late", "2026-09-06T18:00:00.000Z", "Late"),

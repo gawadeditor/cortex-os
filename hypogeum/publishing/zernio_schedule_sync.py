@@ -23,17 +23,41 @@ Public API:
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 _ZERNIO_LIST_LIMIT = 100
 
+# Every staged Zernio media file is named ``..._<deliverable>_<episode_id>.mp4``
+# (see hypogeum.publishing.zernio_media_staging) — episode_id is ``ep_`` +
+# 8 hex. This is present on 100% of real posts and survives a title edit,
+# so it is a far more reliable attribution signal than an exact title match.
+_EP_ID_IN_URL = re.compile(r"(ep_[0-9a-fA-F]{8})")
 
-def _resolve_channel_and_episode(conn, post_id: str, title: str) -> tuple[Optional[str], Optional[str]]:
+
+def _episode_id_from_media(post: dict) -> Optional[str]:
+    """Parse ``ep_<id>`` out of any media URL on the post, or None."""
+    media = post.get("mediaItems") or post.get("media") or []
+    if not isinstance(media, list):
+        return None
+    for m in media:
+        if not isinstance(m, dict):
+            continue
+        hit = _EP_ID_IN_URL.search(str(m.get("url") or ""))
+        if hit:
+            return hit.group(1).lower()
+    return None
+
+
+def _resolve_channel_and_episode(
+    conn, post_id: str, title: str, post: Optional[dict] = None,
+) -> tuple[Optional[str], Optional[str]]:
     """(channel_id, episode_id) for a Zernio post: the provider_content_
-    mappings link first, then a title match against episodes.title, else
-    (None, None) — an unattributable post is skipped, never guessed onto a
+    mappings link first, then the ``ep_<id>`` embedded in the staged media
+    URL, then an exact title match against episodes.title, else (None,
+    None) — an unattributable post is skipped, never guessed onto a
     channel."""
     row = conn.execute(
         "SELECT channel_id, episode_id FROM provider_content_mappings "
@@ -42,6 +66,20 @@ def _resolve_channel_and_episode(conn, post_id: str, title: str) -> tuple[Option
     ).fetchone()
     if row and row["channel_id"]:
         return row["channel_id"], row["episode_id"]
+
+    media_ep = _episode_id_from_media(post) if post else None
+    if media_ep:
+        row = conn.execute(
+            "SELECT e.episode_id, "
+            "  COALESCE(t.channel_id, r.channel_id) AS channel_id "
+            "FROM episodes e "
+            "LEFT JOIN episode_topics t ON t.episode_id = e.episode_id "
+            "LEFT JOIN runs r ON r.episode_id = e.episode_id "
+            "WHERE e.episode_id = ? LIMIT 1",
+            (media_ep,),
+        ).fetchone()
+        if row and row["channel_id"]:
+            return row["channel_id"], row["episode_id"]
 
     if title:
         row = conn.execute(
@@ -117,7 +155,7 @@ def sync_zernio_schedule(
                     continue
                 post_id = str(p.get("_id") or "")
                 title = (p.get("title") or "").strip()
-                channel_id, episode_id = _resolve_channel_and_episode(conn, post_id, title)
+                channel_id, episode_id = _resolve_channel_and_episode(conn, post_id, title, p)
                 if not channel_id:
                     out["unattributed"] += 1
                     continue

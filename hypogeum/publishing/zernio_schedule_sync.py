@@ -30,6 +30,13 @@ from typing import Optional
 
 _ZERNIO_LIST_LIMIT = 100
 
+# A local future slot that Zernio's list does not (yet) confirm is kept only
+# this long after it was first recorded — long enough to cover the gap
+# between a fresh assignment and its provider call + the list catching up,
+# short enough that a slot whose Zernio post was later deleted/moved stops
+# haunting the mirror (and the one-episode-per-day guards) for a week.
+_LOCAL_SLOT_GRACE_SECONDS = 2 * 3600
+
 # Every staged Zernio media file is named ``..._<deliverable>_<episode_id>.mp4``
 # (see hypogeum.publishing.zernio_media_staging) — episode_id is ``ep_`` +
 # 8 hex. This is present on 100% of real posts and survives a title edit,
@@ -170,30 +177,41 @@ def sync_zernio_schedule(
             conn.isolation_level = None
             conn.execute("BEGIN IMMEDIATE")
             try:
+                grace_floor = (now - timedelta(seconds=_LOCAL_SLOT_GRACE_SECONDS)).isoformat()
                 for channel_id in synced_channels:
                     existing = conn.execute(
-                        "SELECT slot_utc, episode_id FROM channel_publish_slots WHERE channel_id = ?",
+                        "SELECT slot_utc, episode_id, created_at FROM channel_publish_slots WHERE channel_id = ?",
                         (channel_id,),
                     ).fetchall()
                     want_days = set(desired[channel_id].keys())
-                    # Keep a local future slot only when Zernio has NO post
-                    # for that channel on that day yet (a fresh assignment
-                    # made moments before its provider call).
-                    keep: list[tuple[str, str]] = []
+                    # Keep a local future slot Zernio has not confirmed ONLY
+                    # when it is still inside its grace window (a fresh
+                    # assignment made moments before its provider call, with
+                    # Zernio's list momentarily behind). A slot older than
+                    # that whose Zernio post the list does not carry has been
+                    # deleted/moved on the provider — drop it rather than let
+                    # it haunt the daily-cap guards forever. Its original
+                    # created_at is preserved on re-insert so the window can
+                    # actually expire (bumping it to now made stale kept rows
+                    # immortal — the ep_8154490c Sep-15 ghost, 2026-09-07).
+                    keep: list[tuple[str, str, str]] = []
                     for r in existing:
                         s = str(r["slot_utc"])
-                        if s[:10] not in want_days and s > now.isoformat():
-                            keep.append((s, r["episode_id"]))
+                        created = str(r["created_at"] or "")
+                        if s[:10] not in want_days and s > now.isoformat() and created >= grace_floor:
+                            keep.append((s, r["episode_id"], created))
                     removed = len(existing) - len(keep)
                     conn.execute("DELETE FROM channel_publish_slots WHERE channel_id = ?", (channel_id,))
-                    rows = [(slot, ep) for slot, ep in desired[channel_id].values()] + keep
-                    for slot, ep in rows:
+                    zernio_rows = [
+                        (slot, ep, now.isoformat()) for slot, ep in desired[channel_id].values()
+                    ]
+                    for slot, ep, created in zernio_rows + keep:
                         conn.execute(
                             "INSERT INTO channel_publish_slots (channel_id, slot_utc, episode_id, created_at) "
                             "VALUES (?,?,?,?) ON CONFLICT(channel_id, slot_utc) DO UPDATE SET episode_id=excluded.episode_id",
-                            (channel_id, slot, ep, now.isoformat()),
+                            (channel_id, slot, ep, created),
                         )
-                    out["slots_written"] += len(rows)
+                    out["slots_written"] += len(zernio_rows) + len(keep)
                     out["slots_removed"] += max(0, removed)
                 conn.commit()
             except BaseException:

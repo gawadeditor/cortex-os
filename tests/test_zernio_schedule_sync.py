@@ -140,6 +140,33 @@ def test_earliest_post_wins_the_day(dbp):
     assert _slots(dbp, "hypogeum") == [("2026-09-06T14:00", "ep_early")]
 
 
+def test_stale_local_slot_outside_grace_is_dropped_not_kept_forever(dbp):
+    """A local future slot Zernio's list does not carry is kept only inside
+    the grace window; an old one (its Zernio post was deleted/moved) is
+    dropped, and its created_at is NOT bumped so it can't become immortal
+    (regression for the ep_8154490c Sep-15 ghost, 2026-09-07)."""
+    from datetime import datetime, timedelta, timezone
+    old = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+    fresh = datetime.now(timezone.utc).isoformat()
+    future_stale = (datetime.now(timezone.utc) + timedelta(days=9)).isoformat()
+    future_fresh = (datetime.now(timezone.utc) + timedelta(days=10)).isoformat()
+    conn = get_connection(dbp)
+    conn.execute("INSERT INTO channel_publish_slots (channel_id, slot_utc, episode_id, created_at) VALUES (?,?,?,?)",
+                 ("hypogeum", future_stale, "ep_ghost", old))
+    conn.execute("INSERT INTO channel_publish_slots (channel_id, slot_utc, episode_id, created_at) VALUES (?,?,?,?)",
+                 ("hypogeum", future_fresh, "ep_justassigned", fresh))
+    conn.commit(); conn.close()
+
+    posts = [_post("p1", "2026-09-06T14:00:00.000Z", "Ep A")]
+    _map(dbp, "p1", "hypogeum", "ep_a")
+    out = zss.sync_zernio_schedule(db_path=dbp, transport=_FakeTransport(posts), window_days_back=30)
+    assert out["ok"]
+    eps = {ep for _, ep in _slots(dbp, "hypogeum")}
+    assert "ep_ghost" not in eps           # old, unconfirmed -> dropped
+    assert "ep_justassigned" in eps        # fresh, unconfirmed -> kept
+    assert "ep_a" in eps
+
+
 def test_transport_error_is_no_raise(dbp):
     class _Boom:
         def get(self, **kw):

@@ -1541,10 +1541,14 @@ class TestConsumer:
         topic_b = enqueue_topic(channel_id, "Topic B", db_path=db_path)
 
         past = _now() - timedelta(minutes=1)
+        # Two schedules on one channel is an artificial setup for this
+        # regression; give each headroom under the per-channel daily ceiling
+        # (2026-09-07) so what is actually under test — claim-time target
+        # derivation for two concurrent scheduled_runs — still exercises.
         create_schedule(db_path=db_path, scope="channel", channel_id=channel_id,
-                        cadence="daily", next_run_at=past)
+                        cadence="daily", next_run_at=past, max_runs_per_day=2)
         create_schedule(db_path=db_path, scope="channel", channel_id=channel_id,
-                        cadence="daily", next_run_at=past)
+                        cadence="daily", next_run_at=past, max_runs_per_day=2)
         sr_ids = tick(db_path=db_path, now=_now())
         assert len(sr_ids) == 2
         queue_ids = consume_scheduled_runs(db_path=db_path)

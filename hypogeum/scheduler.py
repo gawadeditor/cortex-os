@@ -105,12 +105,34 @@ _PRODUCTION_CATCHUP_MAX = _env_int("PRODUCTION_CATCHUP_MAX", 1, floor=1)
 _REACTIVE_TOPUP_COOLDOWN_SECONDS = _env_int("REACTIVE_TOPUP_COOLDOWN_SECONDS", 3600, floor=60)
 
 
-def channel_buffer_depth(channel_id: str, conn) -> int:
-    """How many episodes for `channel_id` are already produced-but-unpublished
-    or in flight toward a publish slot: non-terminal run_queue items +
-    pending scheduled_runs + finished runs with no succeeded publication and
-    not superseded. Best-effort — returns 0 on any query error so the guard
-    fails OPEN (never blocks production because of a counting bug)."""
+def channel_buffer_depth(
+    channel_id: str, conn, now: Optional[datetime] = None,
+) -> int:
+    """How many episodes for `channel_id` are produced-and-not-yet-live or in
+    flight toward a publish slot — the produce-ahead buffer the scheduler
+    keeps so a bad production day never exposes the publish calendar:
+
+      * run_queue items still queued/claimed
+      * pending scheduled_runs
+      * episodes assigned to a FUTURE publish slot in channel_publish_slots
+        (the Zernio-schedule mirror) — an episode scheduled for next
+        Saturday is still buffer, not "already published and consumed"
+      * completed, non-superseded runs the publish trigger has not picked
+        up yet (no publication_intent at all) and that never went live
+
+    Before 2026-09-07 a Zernio-accepted SCHEDULED post counted as
+    "published" here (publication_intents.status = 'succeeded'), so a
+    channel scheduled a dozen episodes deep read depth 0 — and the reactive
+    top-up below produced ~2 more every hour all night. A future scheduled
+    slot now counts as buffer; a slot whose time has passed does not (it is
+    live/consumed). channel_publish_slots is refreshed by the worker's own
+    Zernio schedule sync each loop; if that mirror is stale this UNDER-counts
+    (fails toward producing), and the per-channel max_runs_per_day ceiling in
+    tick() is the hard backstop.
+
+    Best-effort — returns 0 on any query error so the guard fails OPEN
+    (never blocks production because of a counting bug)."""
+    now_iso = _iso(now if now is not None else _now_utc())
     try:
         q = int(conn.execute(
             "SELECT COUNT(*) FROM run_queue WHERE channel_id = ? "
@@ -124,19 +146,68 @@ def channel_buffer_depth(channel_id: str, conn) -> int:
         except Exception:  # noqa: BLE001
             sr = 0
         try:
-            done_unpub = int(conn.execute(
-                "SELECT COUNT(DISTINCT r.episode_id) FROM runs r "
-                "WHERE r.channel_id = ? AND r.status IN ('complete','completed') "
-                "AND r.episode_id IS NOT NULL "
-                "AND NOT EXISTS (SELECT 1 FROM publication_intents pi "
-                "  WHERE pi.episode_id = r.episode_id AND pi.status = 'succeeded') "
-                "AND NOT EXISTS (SELECT 1 FROM episodes e "
-                "  WHERE e.episode_id = r.episode_id AND e.status = 'superseded')",
-                (channel_id,),
-            ).fetchone()[0] or 0)
+            scheduled_ahead = {
+                r[0] for r in conn.execute(
+                    "SELECT DISTINCT episode_id FROM channel_publish_slots "
+                    "WHERE channel_id = ? AND episode_id IS NOT NULL AND slot_utc > ?",
+                    (channel_id, now_iso),
+                ).fetchall()
+            }
         except Exception:  # noqa: BLE001
-            done_unpub = 0
-        return q + sr + done_unpub
+            scheduled_ahead = set()
+        try:
+            produced_unclaimed = {
+                r[0] for r in conn.execute(
+                    "SELECT DISTINCT r.episode_id FROM runs r "
+                    "WHERE r.channel_id = ? AND r.status IN ('complete','completed') "
+                    "AND r.episode_id IS NOT NULL "
+                    "AND NOT EXISTS (SELECT 1 FROM publication_intents pi "
+                    "  WHERE pi.episode_id = r.episode_id AND pi.status = 'succeeded') "
+                    "AND NOT EXISTS (SELECT 1 FROM episodes e "
+                    "  WHERE e.episode_id = r.episode_id AND e.status = 'superseded')",
+                    (channel_id,),
+                ).fetchall()
+            }
+        except Exception:  # noqa: BLE001
+            produced_unclaimed = set()
+        # Union so an episode both freshly-completed and already mirrored into
+        # a future slot is counted exactly once.
+        return q + sr + len(produced_unclaimed | scheduled_ahead)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _channel_local_day_start_utc(channel_id: str, now: datetime) -> datetime:
+    """The UTC instant of the current local-day midnight for the channel's
+    own timezone (ChannelOperationsProfile.timezone). Falls back to UTC
+    midnight if the profile or its timezone can't be resolved — a daily
+    ceiling on a slightly-off day boundary still bounds spend."""
+    tz: timezone = timezone.utc
+    try:
+        from hypogeum.channel_config import get_channel_operations_profile  # noqa: PLC0415
+        prof = get_channel_operations_profile(channel_id)
+        tz_name = getattr(prof, "timezone", None) if prof is not None else None
+        if tz_name:
+            from zoneinfo import ZoneInfo  # noqa: PLC0415
+            tz = ZoneInfo(tz_name)  # type: ignore[assignment]
+    except Exception:  # noqa: BLE001
+        tz = timezone.utc
+    local = now.astimezone(tz)
+    return local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+
+
+def _scheduled_runs_since(channel_id: str, conn, since_iso: str) -> int:
+    """How many scheduled_runs have been created for this channel at/after
+    `since_iso` — its real production-trigger count for the current local
+    day. Every scheduled_run is a paid pipeline attempt, so this (not a
+    distinct-episode count) is what a max_runs_per_day ceiling must bound.
+    Best-effort: 0 on error, so a counting bug never hard-blocks the
+    schedule."""
+    try:
+        return int(conn.execute(
+            "SELECT COUNT(*) FROM scheduled_runs WHERE channel_id = ? AND created_at >= ?",
+            (channel_id, since_iso),
+        ).fetchone()[0] or 0)
     except Exception:  # noqa: BLE001
         return 0
 
@@ -580,11 +651,14 @@ def tick(
 
     Never executes the pipeline. Never publishes. Never generates content.
 
-    max_runs_per_day is stored on the schedule entity but NOT enforced by
-    tick() in P2-03. For daily/weekly cadences, advancing next_run_at
-    after each tick naturally limits to one run per cadence period.
-    Enforcement of the daily ceiling across manual triggers is deferred
-    to a future milestone.
+    max_runs_per_day is a HARD per-channel ceiling (2026-09-07): the
+    due-schedule path, the behind-target catch-up burst, and the reactive
+    buffer top-up all count how many scheduled_runs this channel has
+    already had created since its own local-day midnight
+    (ChannelOperationsProfile.timezone) and never take it past the ceiling
+    — a channel at its cap rolls next_run_at forward and produces nothing.
+    Without this the reactive top-up was an unbounded hourly producer
+    whenever channel_buffer_depth read low.
 
     Args:
         db_path: Override DB path (for tests).
@@ -620,6 +694,35 @@ def tick(
             # a non-recurring cadence is never guarded.)
             channel_id_g = row["channel_id"] if "channel_id" in row.keys() else None
 
+            # Per-channel daily ceiling (2026-09-07). max_runs_per_day is
+            # stored on the schedule but was never enforced — the reactive
+            # top-up below then produced ~2 paid episodes/hour all night when
+            # the buffer signal read low. Count what this channel has already
+            # triggered since its own local-day midnight; if it is at/over
+            # the ceiling, roll the schedule forward and produce nothing.
+            max_per_day = (
+                row["max_runs_per_day"] if "max_runs_per_day" in row.keys() else None
+            )
+            daily_remaining: Optional[int] = None
+            if channel_id_g and isinstance(max_per_day, int) and not isinstance(max_per_day, bool) and max_per_day > 0:
+                day_start = _iso(_channel_local_day_start_utc(channel_id_g, now))
+                already_today = _scheduled_runs_since(channel_id_g, conn, day_start)
+                daily_remaining = max_per_day - already_today
+                if daily_remaining <= 0:
+                    from hypogeum.logger import get_logger
+                    get_logger(agent="scheduler").info(
+                        "scheduled_tick_daily_ceiling_reached",
+                        schedule_id=row["schedule_id"], channel_id=channel_id_g,
+                        max_runs_per_day=max_per_day, already_today=already_today,
+                        next_run_at=_iso(next_dt) if next_dt is not None else None,
+                    )
+                    update_schedule_next_run(
+                        conn, schedule_id=row["schedule_id"],
+                        next_run_at=_iso(next_dt) if next_dt is not None else None,
+                        last_run_at=now_iso, updated_at=now_iso,
+                    )
+                    continue
+
             # How many production runs to create this tick. Default 1 (one
             # episode per due schedule). When the buffer guard is active and
             # this channel has fallen BEHIND its target, produce enough to
@@ -627,7 +730,7 @@ def tick(
             # never left exposed for days.
             n_runs = 1
             if buffer_target and channel_id_g and next_dt is not None:
-                depth = channel_buffer_depth(channel_id_g, conn)
+                depth = channel_buffer_depth(channel_id_g, conn, now=now)
                 if depth >= buffer_target:
                     from hypogeum.logger import get_logger
                     get_logger(agent="scheduler").info(
@@ -652,6 +755,11 @@ def tick(
                         buffer_depth=depth, buffer_target=buffer_target,
                         runs_created=n_runs,
                     )
+
+            # Never exceed the channel's remaining daily allowance, even on a
+            # catch-up tick — the ceiling is a hard spend bound.
+            if daily_remaining is not None:
+                n_runs = min(n_runs, daily_remaining)
 
             due_at = row["next_run_at"]
             if due_at:
@@ -712,9 +820,24 @@ def tick(
                 if row["schedule_id"] in handled_schedule_ids:
                     continue
                 channel_id_r = row["channel_id"]
-                depth = channel_buffer_depth(channel_id_r, conn)
+                depth = channel_buffer_depth(channel_id_r, conn, now=now)
                 if depth >= buffer_target:
                     continue
+
+                # Hard per-channel daily ceiling — the same bound the due
+                # path enforces. Without this the reactive top-up is an
+                # unbounded hourly producer whenever the buffer signal
+                # reads low (see 2026-09-07 overnight incident).
+                r_max_per_day = (
+                    row["max_runs_per_day"] if "max_runs_per_day" in row.keys() else None
+                )
+                r_daily_remaining: Optional[int] = None
+                if isinstance(r_max_per_day, int) and not isinstance(r_max_per_day, bool) and r_max_per_day > 0:
+                    r_day_start = _iso(_channel_local_day_start_utc(channel_id_r, now))
+                    r_already_today = _scheduled_runs_since(channel_id_r, conn, r_day_start)
+                    r_daily_remaining = r_max_per_day - r_already_today
+                    if r_daily_remaining <= 0:
+                        continue
                 # Cooldown: if this channel already got a reactive top-up
                 # very recently, don't fire again even though the buffer
                 # still reads low — the last one may be stuck at admission
@@ -738,6 +861,8 @@ def tick(
                         continue
                 gap = buffer_target - depth
                 n_runs = min(max(1, gap), catchup_max)
+                if r_daily_remaining is not None:
+                    n_runs = min(n_runs, r_daily_remaining)
                 from hypogeum.logger import get_logger
                 get_logger(agent="scheduler").info(
                     "scheduled_tick_reactive_topup",

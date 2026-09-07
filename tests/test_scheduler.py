@@ -1129,7 +1129,7 @@ class TestProduceAheadBufferGuard:
         monkeypatch.setattr(sch, "_PRODUCTION_CATCHUP_MAX", 2)
         past = _now() - timedelta(minutes=1)
         sid = create_schedule(db_path=db_path, scope="channel", channel_id="ch_behind",
-                              cadence="daily", next_run_at=past)
+                              cadence="daily", next_run_at=past, max_runs_per_day=2)
         # depth 0 → gap 2 → 2 runs
         result = tick(db_path=db_path, now=_now())
         assert len(result) == 2
@@ -1144,7 +1144,7 @@ class TestProduceAheadBufferGuard:
         monkeypatch.setattr(sch, "_PRODUCTION_CATCHUP_MAX", 2)
         past = _now() - timedelta(minutes=1)
         create_schedule(db_path=db_path, scope="channel", channel_id="ch_way_behind",
-                        cadence="daily", next_run_at=past)
+                        cadence="daily", next_run_at=past, max_runs_per_day=5)
         result = tick(db_path=db_path, now=_now())   # gap 5, capped at 2
         assert len(result) == 2
 
@@ -1179,7 +1179,7 @@ class TestProduceAheadBufferGuard:
         monkeypatch.setattr(sch, "_PRODUCTION_CATCHUP_MAX", 2)
         future = _now() + timedelta(hours=20)   # not due — already ticked today
         sid = create_schedule(db_path=db_path, scope="channel", channel_id="ch_topup",
-                              cadence="daily", next_run_at=future)
+                              cadence="daily", next_run_at=future, max_runs_per_day=2)
         # buffer depth 0 (nothing queued) — below target of 2
         result = tick(db_path=db_path, now=_now())
         assert len(result) == 2
@@ -1196,7 +1196,7 @@ class TestProduceAheadBufferGuard:
         monkeypatch.setattr(sch, "_PRODUCTION_CATCHUP_MAX", 2)
         future = _now() + timedelta(hours=20)
         create_schedule(db_path=db_path, scope="channel", channel_id="ch_selflimit",
-                        cadence="daily", next_run_at=future)
+                        cadence="daily", next_run_at=future, max_runs_per_day=2)
         first = tick(db_path=db_path, now=_now())
         assert len(first) == 2
         second = tick(db_path=db_path, now=_now())
@@ -1232,8 +1232,10 @@ class TestProduceAheadBufferGuard:
         monkeypatch.setattr(sch, "_PRODUCTION_CATCHUP_MAX", 1)
         monkeypatch.setattr(sch, "_REACTIVE_TOPUP_COOLDOWN_SECONDS", 1800)
         future = _now() + timedelta(hours=20)
+        # High daily ceiling so the cooldown — not the per-day cap — is what
+        # is under test here.
         create_schedule(db_path=db_path, scope="channel", channel_id="ch_stuck",
-                        cadence="daily", next_run_at=future)
+                        cadence="daily", next_run_at=future, max_runs_per_day=10)
 
         t0 = _now()
         first = tick(db_path=db_path, now=t0)
@@ -1253,3 +1255,94 @@ class TestProduceAheadBufferGuard:
         # 31 min later — cooldown elapsed → fires again (one, not 30)
         later = tick(db_path=db_path, now=t0 + timedelta(minutes=31))
         assert len(later) == 1
+
+
+class TestChannelBufferDepthScheduledAhead:
+    """channel_buffer_depth() counts an episode sitting in a FUTURE publish
+    slot as buffer — before 2026-09-07 a Zernio-accepted scheduled post read
+    as 'published & consumed', so a deeply-scheduled channel reported depth 0
+    and the reactive top-up produced ~2 paid episodes/hour all night."""
+
+    def _slot(self, db_path, channel_id, episode_id, slot_utc):
+        conn = get_connection(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO channel_publish_slots (channel_id, slot_utc, episode_id, created_at) "
+                "VALUES (?,?,?,?)",
+                (channel_id, slot_utc.isoformat(), episode_id, _now().isoformat()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_future_slot_counts_past_slot_does_not(self, db_path):
+        import hypogeum.scheduler as sch
+        initialize_schema(db_path)
+        now = _utc(2026, 9, 10, 12, 0)
+        self._slot(db_path, "ch_sa", "ep_future_1", now + timedelta(days=1))
+        self._slot(db_path, "ch_sa", "ep_future_2", now + timedelta(days=3))
+        self._slot(db_path, "ch_sa", "ep_past", now - timedelta(days=1))
+        conn = get_connection(db_path)
+        try:
+            assert sch.channel_buffer_depth("ch_sa", conn, now=now) == 2
+        finally:
+            conn.close()
+
+    def test_scheduled_ahead_and_fresh_completed_are_unioned_not_double_counted(self, db_path):
+        import hypogeum.scheduler as sch
+        initialize_schema(db_path)
+        now = _utc(2026, 9, 10, 12, 0)
+        conn = get_connection(db_path)
+        try:
+            # ep_a: completed run, not yet picked up by the publish trigger
+            conn.execute("INSERT INTO runs (run_id, episode_id, channel_id, status, started_at) "
+                         "VALUES ('r_a','ep_a','ch_u','completed',?)", (now.isoformat(),))
+            # ep_b: completed AND already mirrored into a future slot — count once
+            conn.execute("INSERT INTO runs (run_id, episode_id, channel_id, status, started_at) "
+                         "VALUES ('r_b','ep_b','ch_u','completed',?)", (now.isoformat(),))
+            conn.commit()
+        finally:
+            conn.close()
+        self._slot(db_path, "ch_u", "ep_b", now + timedelta(days=2))
+        conn = get_connection(db_path)
+        try:
+            assert sch.channel_buffer_depth("ch_u", conn, now=now) == 2   # ep_a + ep_b
+        finally:
+            conn.close()
+
+
+class TestPerChannelDailyCeiling:
+    """max_runs_per_day is a HARD per-channel spend bound — it caps the
+    due-schedule path, the catch-up burst, AND the reactive top-up, so a
+    low buffer signal can never turn the scheduler into an hourly producer
+    (2026-09-07 overnight incident)."""
+
+    def test_due_path_stops_at_ceiling_and_rolls_forward(self, db_path, monkeypatch):
+        import hypogeum.scheduler as sch
+        monkeypatch.setattr(sch, "_PRODUCTION_BUFFER_TARGET", 5)
+        monkeypatch.setattr(sch, "_PRODUCTION_CATCHUP_MAX", 5)
+        now = _utc(2026, 9, 8, 10, 0)
+        past = now - timedelta(minutes=1)
+        sid = create_schedule(db_path=db_path, scope="channel", channel_id="ch_cap",
+                              cadence="daily", next_run_at=past, max_runs_per_day=1)
+        # gap 5 would want 5 catch-up runs, but the ceiling is 1
+        first = tick(db_path=db_path, now=now)
+        assert len(first) == 1
+        row = _schedule_row(db_path, sid)
+        assert row["next_run_at"] is not None          # rolled forward
+
+    def test_reactive_topup_blocked_once_ceiling_hit_same_day(self, db_path, monkeypatch):
+        import hypogeum.scheduler as sch
+        monkeypatch.setattr(sch, "_PRODUCTION_BUFFER_TARGET", 3)
+        monkeypatch.setattr(sch, "_PRODUCTION_CATCHUP_MAX", 3)
+        monkeypatch.setattr(sch, "_REACTIVE_TOPUP_COOLDOWN_SECONDS", 60)
+        t0 = _utc(2026, 9, 8, 6, 0)
+        future = t0 + timedelta(hours=20)
+        create_schedule(db_path=db_path, scope="channel", channel_id="ch_cap2",
+                        cadence="daily", next_run_at=future, max_runs_per_day=1)
+        first = tick(db_path=db_path, now=t0)
+        assert len(first) == 1
+        # well past the cooldown, buffer still 0 — but the daily ceiling holds
+        # (both checks stay within the same UTC day as t0)
+        assert tick(db_path=db_path, now=t0 + timedelta(hours=2)) == []
+        assert tick(db_path=db_path, now=t0 + timedelta(hours=10)) == []

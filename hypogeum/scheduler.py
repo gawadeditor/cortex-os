@@ -177,7 +177,9 @@ def channel_buffer_depth(
         return 0
 
 
-def _channel_local_day_start_utc(channel_id: str, now: datetime) -> datetime:
+def _channel_local_day_start_utc(
+    channel_id: str, now: datetime, db_path: Optional[Path] = None,
+) -> datetime:
     """The UTC instant of the current local-day midnight for the channel's
     own timezone (ChannelOperationsProfile.timezone). Falls back to UTC
     midnight if the profile or its timezone can't be resolved — a daily
@@ -185,7 +187,7 @@ def _channel_local_day_start_utc(channel_id: str, now: datetime) -> datetime:
     tz: timezone = timezone.utc
     try:
         from hypogeum.channel_config import get_channel_operations_profile  # noqa: PLC0415
-        prof = get_channel_operations_profile(channel_id)
+        prof = get_channel_operations_profile(channel_id, db_path=db_path)
         tz_name = getattr(prof, "timezone", None) if prof is not None else None
         if tz_name:
             from zoneinfo import ZoneInfo  # noqa: PLC0415
@@ -705,7 +707,7 @@ def tick(
             )
             daily_remaining: Optional[int] = None
             if channel_id_g and isinstance(max_per_day, int) and not isinstance(max_per_day, bool) and max_per_day > 0:
-                day_start = _iso(_channel_local_day_start_utc(channel_id_g, now))
+                day_start = _iso(_channel_local_day_start_utc(channel_id_g, now, db_path))
                 already_today = _scheduled_runs_since(channel_id_g, conn, day_start)
                 daily_remaining = max_per_day - already_today
                 if daily_remaining <= 0:
@@ -833,7 +835,7 @@ def tick(
                 )
                 r_daily_remaining: Optional[int] = None
                 if isinstance(r_max_per_day, int) and not isinstance(r_max_per_day, bool) and r_max_per_day > 0:
-                    r_day_start = _iso(_channel_local_day_start_utc(channel_id_r, now))
+                    r_day_start = _iso(_channel_local_day_start_utc(channel_id_r, now, db_path))
                     r_already_today = _scheduled_runs_since(channel_id_r, conn, r_day_start)
                     r_daily_remaining = r_max_per_day - r_already_today
                     if r_daily_remaining <= 0:

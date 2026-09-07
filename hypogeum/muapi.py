@@ -1354,6 +1354,22 @@ def _submit_scene_via_gate(
                 release_conn.close()
         return None, f"gate_denied[{result.denied_at_check}]: {result.reason}"
 
+    # Record actual video spend to the Finance Controller. The gate path
+    # (production since ADR-016) never did this — only the legacy
+    # _attempt_generation() path at record_cost()#scene_generation did — so
+    # every MUAPI scene since ~2026-08 was billed for real but logged as $0,
+    # leaving runs.total_cost_usd / the episode rollup understated by ~10x.
+    # Priced identically to the compiled plan (_resolve_gate_unit_price).
+    # Non-blocking: record_cost swallows every error.
+    _finance.record_cost(
+        provider=_VIDEO_PROVIDER,
+        model=model,
+        call_type="scene_generation",
+        cost_usd=_resolve_gate_unit_price(model, channel_id, episode_id),
+        asset_id=expected_output_identity,
+        episode_id=episode_id,
+    )
+
     return {
         "scene_id": scene_id, "asset_id": expected_output_identity, "generation_status": "generated",
         "provider": _VIDEO_PROVIDER, "tier_used": tier, "model_used": model, "prompt_used": prompt,
@@ -2139,6 +2155,15 @@ def _generate_reference_image_via_gate(
     hosted_url = result.adapter_result.evidence.get("hosted_url") if result.adapter_result else None
     if not hosted_url:
         return None, "gate_accepted_but_no_hosted_url_in_evidence"
+
+    _finance.record_cost(
+        provider=_VIDEO_PROVIDER,
+        model=model,
+        call_type="reference_image_generation",
+        cost_usd=MODEL_CREDIT_COSTS.get(model, 0.015),
+        asset_id=expected_output_identity,
+        episode_id=episode_id,
+    )
 
     return ReferenceImageResult(asset_id=expected_output_identity, hosted_url=hosted_url), None
 

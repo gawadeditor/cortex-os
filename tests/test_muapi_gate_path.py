@@ -351,6 +351,59 @@ class TestGrantDerivedGatePath:
         assert result["generation_status"] == "generated", result
         assert result["provider"] == "muapi"
 
+    def test_gate_path_records_scene_generation_cost(self, keypair, tmp_path, monkeypatch):
+        """Regression: the gate path (production since ADR-016) never recorded
+        MUAPI video spend to the Finance Controller — every scene since ~2026-08
+        was billed for real but logged as $0. It must write a costs row now."""
+        priv, _pub = keypair
+        db_path = tmp_path / "auth.db"
+        config = make_config()
+        spec = make_scene_spec(scene_id="s01b01")
+        import hypogeum.db as db
+        db.initialize_schema(db_path)
+        _register_grant(priv, db_path, model=config.MUAPI_T2_MODEL)
+        _configure_channel_weekly(db_path)
+        monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
+        _persist_matching_plan(tmp_path, model=config.MUAPI_T2_MODEL)
+
+        # a real runs row — insert_cost has an FK to runs.run_id
+        conn0 = db.get_connection(db_path)
+        try:
+            conn0.execute(
+                "INSERT INTO runs (run_id, episode_id, started_at, status) "
+                "VALUES ('run_cost_test', 'ep_gate_test', '2026-09-07T00:00:00+00:00', 'running')")
+            conn0.commit()
+        finally:
+            conn0.close()
+
+        import hypogeum.finance as finance
+        finance.set_run_context("run_cost_test", "ep_gate_test", db_path=db_path)
+        try:
+            with patch("hypogeum.muapi.requests.post") as mock_post, \
+                 patch("hypogeum.muapi.requests.get") as mock_get, \
+                 patch("hypogeum.muapi.time.sleep"), \
+                 patch("hypogeum.muapi._download_file", return_value=(True, "")), \
+                 patch("hypogeum.muapi._validate_video_file", return_value=(True, "")):
+                mock_post.return_value = _mock_submit_ok("req_cost")
+                mock_get.return_value = _mock_poll_completed()
+                result = submit_scene(spec, config, "ep_gate_test", tmp_path,
+                                      channel_id="test_channel")
+        finally:
+            finance.clear_run_context()
+
+        assert result["generation_status"] == "generated", result
+        conn = db.get_connection(db_path)
+        try:
+            rows = conn.execute(
+                "SELECT provider, call_type, cost_usd FROM costs "
+                "WHERE episode_id='ep_gate_test' AND call_type='scene_generation'"
+            ).fetchall()
+        finally:
+            conn.close()
+        assert len(rows) == 1, f"expected 1 scene_generation cost row, got {rows}"
+        assert rows[0]["provider"] == "muapi"
+        assert float(rows[0]["cost_usd"]) > 0
+
     def test_gate_releases_runtime_lease_so_repair_can_reacquire(self, keypair, tmp_path, monkeypatch):
         """A failed scene generation used to hold its runtime_lease for the
         full 30-min TTL, locking out this run's own in-assembly clip-repair

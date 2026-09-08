@@ -1,4 +1,4 @@
-# PROMPT_VERSION: v2
+# PROMPT_VERSION: v3
 # OWNER_AGENT: vertical_thumbnail_agent
 # MODEL_TARGET: anthropic/claude-sonnet-4.6
 # PURPOSE: Write ONE professional 9:16 cover-image prompt (text baked in) for a short-native episode, from its winning thumbnail concept
@@ -26,7 +26,7 @@ WHAT TO PRODUCE — a single JSON object, exactly these keys:
   "episode_id": "<episode_id>",
   "concept_id": "<the concept_id you built from>",
   "hook_text": "<the exact words that must appear on the image — 3 to 6 words, one idea, from or tightening suggested_hook_text>",
-  "image_prompt": "<the full prompt, 60–110 words, see rules below>",
+  "image_prompt": "<the full prompt, 70–130 words, see rules below>",
   "rationale": "<one sentence: why this stops the scroll for this audience>"
 }
 
@@ -46,13 +46,27 @@ platform UI eats the edges. Compose for the CENTRE.
 3. SUBJECT — one clear subject, large, roughly frame-centre, its focal point (eyes if
    any) around y 600–850. Strong single-source light, high subject/background
    contrast. Never tiny, never dead-bottom.
-4. HOOK TEXT — state it verbatim in the prompt, positioned directly above or below the
-   subject's focal point but still inside the safe box. Large bold or extra-bold
-   condensed sans-serif, ALL-CAPS, one or two lines, text block about 650–720 px
-   wide, centre-aligned. High-contrast fill in the channel's primary text colour plus
-   ONE accent colour on a single payload word. Give it a thin dark outline (3–5 px)
-   OR a soft localised dark gradient behind the words — NOT a full-width band. The
-   last 1–2 words are the payload — render them noticeably larger. Must read at a
+4. HOOK TEXT — state it verbatim, positioned directly above or below the subject's
+   focal point, inside the safe box. Large, heavy weight, ALL-CAPS, one or two lines,
+   block about 650–720 px wide, centre-aligned. The last 1–2 words are the payload —
+   render them noticeably larger, and this is where the ONE accent colour goes.
+   It must read as PART OF THE PHOTOGRAPH, not a sticker pasted on top:
+   - the letters are lit by the SAME key light as the scene — same direction, same
+     colour temperature — and cast a soft contact shadow onto the surface behind them
+     that agrees with that light;
+   - they carry the same fine grain / render texture as the image;
+   - NO hard uniform outline, NO flat pure-white fill, NO rectangle, band or clean
+     shape behind them;
+   - fill colour and accent are pulled from the scene's own palette (a highlight
+     tone, the key-light colour), not default white-and-red;
+   - legibility comes from PLACEMENT: compose so the text lands over an already dark,
+     low-detail region (deep shadow, a plain wall, open sky). If more separation is
+     needed, let it be a soft irregular darkening of the scene itself, never a
+     defined shape.
+   Where the scene gives a surface — a stone slab, a wall, the sky — let the text sit
+   ON it, taking its texture and a hint of its perspective, as signage, carved relief
+   or projected light that belongs in the world: weathered and engraved for a
+   historical channel, a soft painted glow for a bedtime channel. Must still read at a
    glance at 360 px wide (feed thumbnail).
 5. IDENTITY — honour the channel's visual identity (palette, material character,
    lighting philosophy from `channel_brief`). Historical-plausibility rules still

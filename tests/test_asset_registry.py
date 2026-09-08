@@ -800,7 +800,7 @@ class TestImageGenerationAgentRegistry:
             patch.object(_iga, "_asset_registry", mock_reg),
             patch.object(_iga, "generate_reference_image", return_value=mock_result),
             patch.object(_iga, "is_ref_image_eligible", return_value=True),
-            patch.object(_iga, "build_visual_spec_text", return_value="spec text"),
+            patch.object(_iga, "build_character_sheet_prompt", return_value="spec text"),
         ):
             result = _iga.generate_entity_reference_images(
                 locked_entities=entities,
@@ -831,7 +831,7 @@ class TestImageGenerationAgentRegistry:
                 side_effect=RuntimeError("provider error"),
             ),
             patch.object(_iga, "is_ref_image_eligible", return_value=True),
-            patch.object(_iga, "build_visual_spec_text", return_value="spec"),
+            patch.object(_iga, "build_character_sheet_prompt", return_value="spec"),
         ):
             result = _iga.generate_entity_reference_images(
                 locked_entities=entities,
@@ -863,7 +863,7 @@ class TestImageGenerationAgentRegistry:
                 side_effect=MUAPIQuotaExhausted(),
             ),
             patch.object(_iga, "is_ref_image_eligible", return_value=True),
-            patch.object(_iga, "build_visual_spec_text", return_value="spec"),
+            patch.object(_iga, "build_character_sheet_prompt", return_value="spec"),
         ):
             with pytest.raises(MUAPIQuotaExhausted):
                 _iga.generate_entity_reference_images(

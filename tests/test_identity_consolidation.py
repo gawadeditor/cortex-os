@@ -39,14 +39,23 @@ class TestTIGPromptFile:
         text = _TIG_PROMPT_FILE.read_text(encoding="utf-8")
         assert len(text.strip()) > 100
 
-    def test_tig_prompt_contains_blocking_rules(self):
+    def test_tig_prompt_is_a_generic_template(self):
+        """v2: the rule catalogue was moved out of the prompt file — it is now a
+        channel-agnostic template and the calling agent supplies the actual
+        rule_ids per deliverable class at call time. The file must NOT bake in
+        channel-specific rules any more."""
         text = _TIG_PROMPT_FILE.read_text(encoding="utf-8")
-        assert "TIG-01" in text
-        assert "TIG-07" in text
+        assert "deliverable class" in text
+        assert "supplied below this template" in text
+        assert "Do not invent rule_ids" in text
+        # A concrete channel rule catalogue must not be present.
+        assert "TIG-07" not in text
+        assert "TIG-W01" not in text
 
-    def test_tig_prompt_contains_warning_rules(self):
+    def test_tig_prompt_declares_the_violation_severities(self):
         text = _TIG_PROMPT_FILE.read_text(encoding="utf-8")
-        assert "TIG-W01" in text
+        assert "BLOCKING" in text
+        assert '"violations"' in text
 
     def test_tig_module_loads_prompt_from_disk(self):
         """thumbnail_identity_guardian.py must load _SYSTEM_PROMPT from _PROMPT_FILE, not hardcode it."""
@@ -68,8 +77,10 @@ class TestTIGPromptFile:
             "TIG module must not contain hardcoded triple-quoted system prompt"
         )
 
-    def test_tig_system_prompt_matches_file(self):
-        """The _SYSTEM_PROMPT loaded at runtime must equal the body of thumbnail_identity_guardian.txt.
+    def test_tig_template_matches_file(self):
+        """The template loaded at runtime must equal the body of
+        thumbnail_identity_guardian.txt (v2 renamed _SYSTEM_PROMPT ->
+        _GENERIC_TEMPLATE when the prompt became channel-agnostic).
 
         load_prompt() strips versioning headers (# KEY: VALUE lines) before returning the body,
         so we compare against the stripped body, not the raw file content.
@@ -79,8 +90,8 @@ class TestTIGPromptFile:
         from hypogeum.prompt_loader import load_prompt
         importlib.reload(tig_mod)
         expected = load_prompt(_TIG_PROMPT_FILE)
-        assert tig_mod._SYSTEM_PROMPT == expected, (
-            "_SYSTEM_PROMPT in module must exactly match the body of thumbnail_identity_guardian.txt"
+        assert tig_mod._GENERIC_TEMPLATE == expected, (
+            "_GENERIC_TEMPLATE in module must exactly match the body of thumbnail_identity_guardian.txt"
         )
 
 

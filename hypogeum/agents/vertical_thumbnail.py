@@ -191,6 +191,9 @@ def build_vertical_thumbnail_package(
             output_dir=base,
             agent=_AGENT_NAME,
             channel_id=_gate_channel,
+            # Full vertical-canvas cover: 1080×1920 (feed cover + in-player
+            # frame), not the 720×1280 legacy Shorts-thumbnail size.
+            thumbnail_target_dims=(1080, 1920),
         )
         main_asset_id = result.asset_id
         main_local = result.local_path

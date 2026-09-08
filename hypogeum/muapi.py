@@ -2409,7 +2409,11 @@ _WORDMARK_COLOR_THE_CHRON = _hex_to_rgb(_wordmark_palette["aged_gold"]["hex"])  
 _WORDMARK_SHADOW_COLOR    = _hex_to_rgb(_wordmark_palette["near_black"]["hex"])      # void_black — shadow
 
 
-def _normalize_thumbnail(local_path: Path, aspect_ratio: str) -> None:
+def _normalize_thumbnail(
+    local_path: Path,
+    aspect_ratio: str,
+    target_dims: Optional[tuple[int, int]] = None,
+) -> None:
     """
     Resize and center-crop a downloaded thumbnail to the canonical pixel dimensions
     for the given aspect ratio.
@@ -2418,17 +2422,23 @@ def _normalize_thumbnail(local_path: Path, aspect_ratio: str) -> None:
       "16:9" → 1280 × 720 (YouTube main episode thumbnail)
       "9:16" → 720 × 1280 (Shorts / vertical thumbnail)
 
+    target_dims (optional): explicit (width, height) override for callers that
+    need a non-canonical size — e.g. the short-native vertical cover, which
+    ships at 1080×1920 (feed cover + in-player frame, not a YouTube-Studio
+    16:9 thumbnail). Must match the aspect_ratio's orientation. When given it
+    is used verbatim in place of the _THUMBNAIL_TARGETS lookup.
+
     Algorithm: scale-to-overfill then center-crop — no letterbox, no pillarbox.
     The image fills the target frame completely; a small amount of source content
     may be cropped from two sides.
 
     No-ops:
-      - aspect_ratio not in _THUMBNAIL_TARGETS → returns immediately (no change).
+      - aspect_ratio not in _THUMBNAIL_TARGETS (and no target_dims) → returns immediately.
       - Image already exactly at target dimensions → returns immediately (no re-encode).
 
     Overwrites local_path in place with JPEG quality=95.
     """
-    target = _THUMBNAIL_TARGETS.get(aspect_ratio)
+    target = target_dims or _THUMBNAIL_TARGETS.get(aspect_ratio)
     if target is None:
         return
     target_w, target_h = target
@@ -3108,9 +3118,15 @@ def generate_thumbnail(
     typography_plan: Optional[dict] = None,
     typography_integration: str = "composited",
     channel_id: Optional[str] = None,
+    thumbnail_target_dims: Optional[tuple[int, int]] = None,
 ) -> ThumbnailResult:
     """
     Generate a thumbnail image for one deliverable (main episode or a Short).
+
+    thumbnail_target_dims (optional): explicit (width, height) for the final
+    normalized file, overriding the canonical per-aspect size. Forwarded only
+    to the "muapi" provider branch (the one short-native vertical covers use).
+    The short-native 9:16 cover passes (1080, 1920).
 
     channel_id (added for the Authorization Authority gate path, plan
     §5.5/§6 Commit F): optional, forwarded only to the "muapi" provider
@@ -3199,6 +3215,7 @@ def generate_thumbnail(
                 log=log,
                 is_fallback=is_fallback,
                 channel_id=channel_id,
+                thumbnail_target_dims=thumbnail_target_dims,
             )
             if is_fallback:
                 log.info(
@@ -3250,6 +3267,7 @@ def _generate_thumbnail_one_provider(
     log,
     is_fallback: bool,
     channel_id: Optional[str] = None,
+    thumbnail_target_dims: Optional[tuple[int, int]] = None,
 ) -> "ThumbnailResult":
     """
     Try one thumbnail provider. Returns ThumbnailResult on success.
@@ -3346,6 +3364,7 @@ def _generate_thumbnail_one_provider(
         typography_integration=typography_integration,
         log=log,
         channel_id=channel_id,
+        thumbnail_target_dims=thumbnail_target_dims,
     )
     thumb_asset_id = f"episodes/{episode_id}/thumbnails/{deliverable_id}"
     _finance.record_cost(
@@ -3982,6 +4001,7 @@ def _attempt_thumbnail_generation(
     typography_plan: Optional[dict] = None,
     typography_integration: str = "composited",
     channel_id: Optional[str] = None,
+    thumbnail_target_dims: Optional[tuple[int, int]] = None,
 ) -> tuple[str, bool]:
     """
     Attempt thumbnail generation with primary_model; fall back to fallback_model on failure.
@@ -4027,7 +4047,7 @@ def _attempt_thumbnail_generation(
         )
 
     def _post_process(model: str, used_fallback: bool) -> tuple[str, bool]:
-        _normalize_thumbnail(local_path, aspect_ratio)
+        _normalize_thumbnail(local_path, aspect_ratio, target_dims=thumbnail_target_dims)
         if integrated:
             # Integrated typography mode: image contains text rendered by the model.
             # PIL compositor is disabled — trust the image. Wordmark only.

@@ -45,6 +45,23 @@ _EXPECTED_DIMS: dict[str, tuple[int, int]] = {
     "9:16": (720, 1280),
 }
 
+
+def _dims_acceptable(actual: tuple[int, int], expected: tuple[int, int]) -> bool:
+    """
+    Check A passes when the file is EITHER exactly the canonical size OR a
+    higher-resolution image at the same aspect ratio (never smaller). This
+    lets the short-native vertical cover ship at 1080×1920 while the 720×1280
+    canonical Shorts-thumbnail size still passes for "9:16".
+    """
+    if actual == expected:
+        return True
+    aw, ah = actual
+    ew, eh = expected
+    if aw <= 0 or ah <= 0:
+        return False
+    same_ratio = abs((aw / ah) - (ew / eh)) <= 0.01
+    return same_ratio and aw >= ew and ah >= eh
+
 # Deterministic typography zone (hypogeum.agents.thumbnail_compositor.
 # _render_typography_pil's own documented zone: lower-left, x 2-42%,
 # y 30-88%) — where a headline is burned when CONCEPT_DRIVEN_MODE's PIL
@@ -107,7 +124,7 @@ def run_thumbnail_qa(
             _add_check(checks, "c_thumbnail_dimensions", "warn",
                        f"could not read dimensions from {thumbnail_local_path.name} — PIL unavailable or file corrupt")
             warnings.append(f"thumbnail_dimensions: could not probe {thumbnail_local_path.name}")
-        elif (actual_w, actual_h) != expected:
+        elif not _dims_acceptable((actual_w, actual_h), expected):
             exp_str = f"{expected[0]}×{expected[1]}"
             act_str = f"{actual_w}×{actual_h}"
             _add_check(checks, "c_thumbnail_dimensions", "fail",

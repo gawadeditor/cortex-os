@@ -1,4 +1,4 @@
-# PROMPT_VERSION: v1
+# PROMPT_VERSION: v2
 # OWNER_AGENT: vertical_thumbnail_agent
 # MODEL_TARGET: anthropic/claude-sonnet-4.6
 # PURPOSE: Write ONE professional 9:16 cover-image prompt (text baked in) for a short-native episode, from its winning thumbnail concept
@@ -25,27 +25,40 @@ WHAT TO PRODUCE — a single JSON object, exactly these keys:
   "vertical_thumbnail_plan_id": "vtp_<episode_id>",
   "episode_id": "<episode_id>",
   "concept_id": "<the concept_id you built from>",
-  "hook_text": "<the exact words that must appear on the image — 2 to 5 words, from or tightening suggested_hook_text>",
-  "image_prompt": "<the full prompt, 40–80 words, see rules below>",
+  "hook_text": "<the exact words that must appear on the image — 3 to 6 words, one idea, from or tightening suggested_hook_text>",
+  "image_prompt": "<the full prompt, 60–110 words, see rules below>",
   "rationale": "<one sentence: why this stops the scroll for this audience>"
 }
 
-IMAGE_PROMPT RULES (9:16 vertical)
-1. One clear subject, framed for portrait: fills roughly the centre 60–75% of the
-   frame height, face/eyes (if any) in the upper-middle third — never dead-centre,
-   never tiny. Strong single-source light, high subject/background contrast.
-2. Composition leaves a clean text band: either the TOP ~22% or the BOTTOM ~28% of
-   the frame kept visually calm (no busy detail, no competing highlight) for the
-   hook text. Say which band you are reserving.
-3. Hook text: state it verbatim in the prompt, in that reserved band, as large bold
-   condensed sans-serif, all-caps, one or two lines, high-contrast fill with a thin
-   contrasting outline so it survives any background. The last 1–2 words are the
-   payload — render them noticeably larger. Legible at 360 px wide (feed thumbnail).
-4. Honour the channel's visual identity (palette, material character, lighting
-   philosophy from `channel_brief`). Historical-plausibility rules still apply for a
-   period channel.
-5. No borders, no watermark, no UI, no logos, no film-grain frame, no vignette.
-6. Photoreal or the channel's established render style — never a flat vector
+IMAGE_PROMPT RULES (9:16 vertical, 1080×1920)
+
+The cover doubles as the frame the viewer sees while the video loads and plays, so
+platform UI eats the edges. Compose for the CENTRE.
+
+1. SAFE BOX — the hook text and the single most important subject element (the face,
+   the eyes, the one object the concept is about) both sit inside the central
+   rectangle x 180–900, y 500–1140 (a 720×640 zone, upper-middle of the 1080×1920
+   frame). Nothing critical — no word of the hook, no key feature — outside it.
+2. KEEP CLEAR — the top ~15% (y 0–290) and the bottom ~30% (y 1345–1920) carry only
+   background: no text, no essential detail. Username, caption, and action buttons
+   render there on Instagram / TikTok / Shorts. The background image itself still
+   fills the entire frame, edge to edge — only *meaning* is kept out of those bands.
+3. SUBJECT — one clear subject, large, roughly frame-centre, its focal point (eyes if
+   any) around y 600–850. Strong single-source light, high subject/background
+   contrast. Never tiny, never dead-bottom.
+4. HOOK TEXT — state it verbatim in the prompt, positioned directly above or below the
+   subject's focal point but still inside the safe box. Large bold or extra-bold
+   condensed sans-serif, ALL-CAPS, one or two lines, text block about 650–720 px
+   wide, centre-aligned. High-contrast fill in the channel's primary text colour plus
+   ONE accent colour on a single payload word. Give it a thin dark outline (3–5 px)
+   OR a soft localised dark gradient behind the words — NOT a full-width band. The
+   last 1–2 words are the payload — render them noticeably larger. Must read at a
+   glance at 360 px wide (feed thumbnail).
+5. IDENTITY — honour the channel's visual identity (palette, material character,
+   lighting philosophy from `channel_brief`). Historical-plausibility rules still
+   apply for a period channel.
+6. No borders, no watermark, no UI chrome, no logos, no film-grain frame, no vignette.
+7. Photoreal or the channel's established render style — never a flat vector
    illustration unless the channel IS flat-vector.
 
 Return ONLY the JSON object.

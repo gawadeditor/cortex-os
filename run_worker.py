@@ -1447,6 +1447,23 @@ def run_worker(
     except Exception as exc:
         log.warning("startup_reconcile_error error=%s", exc)
 
+    # Reconcile the episode + topic rows a mid-pipeline crash strands that
+    # reconcile_orphaned_runs() does not touch: an episode stuck
+    # 'in_progress' (never superseded, weekly hold never reaped) and its
+    # 'claimed' episode_topics row (never re-served). queue.process_next()
+    # only does this from its own in-line permanent-skip branches — a
+    # kill -9 never reaches them. Done by hand in 3bf6413; automatic now.
+    try:
+        from hypogeum.orphan_episodes import reconcile_orphaned_episodes
+        _oe = reconcile_orphaned_episodes(db_path=db_path)
+        if _oe["superseded_episode_ids"] or _oe["released_topic_ids"]:
+            log.info(
+                "startup_reconcile_episodes superseded=%s released_topics=%s",
+                _oe["superseded_episode_ids"], _oe["released_topic_ids"],
+            )
+    except Exception as exc:
+        log.warning("startup_reconcile_episodes_error error=%s", exc)
+
     iteration = 0
     stop_reason = "once"
     while not _shutdown_requested:
@@ -1481,6 +1498,21 @@ def run_worker(
                 )
         except Exception as exc:
             log.warning("self_healing_sweep_error error=%s", exc)
+
+        # Same sweep for the episode/topic rows a mid-pipeline crash strands
+        # (see the startup call above). worker_status is still 'idle' here —
+        # this worker has claimed nothing this iteration — and the reconciler
+        # only touches episodes whose run is terminal-dead with no live lease.
+        try:
+            from hypogeum.orphan_episodes import reconcile_orphaned_episodes
+            _oe = reconcile_orphaned_episodes(db_path=db_path)
+            if _oe["superseded_episode_ids"] or _oe["released_topic_ids"]:
+                log.info(
+                    "self_healing_episodes superseded=%s released_topics=%s",
+                    _oe["superseded_episode_ids"], _oe["released_topic_ids"],
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("self_healing_episodes_error error=%s", exc)
 
         # Weekly-budget reaper: muapi commits the full plan-maximum estimate
         # to the channel_weekly scope on first-scene acceptance and nothing

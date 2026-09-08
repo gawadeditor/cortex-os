@@ -146,10 +146,14 @@ class TestYouTubeOAuth:
         assert ("/platforms/youtube/authorize" in html or "YOUTUBE_CLIENT_ID" in html
                 or "Authorize with Google" in html)
 
-    def test_youtube_shows_client_secret_field(self, client):
-        # YOUTUBE_REFRESH_TOKEN (the final OAuth artifact) appears in missing_reqs
+    def test_youtube_oauth_surface_present(self, client):
+        # The page surfaces the YouTube OAuth artifact via the authorize /
+        # re-authorize flow now, not by printing the raw YOUTUBE_REFRESH_TOKEN
+        # env-var name (engineer jargon was removed from the operator page).
         html = _html(client)
-        assert "YOUTUBE_REFRESH_TOKEN" in html
+        assert ("/platforms/youtube/authorize" in html
+                or "Re-authorize" in html
+                or "YOUTUBE_REFRESH_TOKEN" in html)
 
     def test_youtube_shows_redirect_uri(self, client):
         # OAuth redirect handled via /platforms/youtube/authorize flow

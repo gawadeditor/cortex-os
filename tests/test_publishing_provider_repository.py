@@ -501,6 +501,7 @@ class TestSchemaIdempotent:
         assert tables == {
             "provider_profiles", "provider_accounts", "channel_provider_bindings",
             "provider_content_mappings", "provider_verifications", "provider_comparison_runs",
+            "provider_evidence",
         }
 
     def test_repeated_writes_after_reinitialize_still_idempotent(self, db_path):

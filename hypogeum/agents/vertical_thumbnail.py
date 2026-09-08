@@ -69,13 +69,22 @@ def build_vertical_thumbnail_package(
     config: Config,
     channel_id: Optional[str] = None,
     log=None,
+    *,
+    authorize_via_channel: bool = True,
 ) -> dict:
     """
     Produce a real 9:16 cover thumbnail_package for a short-native episode,
     or the auto-cover stub if any step cannot complete. Always returns a
     schema-valid thumbnail_package dict and writes it to
     <output_dir>/thumbnail_package_<episode_id>.json.
+
+    authorize_via_channel=False (backfill only): the Claude + image calls
+    run on their legacy provider-key paths instead of the per-episode
+    channel gate — the gate expects a fresh pre-production weekly
+    reservation, which an already-produced episode being re-covered does
+    not have (UNIQUE constraint on budget_reservations.reservation_id).
     """
+    _gate_channel = channel_id if authorize_via_channel else None
     if log is None:
         log = get_logger(episode_id=episode_id, agent=_AGENT_NAME)
 
@@ -157,7 +166,7 @@ def build_vertical_thumbnail_package(
             max_tokens=2048,
             config=config,
             output_dir=base,
-            channel_id=channel_id,
+            channel_id=_gate_channel,
         )
     except Exception as exc:  # noqa: BLE001
         log.warn("vertical_thumbnail_prompt_failed", error=str(exc))
@@ -181,7 +190,7 @@ def build_vertical_thumbnail_package(
             episode_id=episode_id,
             output_dir=base,
             agent=_AGENT_NAME,
-            channel_id=channel_id,
+            channel_id=_gate_channel,
         )
         main_asset_id = result.asset_id
         main_local = result.local_path

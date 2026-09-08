@@ -207,6 +207,9 @@ def run(execute: bool, only_episode: str | None) -> int:
             pkg = build_vertical_thumbnail_package(
                 episode_id=episode_id, output_dir=work, config=config,
                 channel_id=channel_id, log=log,
+                # legacy provider-key paths: an already-produced episode has
+                # no fresh pre-production weekly reservation for the gate.
+                authorize_via_channel=False,
             )
             if not pkg.get("generation_metadata", {}).get("vertical_cover"):
                 print(f"  FAIL  {tag} — vertical builder fell back to the stub"); failed += 1; continue

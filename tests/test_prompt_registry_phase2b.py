@@ -32,6 +32,7 @@ _EXPECTED_NAMES = {
     "brand_guardian_agent",
     "cinematic_director",
     "content_analysis",
+    "vertical_thumbnail",
     "executive_producer",
     "narrative_architect",
     "perplexity_research",

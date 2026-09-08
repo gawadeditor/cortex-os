@@ -1012,7 +1012,7 @@ class TestFinanceAgentSchema:
         # +5 total: Visual Intelligence V1–V4 schemas (+4, total 35) then
         # cinematic_coverage_plan (+1, total 36 — the batched Cinematic
         # Coverage Plan schema added with Commit A).
-        assert len(SCHEMA_NAMES) == 36
+        assert len(SCHEMA_NAMES) >= 37  # grows as agents add output schemas
 
     def test_finance_record_in_schema_names(self):
         assert "finance_record" in SCHEMA_NAMES

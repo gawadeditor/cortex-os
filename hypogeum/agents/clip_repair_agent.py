@@ -37,10 +37,11 @@ Public API:
 
 Logging events emitted:
     clip_repair_started            — info  — inputs received
-    clip_repair_strategy_b_start   — info  — regeneration begins
-    clip_repair_strategy_b_clip    — info  — one clip regenerated
-    clip_repair_strategy_b_skip    — warn  — regeneration failed for a scene
-    clip_repair_done               — info  — final summary
+    clip_repair_strategy_b_start          — info  — regeneration begins
+    clip_repair_strategy_b_clip           — info  — one clip regenerated
+    clip_repair_strategy_b_attempt_failed — warn  — one bounded retry of a scene failed
+    clip_repair_strategy_b_skip           — warn  — regeneration failed for a scene (retries spent)
+    clip_repair_done                      — info  — final summary
 """
 
 from __future__ import annotations
@@ -251,35 +252,83 @@ def run_clip_repair(
                     if channel_id is not None else {}
                 )
 
-                # Reconciliation (2026-09-05): the ORIGINAL attempt at this
-                # exact scene may have timed out post-submission, leaving
-                # its authorization permanently stuck at UNKNOWN_ACCEPTANCE_
-                # REQUIRES_RECONCILIATION -- a fresh submit_scene() call
-                # below would otherwise hard-fail every time with
-                # "authorization state is 'submitting', not 'authorized'"
-                # (observed live 2026-09-04/05, ep_edaa9625/ep_14a830cc,
-                # both losing an otherwise-complete episode to exactly one
-                # scene). Best-effort, read-only-unless-safe-to-release; see
-                # hypogeum.muapi.reconcile_stuck_scene_authorization()'s own
-                # docstring for the full safety contract. A no-op for any
-                # scene that was never stuck in the first place.
-                if channel_id is not None:
-                    from hypogeum.muapi import reconcile_stuck_scene_authorization  # noqa: PLC0415
-                    reconcile_stuck_scene_authorization(
-                        episode_id=episode_id, scene_id=missing_sid,
-                        short_id=missing_scene.get("short_id"), is_fallback=False,
-                        output_dir=output_dir, config=config, log=log,
+                # Bounded retry (A1-1 fix, 2026-09-08): a single missing
+                # scene whose regeneration hits a TRANSIENT MUAPI failure
+                # (a timeout, a quota blip, an auth still settling) used to
+                # get exactly ONE attempt here — a "generation_failed"
+                # status fell straight through to the skip branch, the scene
+                # stayed missing, and the whole otherwise-paid, otherwise-
+                # complete episode then died at the coverage check with
+                # available_duration_seconds=0. That was the dominant
+                # production failure mode (ep_90382de2 ×25, ep_adf06f85,
+                # ep_14a830cc, ...). fill_coverage_deficits() already retries
+                # each of its slots (COVERAGE_FILL_MAX_SLOT_RETRIES); Strategy
+                # B now matches it. Every attempt re-runs the stuck-
+                # authorization reconciliation first, because the previous
+                # attempt's own submission may itself have left the auth
+                # needing reconciliation.
+                _slot_retries = max(
+                    0, getattr(config, "CLIP_REPAIR_MAX_SLOT_RETRIES", 2)
+                )
+                asset_result = {}
+                status = "generation_failed"
+                for _attempt in range(_slot_retries + 1):
+                    # Reconciliation (2026-09-05): the ORIGINAL attempt at
+                    # this exact scene may have timed out post-submission,
+                    # leaving its authorization permanently stuck at
+                    # UNKNOWN_ACCEPTANCE_REQUIRES_RECONCILIATION -- a fresh
+                    # submit_scene() call below would otherwise hard-fail
+                    # every time with "authorization state is 'submitting',
+                    # not 'authorized'" (observed live 2026-09-04/05,
+                    # ep_edaa9625/ep_14a830cc, both losing an otherwise-
+                    # complete episode to exactly one scene). Best-effort,
+                    # read-only-unless-safe-to-release; see hypogeum.muapi.
+                    # reconcile_stuck_scene_authorization()'s own docstring
+                    # for the full safety contract. A no-op for any scene
+                    # that was never stuck in the first place.
+                    if channel_id is not None:
+                        from hypogeum.muapi import reconcile_stuck_scene_authorization  # noqa: PLC0415
+                        reconcile_stuck_scene_authorization(
+                            episode_id=episode_id, scene_id=missing_sid,
+                            short_id=missing_scene.get("short_id"), is_fallback=False,
+                            output_dir=output_dir, config=config, log=log,
+                        )
+
+                    try:
+                        asset_result = submit_scene(
+                            scene_spec=submit_spec,
+                            config=config,
+                            episode_id=episode_id,
+                            output_dir=output_dir,
+                            agent="clip_repair_agent",
+                            **_gate_kwargs,
+                        )
+                    except Exception as _submit_exc:  # noqa: BLE001
+                        asset_result = {}
+                        status = "generation_failed"
+                        log.warn(
+                            "clip_repair_strategy_b_attempt_failed",
+                            episode_id=episode_id,
+                            scene_id=missing_sid,
+                            attempt=_attempt + 1,
+                            of=_slot_retries + 1,
+                            error=str(_submit_exc),
+                        )
+                        continue
+
+                    status = asset_result.get("generation_status", "generation_failed")
+                    if status in ("generated", "reused", "dry_run") and target_path.exists():
+                        break
+
+                    log.warn(
+                        "clip_repair_strategy_b_attempt_failed",
+                        episode_id=episode_id,
+                        scene_id=missing_sid,
+                        attempt=_attempt + 1,
+                        of=_slot_retries + 1,
+                        generation_status=status,
                     )
 
-                asset_result = submit_scene(
-                    scene_spec=submit_spec,
-                    config=config,
-                    episode_id=episode_id,
-                    output_dir=output_dir,
-                    agent="clip_repair_agent",
-                    **_gate_kwargs,
-                )
-                status = asset_result.get("generation_status", "generation_failed")
                 if status in ("generated", "reused", "dry_run") and target_path.exists():
                     result.repaired_by_generation.append(missing_sid)
                     still_missing.remove(missing_sid)

@@ -45,10 +45,12 @@ from hypogeum.agents.clip_repair_agent import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_config(max_generated: int = 5, clip_repair_enabled: bool = True):
+def _make_config(max_generated: int = 5, clip_repair_enabled: bool = True,
+                 slot_retries: int = 0):
     cfg = MagicMock()
     cfg.CLIP_REPAIR_ENABLED = clip_repair_enabled
     cfg.CLIP_REPAIR_MAX_GENERATED = max_generated
+    cfg.CLIP_REPAIR_MAX_SLOT_RETRIES = slot_retries
     cfg.COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT = 2
     cfg.COVERAGE_FILL_MAX_SLOT_RETRIES = 0
     cfg.COVERAGE_FILL_ASSUMED_CLIP_DURATION_SECONDS = 8.0
@@ -592,6 +594,135 @@ class TestStrategyB:
                 log=log,
             )
 
+        assert "sc_002" in result.still_missing
+        assert "sc_002" not in result.repaired_by_generation
+
+    def test_transient_generation_failure_is_retried_then_succeeds(self, tmp_path):
+        """A1-1 (2026-09-08): a single missing scene whose regeneration
+        returns generation_failed on the first attempt but succeeds on a
+        retry must end up repaired — not left missing to sink the whole
+        episode at the coverage check. Was the dominant production failure
+        mode (ep_90382de2, ep_adf06f85, ep_14a830cc, ...): Strategy B gave
+        every scene exactly one shot."""
+        assets_root = tmp_path / "assets"
+        assets_root.mkdir()
+
+        scenes = [
+            _make_scene("sc_001", asset_id="asset_001", scene_index=0,
+                        description="topic A unique"),
+            _make_scene("sc_002", asset_id="asset_002", scene_index=1,
+                        description="topic B unique"),
+        ]
+        _write_clip(assets_root, "asset_001")
+
+        vp = _make_visual_package(scenes)
+        cfg = _make_config(max_generated=5, slot_retries=2)
+        log = MagicMock()
+
+        target_path = assets_root / "asset_002.mp4"
+        calls = {"n": 0}
+
+        def _mock_submit_flaky(scene_spec, config, episode_id, output_dir, agent):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"generation_status": "generation_failed"}
+            target_path.write_bytes(b"GENERATED")
+            return {"generation_status": "generated"}
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit_flaky):
+            result = run_clip_repair(
+                visual_package=vp,
+                missing_scene_ids=["sc_002"],
+                present_clip_ids=["asset_001"],
+                assets_root=assets_root,
+                config=cfg,
+                episode_id="ep_b_retry",
+                log=log,
+            )
+
+        assert calls["n"] == 2
+        assert "sc_002" in result.repaired_by_generation
+        assert result.still_missing == []
+
+    def test_submit_scene_exception_is_retried_then_succeeds(self, tmp_path):
+        """A raised exception (a MUAPI timeout) on the first attempt must not
+        permanently lose the scene either — the bounded retry re-attempts it."""
+        assets_root = tmp_path / "assets"
+        assets_root.mkdir()
+
+        scenes = [
+            _make_scene("sc_001", asset_id="asset_001", scene_index=0,
+                        description="topic A unique"),
+            _make_scene("sc_002", asset_id="asset_002", scene_index=1,
+                        description="topic B unique"),
+        ]
+        _write_clip(assets_root, "asset_001")
+
+        vp = _make_visual_package(scenes)
+        cfg = _make_config(max_generated=5, slot_retries=2)
+        log = MagicMock()
+
+        target_path = assets_root / "asset_002.mp4"
+        calls = {"n": 0}
+
+        def _mock_submit_raises_once(scene_spec, config, episode_id, output_dir, agent):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("MUAPI job poll timed out")
+            target_path.write_bytes(b"GENERATED")
+            return {"generation_status": "generated"}
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit_raises_once):
+            result = run_clip_repair(
+                visual_package=vp,
+                missing_scene_ids=["sc_002"],
+                present_clip_ids=["asset_001"],
+                assets_root=assets_root,
+                config=cfg,
+                episode_id="ep_b_retry_exc",
+                log=log,
+            )
+
+        assert calls["n"] == 2
+        assert "sc_002" in result.repaired_by_generation
+        assert result.still_missing == []
+
+    def test_retries_are_bounded_then_scene_stays_missing(self, tmp_path):
+        """The retry is bounded: after CLIP_REPAIR_MAX_SLOT_RETRIES+1 failed
+        attempts the scene is left in still_missing, exactly as before —
+        the episode still fails closed, it is never papered over."""
+        assets_root = tmp_path / "assets"
+        assets_root.mkdir()
+
+        scenes = [
+            _make_scene("sc_001", asset_id="asset_001", scene_index=0,
+                        description="topic A unique"),
+            _make_scene("sc_002", asset_id="asset_002", scene_index=1,
+                        description="topic B unique"),
+        ]
+        _write_clip(assets_root, "asset_001")
+
+        vp = _make_visual_package(scenes)
+        cfg = _make_config(max_generated=5, slot_retries=2)
+        log = MagicMock()
+        calls = {"n": 0}
+
+        def _mock_submit_always_fails(scene_spec, config, episode_id, output_dir, agent):
+            calls["n"] += 1
+            return {"generation_status": "generation_failed"}
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit_always_fails):
+            result = run_clip_repair(
+                visual_package=vp,
+                missing_scene_ids=["sc_002"],
+                present_clip_ids=["asset_001"],
+                assets_root=assets_root,
+                config=cfg,
+                episode_id="ep_b_bounded",
+                log=log,
+            )
+
+        assert calls["n"] == 3  # 1 initial + 2 retries
         assert "sc_002" in result.still_missing
         assert "sc_002" not in result.repaired_by_generation
 

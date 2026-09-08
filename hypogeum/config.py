@@ -625,6 +625,15 @@ class Config:
         self.CLIP_REPAIR_ENABLED = _get_bool("CLIP_REPAIR_ENABLED", default=True)
         # CLIP_REPAIR_MAX_GENERATED: max extra clips to generate in Strategy B (default 5).
         self.CLIP_REPAIR_MAX_GENERATED = _get_int("CLIP_REPAIR_MAX_GENERATED", default=5)
+        # CLIP_REPAIR_MAX_SLOT_RETRIES: bounded retries of the SAME missing scene in Strategy B
+        # on a transient regeneration failure (default 2 = three attempts total per scene).
+        # A retry does not count toward CLIP_REPAIR_MAX_GENERATED — it exists so a single
+        # scene whose MUAPI generation blips (timeout / quota / an auth still settling) does
+        # not stay missing and sink an otherwise-complete, otherwise-paid episode at the
+        # coverage check (available_duration_seconds=0). Mirrors COVERAGE_FILL_MAX_SLOT_RETRIES.
+        self.CLIP_REPAIR_MAX_SLOT_RETRIES = _get_int(
+            "CLIP_REPAIR_MAX_SLOT_RETRIES", default=2
+        )
         # COVERAGE_CHECK_ENABLED: gate assembly on per-beat visual-duration coverage before
         # any rendering (default True). See hypogeum/agents/coverage_check.py — approved
         # production policy (2026-08-01): Video Renderer must never compensate for missing

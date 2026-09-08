@@ -669,9 +669,11 @@ class TestEndPageMusicContinuity:
         assert clip_call.count(str(track.local_path)) == 1
         assert clip_call.count("-ss") == 1
 
-    def test_end_page_fades_in_with_and_without_music(self, tmp_path):
-        """Expected transition: the end page fades in from the final body
-        frame instead of a hard cut, whether or not music is present."""
+    def test_end_page_video_is_a_clean_cut_with_and_without_music(self, tmp_path):
+        """Current contract (5ed5200 + video_renderer's "clean cut everywhere"
+        policy): the end-page VIDEO is a hard cut — scale+pad to [vout] with
+        NO fade=t=in — whether or not music is present. Only the music gets a
+        fade (afade=t=out), handled independently."""
         episode_dir = tmp_path / "ep_fade"
         episode_dir.mkdir()
         end_page_png = tmp_path / "end-page.png"
@@ -700,7 +702,10 @@ class TestEndPageMusicContinuity:
                 )
             clip_call = next(c for c in calls if str(end_page_png) in c and "-filter_complex" in c)
             fc = clip_call[clip_call.index("-filter_complex") + 1]
-            assert "fade=t=in:st=0:d=0.500[vout]" in fc, fc
+            assert "fade=t=in" not in fc, fc          # video is a clean cut
+            assert "pad=" in fc and "[vout]" in fc     # scaled + padded still
+            if with_music:
+                assert "afade=t=out" in fc, fc         # music fades independently
 
     def test_render_episode_passes_last_segment_start_to_end_page(self, tmp_path):
         """render_episode() must resolve the LAST multi-segment track's own

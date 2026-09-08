@@ -30,6 +30,8 @@ _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "hypogeum" / "prompts"
 
 _EXPECTED_NAMES = {
     "brand_guardian_agent",
+    "cinematic_director",
+    "content_analysis",
     "executive_producer",
     "narrative_architect",
     "perplexity_research",
@@ -427,7 +429,7 @@ class TestPromptApiDetail:
         resp = client.get("/api/prompts/research_director")
         data = resp.get_json()
         p = data["prompt"]
-        assert p["prompt_version"] == "v1"
+        assert p["prompt_version"] == "v2"
         assert p["owner_agent"] == "research_director"
         assert "opus" in p["model_target"].lower()
 

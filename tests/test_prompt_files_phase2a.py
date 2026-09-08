@@ -121,12 +121,15 @@ class TestPromptFileHeaders:
         )
 
     @pytest.mark.parametrize("filename", _EXPECTED_TXT_FILES)
-    def test_txt_file_prompt_version_is_v1(self, filename):
+    def test_txt_file_prompt_version_is_well_formed(self, filename):
+        import re
         from hypogeum.prompt_loader import read_metadata
         meta = read_metadata(_PROMPTS_DIR / filename)
         version = meta["PROMPT_VERSION"]
-        assert version in ("v1", "v2", "v3", "v4"), (
-            f"{filename}: PROMPT_VERSION must be 'v1'..'v4', got {version!r}"
+        # A prompt is versioned "v<N>" and bumped freely as it is revised —
+        # validate the shape, not an enumerated ceiling that ages out.
+        assert re.fullmatch(r"v[1-9][0-9]*", version), (
+            f"{filename}: PROMPT_VERSION must look like 'v<N>', got {version!r}"
         )
 
     @pytest.mark.parametrize("filename", _EXPECTED_TXT_FILES)

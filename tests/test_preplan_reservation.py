@@ -201,11 +201,15 @@ class TestEnsurePreproductionReservation:
             ensure_preproduction_reservation(channel_id=None, episode_id=_EP, config=_cfg(), log=_Log())
 
     def test_weekly_ceiling_exhausted_fails_closed(self, env):
-        # seed another episode's hold that consumes the whole week
+        # seed another episode's hold that consumes the whole week — in the
+        # SAME (current) week ensure_preproduction_reservation() resolves
+        # internally via datetime.now(); a fixed NOW anchor drifts into a
+        # different ISO week and the seed then stops counting.
         conn = db.get_connection(env.db_path)
         weekly_budget.ensure_channel_weekly_reservation(
             conn, channel_id=_CH, amount=Decimal("54.00"), currency="USD",
-            idempotency_key="preplan:cpp:other_ep", now_utc=NOW,
+            idempotency_key="preplan:cpp:other_ep",
+            now_utc=datetime.now(timezone.utc),
         )
         conn.commit(); conn.close()
         from hypogeum.budget_scopes import BudgetError

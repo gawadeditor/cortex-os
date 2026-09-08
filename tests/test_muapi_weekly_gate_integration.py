@@ -61,6 +61,20 @@ def _reset_adapter_cache():
 
 
 @pytest.fixture(autouse=True)
+def _stub_capability_boundary_weekly_binding(monkeypatch):
+    """capability_boundary._verify_post_plan_weekly_binding (36b4530) is a
+    defense-in-depth check that resolves the CANONICAL episode dir
+    independently of any tmp path: with no plan there it classifies every
+    call PRE_PLAN and requires a pre-production hold this suite doesn't
+    create. That check has its own coverage (test_capability_boundary.py /
+    test_preplan_reservation.py); THIS suite is about the weekly-ledger
+    reservation accounting _submit_scene_via_gate itself performs, so stub
+    the boundary check the same way tests/test_muapi_gate_path.py does."""
+    import hypogeum.capability_boundary as _cb
+    monkeypatch.setattr(_cb, "_verify_post_plan_weekly_binding", lambda *a, **k: None)
+
+
+@pytest.fixture(autouse=True)
 def _isolated_channel_identity(monkeypatch):
     import hypogeum.channel_config as channel_config
     import hypogeum.workflow_executor as workflow_executor
@@ -321,10 +335,15 @@ class TestOutcomeAccounting:
         assert Decimal(row["reserved_amount"]) == PLAN_MAX  # the verified plan maximum
         assert row["idempotency_key"].startswith("plan-weekly:test_channel:ep_gate_test:")
         assert row["channel_id"] == "test_channel"
-        assert row["scope_ref"] == "test_channel:2026-W35"
+        # Window is the CURRENT ISO week (the gate resolves it via
+        # datetime.now()) — computed, not a fixed calendar anchor.
+        import datetime as _dt
+        from hypogeum.weekly_budget import compute_weekly_window, week_scope_ref
+        _win = compute_weekly_window(_dt.datetime.now(_dt.timezone.utc), "UTC")
+        assert row["scope_ref"] == week_scope_ref("test_channel", _win)
         assert row["weekly_timezone_snapshot"] == "UTC"
-        assert row["weekly_window_start_utc"] == "2026-08-24T00:00:00+00:00"
-        assert row["weekly_window_end_utc"] == "2026-08-31T00:00:00+00:00"
+        assert row["weekly_window_start_utc"] == _win.start_utc.isoformat()
+        assert row["weekly_window_end_utc"] == _win.end_utc.isoformat()
         assert Decimal(row["weekly_ceiling_snapshot"]) == Decimal("5.00")
         # Per-call CALL/EPISODE scopes remain scene-level alongside the
         # single plan-level weekly row:
@@ -737,7 +756,12 @@ class TestOneReservationPerVerifiedPlan:
         db_path = tmp_path / "auth.db"
         db.initialize_schema(db_path)
         config = make_config()
-        dir_b = tmp_path / "ep_b"
+        # Episode B reaches full generation, so its output_dir must sit under
+        # the conftest-redirected capability-boundary receipt root
+        # (_DEFAULT_ASSETS_ROOT = tmp_path) as <root>/episodes/<episode_id>,
+        # or the gate's ABOUT_TO_SUBMIT receipt lands where the boundary
+        # check never looks ("never entered the gate").
+        dir_b = tmp_path / "episodes" / "ep_gate_test_b"
         _persist_matching_plan(dir_b, model=config.MUAPI_T2_MODEL, episode_id="ep_gate_test_b",
                                scene_id="b01b01")
         from hypogeum.production_plan import load_production_plan as _load

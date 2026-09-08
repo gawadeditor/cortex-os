@@ -31,7 +31,18 @@ from hypogeum.schemas import validate, parse_opportunity_batch, SchemaError
 
 class TestDispatch:
 
-    def test_v1_default_calls_v1_impl(self):
+    @pytest.fixture
+    def db(self, tmp_path):
+        """Isolated DB for run_discovery_cycle()'s own upsert_discovery_state()
+        writes — which fire before dispatch, regardless of the mocked engine.
+        Without this the write falls through to the production default and the
+        conftest tripwire blocks it."""
+        from hypogeum.db import initialize_schema
+        p = tmp_path / "discovery.db"
+        initialize_schema(p)
+        return p
+
+    def test_v1_default_calls_v1_impl(self, db):
         """No DISCOVERY_ENGINE set → dispatches to v1 heuristic."""
         called = []
 
@@ -43,12 +54,12 @@ class TestDispatch:
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("DISCOVERY_ENGINE", None)
             with patch("hypogeum.topic_discovery._run_discovery_cycle_v1", side_effect=fake_v1):
-                result = run_discovery_cycle("ch_test")
+                result = run_discovery_cycle("ch_test", db_path=db)
 
         assert called == ["v1"]
         assert result["ok"] is True
 
-    def test_v1_explicit_calls_v1_impl(self):
+    def test_v1_explicit_calls_v1_impl(self, db):
         """DISCOVERY_ENGINE=v1 → dispatches to v1 heuristic."""
         called = []
 
@@ -59,12 +70,12 @@ class TestDispatch:
 
         with patch.dict(os.environ, {"DISCOVERY_ENGINE": "v1"}):
             with patch("hypogeum.topic_discovery._run_discovery_cycle_v1", side_effect=fake_v1):
-                result = run_discovery_cycle("ch_test")
+                result = run_discovery_cycle("ch_test", db_path=db)
 
         assert called == ["v1"]
         assert result["ok"] is True
 
-    def test_v2_dispatches_to_director(self):
+    def test_v2_dispatches_to_director(self, db):
         """DISCOVERY_ENGINE=v2 → calls discovery_director.run(); v1 is never called."""
         v1_called = []
 
@@ -84,13 +95,13 @@ class TestDispatch:
         with patch.dict(os.environ, {"DISCOVERY_ENGINE": "v2"}):
             with patch("hypogeum.topic_discovery._run_discovery_cycle_v1", side_effect=fake_v1):
                 with patch("hypogeum.agents.discovery_director.run", side_effect=fake_director):
-                    result = run_discovery_cycle("ch_test")
+                    result = run_discovery_cycle("ch_test", db_path=db)
 
         assert v1_called == [], "v1 must not be called when DISCOVERY_ENGINE=v2"
         assert result["ok"] is True
         assert result["engine_used"] == "v2"
 
-    def test_v2_does_not_call_v1(self):
+    def test_v2_does_not_call_v1(self, db):
         """Confirm v2 director isolation — v1 impl is entirely bypassed."""
         def fake_director(channel_id, config=None, db_path=None, triggered_by="worker_refill"):
             return {"ok": True, "engine_used": "v2", "cycle_id": "c", "channel_id": channel_id,
@@ -100,10 +111,10 @@ class TestDispatch:
         with patch.dict(os.environ, {"DISCOVERY_ENGINE": "v2"}):
             with patch("hypogeum.topic_discovery._run_discovery_cycle_v1") as mock_v1:
                 with patch("hypogeum.agents.discovery_director.run", side_effect=fake_director):
-                    run_discovery_cycle("ch_any")
+                    run_discovery_cycle("ch_any", db_path=db)
         mock_v1.assert_not_called()
 
-    def test_unknown_engine_falls_back_to_v1(self):
+    def test_unknown_engine_falls_back_to_v1(self, db):
         """Any unrecognised DISCOVERY_ENGINE value falls back to v1."""
         called = []
 
@@ -114,7 +125,7 @@ class TestDispatch:
 
         with patch.dict(os.environ, {"DISCOVERY_ENGINE": "v99"}):
             with patch("hypogeum.topic_discovery._run_discovery_cycle_v1", side_effect=fake_v1):
-                result = run_discovery_cycle("ch_test")
+                result = run_discovery_cycle("ch_test", db_path=db)
 
         assert called == ["v1"]
 

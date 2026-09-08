@@ -198,6 +198,46 @@ def _patch_load_dotenv_globally():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_worker_singleton_pid_file(monkeypatch, tmp_path):
+    """
+    Redirect the worker singleton PID file to this test's tmp_path.
+
+    run_worker._WORKER_PID_FILE (and the mirror constants in
+    hypogeum.observability / run_dashboard) point at the fixed, shared
+    .hypogeum-assets/worker.pid. When a real worker daemon is running on
+    the same machine (the burn-in setup — a launchd com.hypogeum.worker),
+    every test that calls run_worker.run_worker() hits the singleton check,
+    sees that live PID as alive, and the daemon refuses to start
+    (exit_code=1) — six test_worker.py / several test_worker_control.py
+    failures that only reproduce on a machine with a live worker, never on
+    a clean CI box.
+
+    tests/test_worker_singleton_and_heartbeat.py already establishes this
+    exact monkeypatch as a local fixture; this promotes it session-wide so
+    no test can ever read the real, shared PID file. That file's own
+    behaviour (a live vs. stale recorded PID) is still fully exercised
+    there against controlled tmp PID files, whose explicit per-test
+    monkeypatch runs after this one and takes precedence.
+    """
+    import sys as _sys
+    pid_file = tmp_path / "isolated_worker.pid"
+
+    # run_worker is the daemon entry point and is safe to import (module
+    # level is only constants + imports). Force it loaded so the patch
+    # applies even for a test that imports it lazily in its own body.
+    try:
+        monkeypatch.setattr("run_worker._WORKER_PID_FILE", pid_file)
+    except Exception:  # noqa: BLE001 -- run_worker import failure is a test's own problem
+        pass
+
+    # Mirror constant in observability — only patch if already imported;
+    # importing it here for every test would be a needless cost.
+    _obs = _sys.modules.get("hypogeum.observability")
+    if _obs is not None and hasattr(_obs, "_WORKER_PID_FILE"):
+        monkeypatch.setattr(_obs, "_WORKER_PID_FILE", pid_file)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_capability_boundary_receipts_root(monkeypatch, tmp_path):
     """hypogeum.capability_boundary resolves the AUTHORITATIVE provider-
     receipt trail SOLELY from its own _DEFAULT_ASSETS_ROOT constant (never

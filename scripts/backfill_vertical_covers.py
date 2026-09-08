@@ -101,17 +101,30 @@ def _episode_meta(conn, episode_id: str):
     return (row["title"] if row else "") or "", (row["topic"] if row else "") or ""
 
 
-def _synth_concept_brief(episode_id: str, title: str, topic: str, work_dir: Path, config: Config) -> bool:
+def _synth_concept_brief(episode_id: str, channel_id: str, title: str, topic: str,
+                         work_dir: Path, config: Config) -> bool:
     """Run the real Thumbnail Strategy from a minimal title/topic-derived
-    topic_brief + empty script_package. Writes thumbnail_concept_brief_<ep>.json
-    into work_dir. Returns True on success."""
+    topic_brief + empty script_package, INSIDE the channel-identity context so
+    the strategist works from this channel's genre/tone (a bedtime channel
+    given an 'ancient_mystery' framing refuses to generate). Writes
+    thumbnail_concept_brief_<ep>.json into work_dir. Returns True on success."""
     from hypogeum.agents.thumbnail_strategy import run_thumbnail_strategy
+    from hypogeum.brand.channel_identity import active_channel
+
+    _cat = "ancient_mystery"
+    try:
+        from hypogeum.channel_creative_brief import channel_brief_for
+        _genre = (channel_brief_for(channel_id) or {}).get("genre", "").lower()
+        if "bedtime" in _genre or "children" in _genre or "cartoon" in _genre:
+            _cat = "childrens_bedtime_story"
+    except Exception:  # noqa: BLE001
+        pass
 
     topic_brief = {
         "topic_id": episode_id,
         "episode_id": episode_id,
         "episode_title": title,
-        "topic_category": "ancient_mystery",
+        "topic_category": _cat,
         "logline": topic or title,
         "curiosity_hook": topic or title,
         "mystery_anchor": topic or title,
@@ -120,10 +133,11 @@ def _synth_concept_brief(episode_id: str, title: str, topic: str, work_dir: Path
     }
     script_package = {"episode_id": episode_id, "sections": []}
     try:
-        run_thumbnail_strategy(
-            topic_brief=topic_brief, script_package=script_package,
-            config=config, episode_id=episode_id, output_dir=work_dir,
-        )
+        with active_channel(channel_id):
+            run_thumbnail_strategy(
+                topic_brief=topic_brief, script_package=script_package,
+                config=config, episode_id=episode_id, output_dir=work_dir,
+            )
         return (work_dir / f"thumbnail_concept_brief_{episode_id}.json").exists()
     except Exception as exc:  # noqa: BLE001
         log.warn("backfill_concept_synth_failed", episode_id=episode_id, error=str(exc))
@@ -202,7 +216,7 @@ def run(execute: bool, only_episode: str | None) -> int:
 
         with tempfile.TemporaryDirectory(prefix=f"vtcover_{episode_id}_") as td:
             work = Path(td)
-            if not _synth_concept_brief(episode_id, title, topic, work, config):
+            if not _synth_concept_brief(episode_id, channel_id, title, topic, work, config):
                 print(f"  FAIL  {tag} — could not synthesise a concept brief"); failed += 1; continue
             pkg = build_vertical_thumbnail_package(
                 episode_id=episode_id, output_dir=work, config=config,

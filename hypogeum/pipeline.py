@@ -2638,7 +2638,15 @@ def _run_thumbnail_director(
     log = get_logger(episode_id=episode_id, agent="pipeline")
 
     if (getattr(config, "SHORT_NATIVE_MODE", False) is True):
-        return _short_native_thumbnail_package(episode_id, output_dir, log)
+        # Short-native publishes one vertical deliverable. The 16:9 TD stack
+        # is landscape-only, so a dedicated module writes a real 9:16 cover
+        # (professional prompt -> gpt-image-2 -> QA), falling back to the
+        # auto-cover stub on any failure so an episode is never blocked.
+        from hypogeum.agents.vertical_thumbnail import build_vertical_thumbnail_package  # noqa: PLC0415
+        return build_vertical_thumbnail_package(
+            episode_id=episode_id, output_dir=output_dir,
+            config=config, channel_id=channel_id, log=log,
+        )
 
     pkg = _load_verified_checkpoint(
         episode_id, output_dir, _THUMBNAIL_CHECKPOINT, log,

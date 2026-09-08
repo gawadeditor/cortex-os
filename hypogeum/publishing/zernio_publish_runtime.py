@@ -468,6 +468,26 @@ def publish_episode_package(
         )
         deliverable_type = "main_episode" if deliverable is package.main_episode else "short"
 
+        # Per-platform cover wiring. media_ref.thumbnail_url already lands on
+        # mediaItems[].thumbnail (YouTube's documented cover field). TikTok
+        # and Instagram Reels take the cover from their OWN documented
+        # fields instead (see hypogeum.publishing.zernio_platform_contracts):
+        #   tiktok    -> tiktokSettings.video_cover_image_url  (root settings)
+        #   instagram -> platformSpecificData.instagramThumbnail  (per entry)
+        # Facebook Reels has no documented custom-cover field. Copies are
+        # made per deliverable so the shared caller dicts are never mutated.
+        _eff_platform_settings = dict(platform_settings or {})
+        _eff_platform_specific = dict(deliverable.platform_specific_data or {})
+        if resolved_thumbnail_url:
+            if "tiktok" in platforms:
+                _tk = dict(_eff_platform_settings.get("tiktok") or {})
+                _tk.setdefault("video_cover_image_url", resolved_thumbnail_url)
+                _eff_platform_settings["tiktok"] = _tk
+            if "instagram" in platforms:
+                _ig = dict(_eff_platform_specific.get("instagram") or {})
+                _ig.setdefault("instagramThumbnail", resolved_thumbnail_url)
+                _eff_platform_specific["instagram"] = _ig
+
         if supports_aggregation:
             try:
                 platform_results = publisher.publish_multi_platform(
@@ -487,8 +507,8 @@ def publish_episode_package(
                     timezone_name=sched.timezone_name,
                     publish_now=sched.publish_now,
                     is_draft=sched.is_draft,
-                    platform_settings=platform_settings,
-                    platform_specific_data=deliverable.platform_specific_data,
+                    platform_settings=_eff_platform_settings,
+                    platform_specific_data=_eff_platform_specific,
                     root_fields=deliverable.root_fields,
                 )
             except Exception as exc:

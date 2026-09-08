@@ -591,6 +591,23 @@ def _validate_thumbnail_concept_brief(p: dict) -> None:
             )
 
 
+def _validate_vertical_thumbnail_plan(p: dict) -> None:
+    """One professionally-written 9:16 cover-image prompt for a short-native
+    (vertical) episode. Produced by hypogeum.agents.vertical_thumbnail from the
+    thumbnail_concept_brief. The hook text is rendered by the image model
+    itself (baked into image_prompt) — there is no separate compositor step
+    for vertical covers."""
+    s = "vertical_thumbnail_plan"
+    _req_str(p, s, "vertical_thumbnail_plan_id")
+    _req_str(p, s, "episode_id")
+    _req_str(p, s, "concept_id")
+    ip = _req_str(p, s, "image_prompt")
+    if len(ip.split()) < 15:
+        raise SchemaError(s, "image_prompt", "must be a real, detailed prompt (>= 15 words)")
+    _req_str(p, s, "hook_text")
+    _req_str(p, s, "rationale")
+
+
 def _validate_narration_package(p: dict) -> None:
     s = "narration_package"
     _req_dict(p, s, "package_metadata")
@@ -1392,6 +1409,7 @@ _VALIDATORS = {
     "thumbnail_concept_brief":       _validate_thumbnail_concept_brief,
     "thumbnail_generation_plan":     _validate_thumbnail_generation_plan,
     "thumbnail_package":             _validate_thumbnail_package,
+    "vertical_thumbnail_plan":       _validate_vertical_thumbnail_plan,
     "narration_package":         _validate_narration_package,
     "final_render_package":      _validate_final_render_package,
     "publishing_record":         _validate_publishing_record,

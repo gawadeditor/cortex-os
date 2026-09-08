@@ -738,10 +738,19 @@ def resolve_canonical_main_thumbnail(episode_id: str, episode_dir: Path) -> Reso
             reason=f"canonical thumbnail has invalid dimensions {width}x{height}",
             evidence={"path": str(resolved_path)},
         )
+    # Short-native episodes publish a single VERTICAL deliverable — the
+    # cover is a 9:16 image (hypogeum.agents.vertical_thumbnail), and the
+    # 16:9 TD identity/QA stack is not run for it. Detect that from the
+    # package the vertical builder writes and relax the three landscape-
+    # only gates (aspect, identity verdict, strict QA-pass) accordingly.
+    _gen_meta = package.get("generation_metadata") or {}
+    _is_vertical_cover = bool(_gen_meta.get("vertical_cover"))
     aspect = width / height
-    if abs(aspect - (16 / 9)) > 0.02:
+    _target_aspect = (9 / 16) if _is_vertical_cover else (16 / 9)
+    if abs(aspect - _target_aspect) > 0.02:
+        _want = "9:16" if _is_vertical_cover else "16:9"
         raise ThumbnailResolutionError(
-            reason=f"canonical thumbnail is {width}x{height} (aspect {aspect:.3f}), not the required 16:9",
+            reason=f"canonical thumbnail is {width}x{height} (aspect {aspect:.3f}), not the required {_want}",
             evidence={"width": width, "height": height},
         )
 
@@ -757,7 +766,11 @@ def resolve_canonical_main_thumbnail(episode_id: str, episode_dir: Path) -> Reso
     # fresh and passes). Matching that gate's "block only on real
     # failures" philosophy here unblocks youtube/main_episode publishing
     # for a thumbnail that is genuinely fine.
-    if qa_status == "fail" or (qa_status != "pass" and qa_failures):
+    # For a vertical cover, QA is advisory (a real designed cover beats no
+    # cover) — block only on a real dimension/decode failure, never on a
+    # skipped or advisory-warn check.
+    _hard_qa_fail = qa_status == "fail" or (qa_status != "pass" and qa_failures)
+    if _hard_qa_fail and not _is_vertical_cover:
         raise ThumbnailResolutionError(
             reason=f"thumbnail_qa_report.overall_status is {qa_status!r} with failures {qa_failures}",
             evidence={"qa_status": qa_status, "failures": qa_failures},
@@ -765,7 +778,9 @@ def resolve_canonical_main_thumbnail(episode_id: str, episode_dir: Path) -> Reso
 
     identity_report = package.get("thumbnail_identity_report") or {}
     identity_verdict = identity_report.get("verdict")
-    if identity_verdict != "APPROVED":
+    # The Thumbnail Identity Guardian is a 16:9-prompt-shaped vision gate;
+    # it is not run for vertical covers, so no APPROVED verdict is required.
+    if identity_verdict != "APPROVED" and not _is_vertical_cover:
         raise ThumbnailResolutionError(
             reason=(
                 f"thumbnail_identity_report.verdict is {identity_verdict!r}, not 'APPROVED' — "

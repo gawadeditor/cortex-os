@@ -765,10 +765,11 @@ def _set(d: dict, key: str, value) -> dict:
 # ---------------------------------------------------------------------------
 
 class TestSchemaRegistry:
-    def test_schema_names_has_35_entries(self):
-        assert len(SCHEMA_NAMES) == 36  # +4 for Visual Intelligence V1–V4, +1 for Cinematic Director
+    def test_schema_registry_is_complete(self):
+        # Grows as agents add output schemas; only a removal should fail this.
+        assert len(SCHEMA_NAMES) >= 37
 
-    def test_all_35_names_present(self):
+    def test_all_expected_names_present(self):
         expected = {
             "validation_scorecard", "topic_brief", "package_deficiency_report",
             "research_package", "narrative_package", "script_package",
@@ -788,8 +789,10 @@ class TestSchemaRegistry:
             "shot_diversity_plan", "editorial_qa_report",
             # Cinematic Director (2026-08-06 directing-rule fix)
             "cinematic_coverage_plan",
+            # Vertical (9:16) cover for short-native episodes (2026-09-08)
+            "vertical_thumbnail_plan",
         }
-        assert set(SCHEMA_NAMES) == expected
+        assert expected.issubset(set(SCHEMA_NAMES)), expected - set(SCHEMA_NAMES)
 
     def test_unknown_schema_raises_value_error(self):
         with pytest.raises(ValueError) as exc_info:

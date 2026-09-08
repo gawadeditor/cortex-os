@@ -43,7 +43,11 @@ from hypogeum.reuse_engine import (
 _RUN_ID = "run-reuse-test-001"
 _EP_SRC = "ep_source"
 _EP_NEW = "ep_new"
-_TS_RECENT = "2026-05-01T00:00:00+00:00"
+# Relative, not a fixed calendar date: _recency_multiplier() decays from
+# "now", so a hardcoded date silently ages past the "recent" threshold
+# (2026-05/06 dates did exactly that).
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz  # noqa: E402
+_TS_RECENT = (_dt.now(_tz.utc) - _td(days=2)).isoformat()
 _TS_OLD    = "2020-01-01T00:00:00+00:00"
 
 
@@ -245,7 +249,7 @@ class TestScoreAsset:
             semantic_tags=["a"],
             visual_style={"k": "v"},
             provider="muapi",
-            archived_at="2026-06-01T00:00:00+00:00",  # recent → multiplier ≈ 1.0
+            archived_at=_TS_RECENT,  # recent → multiplier ≈ 1.0
         )
         s = score_asset(
             r,
@@ -296,7 +300,7 @@ class TestScoringEdgeCases:
         assert 0.0 <= s <= 1.0
 
     def test_recency_recent_multiplier_close_to_one(self):
-        m = _recency_multiplier("2026-06-01T00:00:00+00:00")
+        m = _recency_multiplier(_TS_RECENT)
         assert m > 0.95
 
     def test_recency_old_multiplier_at_floor(self):

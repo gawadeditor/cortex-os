@@ -2055,7 +2055,11 @@ class TestSkipShortsFlag:
                    return_value=MINIMAL_PUBLISHING_RECORD), \
              patch("hypogeum.startup.run_startup_checks",
                    return_value=make_startup_report()):
-            run_pipeline("Test topic", "ep_001", cfg, output_dir=tmp_path)
+            # channel_id=None: this tests the flag -> skip_shorts wiring, not
+            # channel config. Without it the real "hypogeum" channel profile
+            # (now short-native) is loaded and forces skip_shorts=True.
+            run_pipeline("Test topic", "ep_001", cfg, output_dir=tmp_path,
+                         channel_id=None)
 
         call_kwargs = mock_audio.call_args[1]
         assert call_kwargs["skip_shorts"] is True
@@ -2086,7 +2090,11 @@ class TestSkipShortsFlag:
                    return_value=MINIMAL_PUBLISHING_RECORD), \
              patch("hypogeum.startup.run_startup_checks",
                    return_value=make_startup_report()):
-            run_pipeline("Test topic", "ep_001", cfg, output_dir=tmp_path)
+            # channel_id=None: this tests the flag -> skip_shorts wiring, not
+            # channel config. Without it the real "hypogeum" channel profile
+            # (now short-native) is loaded and forces skip_shorts=True.
+            run_pipeline("Test topic", "ep_001", cfg, output_dir=tmp_path,
+                         channel_id=None)
 
         call_kwargs = mock_audio.call_args[1]
         assert call_kwargs["skip_shorts"] is False

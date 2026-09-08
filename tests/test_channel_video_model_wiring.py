@@ -11,7 +11,7 @@ from hypogeum.channel_config import (
     resolve_channel_video_model, update_channel_profile, update_model_profile,
 )
 from hypogeum.config import Config
-from hypogeum.muapi import _resolve_scene_model, _tier_to_model
+from hypogeum.muapi import MODEL_CREDIT_COSTS, _resolve_scene_model, _tier_to_model
 from hypogeum.production_plan import ProductionPlanPricingError, resolve_video_price
 
 
@@ -86,8 +86,11 @@ def test_global_safety_mode_wins_over_channel_override(tmp_path, monkeypatch, mo
 # ── resolve_video_price channel_price fallback ───────────────────────────
 
 def test_price_uses_channel_price_for_off_table_model():
-    # seedance-pro-t2v-fast is not in MODEL_CREDIT_COSTS
-    assert resolve_video_price("seedance-pro-t2v-fast", episode_id="e",
+    # wan2.5-text-to-video is not in MODEL_CREDIT_COSTS (seedance-pro-t2v-fast
+    # was added to the table at its effective billed price in 879320e, so it
+    # no longer exercises the channel_price fallback path).
+    assert "wan2.5-text-to-video" not in MODEL_CREDIT_COSTS
+    assert resolve_video_price("wan2.5-text-to-video", episode_id="e",
                                channel_price=0.06) == 0.06
 
 
@@ -109,15 +112,16 @@ def test_price_table_wins_over_channel_price_for_known_model():
 def test_production_plan_declares_channel_model_and_price(monkeypatch):
     from tests.test_production_plan import _compile
 
+    # An off-table adopted model so the channel_price path is what's exercised.
     monkeypatch.setattr(
         "hypogeum.channel_config.resolve_channel_video_model",
-        lambda cid, db_path=None: ("seedance-pro-t2v-fast", 0.06),
+        lambda cid, db_path=None: ("wan2.5-text-to-video", 0.06),
     )
     plan = _compile()
     video_assets = [a for a in plan.assets if a.provider == "muapi"
-                    and a.model == "seedance-pro-t2v-fast"]
+                    and a.model == "wan2.5-text-to-video"]
     other = [a for a in plan.assets if a.provider == "muapi"
-             and a.model != "seedance-pro-t2v-fast" and "image" not in a.model]
+             and a.model != "wan2.5-text-to-video" and "image" not in a.model]
     assert video_assets, "expected video assets on the channel model"
     assert not other, f"some video assets kept a non-channel model: {[a.model for a in other]}"
     for a in video_assets:
@@ -126,7 +130,7 @@ def test_production_plan_declares_channel_model_and_price(monkeypatch):
     # _submit_scene_via_gate would compute the SAME model -> no plan mismatch
     from hypogeum.muapi import _resolve_scene_model
     c = _cfg()
-    assert _resolve_scene_model(2, None, c, "any_channel") == "seedance-pro-t2v-fast"
+    assert _resolve_scene_model(2, None, c, "any_channel") == "wan2.5-text-to-video"
 
 
 def test_production_plan_unchanged_for_channel_without_override(monkeypatch):
@@ -163,17 +167,16 @@ def test_plan_predicts_i2v_for_final_locked_primary_scene(monkeypatch):
 
     monkeypatch.setattr(
         "hypogeum.channel_config.resolve_channel_video_model",
-        lambda cid, db_path=None: ("seedance-pro-t2v-fast", 0.06),
+        lambda cid, db_path=None: ("wan2.5-text-to-video", 0.06),
     )
     plan = _compile(visual_package=_vp_with_final_locked_primary())
 
     by_scene = {a.scene_id: a for a in plan.assets if a.role == "required"}
     # s01: final-locked primary → declared as the I2V model at its table price
     assert "image-to-video" in by_scene["s01"].model
-    from hypogeum.muapi import MODEL_CREDIT_COSTS
     assert by_scene["s01"].unit_price_usd == MODEL_CREDIT_COSTS[by_scene["s01"].model]
     # s02: no final-locked primary → channel T2V model at the channel price
-    assert by_scene["s02"].model == "seedance-pro-t2v-fast"
+    assert by_scene["s02"].model == "wan2.5-text-to-video"
     assert by_scene["s02"].unit_price_usd == 0.06
 
 
@@ -184,14 +187,14 @@ def test_gate_unit_price_matches_plan_for_every_model(tmp_path):
     from hypogeum.production_plan import resolve_video_price
 
     db = tmp_path / "t.db"
-    _channel_with_model(db, "cc", "seedance-pro-t2v-fast", 0.06)
+    _channel_with_model(db, "cc", "wan2.5-text-to-video", 0.06)
     import hypogeum.channel_config as cc
     orig = cc._resolve_db_path
     cc._resolve_db_path = lambda p: db
     try:
         # off-table channel model: gate price == channel price == plan price
-        gate = _resolve_gate_unit_price("seedance-pro-t2v-fast", "cc", "ep")
-        plan = resolve_video_price("seedance-pro-t2v-fast", episode_id="ep", channel_price=0.06)
+        gate = _resolve_gate_unit_price("wan2.5-text-to-video", "cc", "ep")
+        plan = resolve_video_price("wan2.5-text-to-video", episode_id="ep", channel_price=0.06)
         assert gate == plan == 0.06
         # on-table model (I2V): both use the table
         m = "veo3-image-to-video"

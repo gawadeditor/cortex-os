@@ -299,7 +299,10 @@ class TestPipelineCancelledError:
         """cancel_check=None must never raise PipelineCancelledError."""
         from hypogeum.pipeline import run_pipeline, PipelineCancelledError
 
-        # With cancel_check=None, pipeline runs normally (will fail for other reasons)
+        # With cancel_check=None, pipeline runs normally (will fail for other
+        # reasons). channel_id=None bypasses the DB channel lookup (which now
+        # runs before startup checks) so we reach the patched abort — the
+        # point is only that whatever raises, it is never PipelineCancelledError.
         with patch("hypogeum.pipeline.run_startup_checks") as mock_startup:
             mock_startup.side_effect = Exception("startup_abort")
             with pytest.raises(Exception, match="startup_abort"):
@@ -307,6 +310,7 @@ class TestPipelineCancelledError:
                     topic_input="test topic",
                     episode_id="ep_check_none",
                     config=MagicMock(),
+                    channel_id=None,
                     cancel_check=None,
                     db_path=tmp_path / "h.db",
                 )
@@ -316,6 +320,10 @@ class TestPipelineCancelledError:
 # 6. pipeline.py: cancel check fires between each stage
 # ===========================================================================
 
+# Must match the cancel_check() call order in hypogeum/pipeline.py exactly
+# (every `stage_after=` in run_pipeline, top to bottom). Audio now runs
+# before the Visual Package Director, and source_enhancement is its own
+# cancellable stage — both since this test was first written.
 _ALL_STAGES = [
     "executive_producer",
     "research_director",
@@ -323,9 +331,10 @@ _ALL_STAGES = [
     "script_engine",
     "finance_agent_authorization",
     "thumbnail_strategy",
-    "visual_package_director",
-    "thumbnail_director",
     "audio_agent",
+    "visual_package_director",
+    "source_enhancement",
+    "thumbnail_director",
     "assembly_agent",
     "qa_agent",
     "compliance_agent",
@@ -364,9 +373,10 @@ class TestCancelCheckFiresBetweenStages:
             "finance_agent_authorization": ("hypogeum.pipeline._run_budget_authorization",
                                             {"verdict": "PROCEED", "estimated_spend_usd": 1.0}),
             "thumbnail_strategy":          ("hypogeum.pipeline._run_thumbnail_strategy", {}),
-            "visual_package_director":     ("hypogeum.pipeline._run_visual_package_director", {}),
-            "thumbnail_director":          ("hypogeum.pipeline._run_thumbnail_director", {}),
             "audio_agent":                 ("hypogeum.pipeline._run_audio_agent", {}),
+            "visual_package_director":     ("hypogeum.pipeline._run_visual_package_director", {}),
+            "source_enhancement":          ("hypogeum.pipeline._run_source_enhancement", {}),
+            "thumbnail_director":          ("hypogeum.pipeline._run_thumbnail_director", {}),
             "assembly_agent":              ("hypogeum.pipeline._run_assembly_agent", {}),
             "qa_agent":                    ("hypogeum.pipeline._run_qa_agent",
                                             {"verdict": "APPROVED"}),
@@ -400,6 +410,7 @@ class TestCancelCheckFiresBetweenStages:
         pause_transition_calls = []
 
         with patch("hypogeum.pipeline.run_startup_checks", return_value=startup_report), \
+             patch("hypogeum.pipeline.validate_narration_completeness"), \
              patch("hypogeum.pipeline.register_run", return_value="run_test"), \
              patch("hypogeum.pipeline.cancel_run",
                    side_effect=lambda *a, **kw: cancel_run_calls.append((a, kw))), \
@@ -528,14 +539,17 @@ class TestCancelCheckFiresBetweenStages:
         assert "audio_agent" not in stages_seen
         assert len(audio_agent_calls) == 0
 
+    def test_cancel_after_audio_agent(self, tmp_path):
+        self._run_pipeline_until_stage("audio_agent", tmp_path)
+
     def test_cancel_after_visual_package_director(self, tmp_path):
         self._run_pipeline_until_stage("visual_package_director", tmp_path)
 
+    def test_cancel_after_source_enhancement(self, tmp_path):
+        self._run_pipeline_until_stage("source_enhancement", tmp_path)
+
     def test_cancel_after_thumbnail_director(self, tmp_path):
         self._run_pipeline_until_stage("thumbnail_director", tmp_path)
-
-    def test_cancel_after_audio_agent(self, tmp_path):
-        self._run_pipeline_until_stage("audio_agent", tmp_path)
 
     def test_cancel_after_assembly_agent(self, tmp_path):
         self._run_pipeline_until_stage("assembly_agent", tmp_path)

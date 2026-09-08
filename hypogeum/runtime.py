@@ -157,6 +157,11 @@ def smoke_run(
             cadence="manual",
             next_run_at=past,
             label="smoke_test",
+            # A manual smoke schedule is an explicit operator one-shot, not
+            # autonomous daily production — it must not be blocked by the
+            # per-channel max_runs_per_day ceiling (0 disables it), so
+            # smoke_run() stays idempotently re-runnable.
+            max_runs_per_day=0,
         )
         result.schedule_id = schedule_id
         result.steps_completed.append("schedule_created")

@@ -496,7 +496,11 @@ class TestAPIRoute:
         data = json.loads(resp.data)
         assert data["connections"]["demo_warning"] is None
 
-    def test_platform_connections_route_in_footer(self, client):
+    def test_platform_connections_surface_is_discoverable_from_dashboard(self, client):
+        # The dashboard no longer footer-links /api/platform-connections
+        # directly; the connections surface moved to the /providers tab
+        # (Provider Control Center). The API endpoint itself is unchanged
+        # (covered by the other tests in this class).
         state  = _fake_state()
         report = _fake_report()
         import run_dashboard as server
@@ -504,7 +508,7 @@ class TestAPIRoute:
         with patch.object(server, "get_factory_state", return_value=state), \
              patch.object(server, "assess_factory", return_value=report):
             resp = client.get("/dashboard")
-        assert b"/api/platform-connections" in resp.data
+        assert b"/providers" in resp.data or b"/api/platform-connections" in resp.data
 
 
 # ===========================================================================

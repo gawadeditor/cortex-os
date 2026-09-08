@@ -341,6 +341,12 @@ class FakePublishTransport:
             }},
         )
 
+    def get(self, *, url, headers, timeout):
+        # The worker loop now runs sync_zernio_schedule() every iteration
+        # (a GET of the channel's scheduled posts). Nothing in this scenario
+        # depends on its result — return an empty list.
+        return ZernioTransportResponse(status_code=200, json_body={"posts": []})
+
 
 @pytest.fixture(autouse=True)
 def _reset_fake_transport_state():
@@ -470,6 +476,10 @@ def test_two_consecutive_autonomous_cycles_no_manual_intervention(tmp_path, monk
     schedule_id = create_schedule(
         db_path=db_path, scope="channel", channel_id=_SYNTH_CHANNEL_ID, cadence="daily",
         next_run_at=datetime.now(timezone.utc) - timedelta(seconds=1), label="test_synth_daily",
+        # This scenario compresses two production cycles that would really be
+        # a day apart into one wall-clock run; the per-channel daily ceiling
+        # (39642e3, default 1) would otherwise block cycle 2's episode.
+        max_runs_per_day=5,
     )
 
     import run_worker

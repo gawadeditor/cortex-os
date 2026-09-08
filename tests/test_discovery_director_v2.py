@@ -742,10 +742,11 @@ class TestGenerationSource:
 
 class TestV1Regression:
 
-    def test_v2_is_behind_engine_flag(self):
+    def test_v2_is_behind_engine_flag(self, tmp_path):
         """Without DISCOVERY_ENGINE=v2, the director is never called."""
         import os
         from hypogeum.topic_discovery import run_discovery_cycle
+        db = _init_db(tmp_path)  # run_discovery_cycle writes discovery_state before dispatch
         called = []
 
         def fake_v1(channel_id, db_path=None):
@@ -756,7 +757,7 @@ class TestV1Regression:
         with patch("hypogeum.topic_discovery._run_discovery_cycle_v1", side_effect=fake_v1):
             old = os.environ.pop("DISCOVERY_ENGINE", None)
             try:
-                run_discovery_cycle("ch_test")
+                run_discovery_cycle("ch_test", db_path=db)
             finally:
                 if old:
                     os.environ["DISCOVERY_ENGINE"] = old

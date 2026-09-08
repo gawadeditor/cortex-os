@@ -1049,6 +1049,7 @@ class TestPipelineIntegration:
 
         with patch("hypogeum.pipeline.run_executive_producer",
                    return_value=(sc, brief)), \
+             patch("hypogeum.pipeline.validate_narration_completeness"), \
              patch("hypogeum.pipeline.run_research_director",
                    return_value=(_make_research_package(), None)), \
              patch("hypogeum.pipeline.run_narrative_architect",
@@ -1083,7 +1084,7 @@ class TestPipelineIntegration:
                                  "checks": [], "failures": [], "warnings": []}), \
              patch("hypogeum.pipeline.run_startup_checks",
                    return_value=self._make_startup_report()):
-            result = run_pipeline("Test", EPISODE_ID, cfg)
+            result = run_pipeline("Test", EPISODE_ID, cfg, channel_id=None)
         assert result.status == "completed"
 
     def test_stub_passes_output_dir(self):

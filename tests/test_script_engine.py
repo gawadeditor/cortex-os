@@ -858,25 +858,25 @@ class TestPipelineIntegration:
             "competitive_landscape": {}, "research_run_summary": {}, "package_integrity": {},
         }
 
-    def test_stub_delegates_to_run_script_engine(self):
+    def test_stub_delegates_to_run_script_engine(self, tmp_path):
         sp_pkg = _make_script_package()
         with patch("hypogeum.pipeline.run_script_engine",
                    return_value=sp_pkg) as mock_se:
-            result = pipeline_se_stub({}, cfg, EPISODE_ID, None)
+            result = pipeline_se_stub({}, cfg, EPISODE_ID, tmp_path)
         mock_se.assert_called_once()
         assert result is sp_pkg
 
-    def test_stub_passes_narrative_package(self):
+    def test_stub_passes_narrative_package(self, tmp_path):
         np_pkg = _make_narrative_package()
         with patch("hypogeum.pipeline.run_script_engine",
                    return_value=_make_script_package()) as mock_se:
-            pipeline_se_stub(np_pkg, cfg, EPISODE_ID, None)
+            pipeline_se_stub(np_pkg, cfg, EPISODE_ID, tmp_path)
         assert mock_se.call_args.kwargs["narrative_package"] is np_pkg
 
-    def test_stub_passes_episode_id(self):
+    def test_stub_passes_episode_id(self, tmp_path):
         with patch("hypogeum.pipeline.run_script_engine",
                    return_value=_make_script_package()) as mock_se:
-            pipeline_se_stub({}, cfg, EPISODE_ID, None)
+            pipeline_se_stub({}, cfg, EPISODE_ID, tmp_path)
         assert mock_se.call_args.kwargs["episode_id"] == EPISODE_ID
 
     def test_success_continues_to_vpd_stub(self):
@@ -923,11 +923,11 @@ class TestPipelineIntegration:
             result = run_pipeline("Test Topic", EPISODE_ID, cfg, channel_id=None)
         assert result.status == "completed"
 
-    def test_exception_propagates_through_pipeline(self):
+    def test_exception_propagates_through_pipeline(self, tmp_path):
         err = SchemaError("script_package", "sections", "must have at least 1")
         with patch("hypogeum.pipeline.run_script_engine", side_effect=err):
             with pytest.raises(SchemaError) as exc_info:
-                pipeline_se_stub({}, cfg, EPISODE_ID, None)
+                pipeline_se_stub({}, cfg, EPISODE_ID, tmp_path)
         assert exc_info.value is err
 
     def test_stub_passes_output_dir(self):

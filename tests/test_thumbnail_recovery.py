@@ -45,6 +45,7 @@ from hypogeum.pipeline import (
 # ---------------------------------------------------------------------------
 
 SONNET = "anthropic/claude-sonnet-4.6"
+FALLBACK_MODEL = "openai/gpt-4o-mini"  # any non-empty slug; the HTTP is mocked
 MINIMAL_MESSAGES = [
     {"role": "system", "content": "You are a helpful pipeline agent."},
     {"role": "user", "content": "Respond with: OK"},
@@ -55,6 +56,9 @@ def make_config() -> Config:
     env = {
         "OPENROUTER_API_KEY": "sk-or-test",
         "ANTHROPIC_API_KEY":  "sk-ant-test",
+        # Fallback now stays within OpenRouter (a different model slug),
+        # never Anthropic-direct — see openrouter._try_openrouter_model_fallback.
+        "OPENROUTER_FALLBACK_MODEL": FALLBACK_MODEL,
     }
     keys = list(env)
     original = {k: os.environ.get(k) for k in keys}
@@ -78,14 +82,17 @@ def _malformed_resp() -> MagicMock:
     return resp
 
 
-def _anthropic_ok(content: str = "OK") -> MagicMock:
+def _openrouter_ok(content: str = "OK") -> MagicMock:
+    """A well-formed OpenRouter chat-completions response (the fallback model
+    is reached through the SAME OpenRouter endpoint now, not Anthropic-direct)."""
     resp = MagicMock()
     resp.status_code = 200
     resp.json.return_value = {
-        "model": "claude-sonnet-4-6",
-        "content": [{"type": "text", "text": content}],
-        "stop_reason": "end_turn",
-        "usage": {"input_tokens": 10, "output_tokens": 5},
+        "id": "x",
+        "model": FALLBACK_MODEL,
+        "choices": [{"message": {"role": "assistant", "content": content},
+                     "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
     }
     return resp
 
@@ -119,24 +126,24 @@ class TestOpenRouterMalformedChoices:
         openrouter_mod.reset_run_state()
 
     def test_missing_choices_triggers_retry_then_fallback(self):
-        """Missing 'choices' → _RetryableError → retry → exhaust → Anthropic fallback."""
+        """Missing 'choices' → _RetryableError → retry → exhaust → OPENROUTER_FALLBACK_MODEL."""
         cfg = make_config()
         mal = _malformed_resp()
         with patch(
             "hypogeum.openrouter.requests.post",
-            side_effect=[mal, mal, _anthropic_ok()],
+            side_effect=[mal, mal, _openrouter_ok()],
         ) as mock_post:
             result = call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
 
         assert result.content == "OK"
-        assert result.via_fallback is True
+        assert result.model_used == FALLBACK_MODEL   # the fallback model answered
         or_calls  = [c for c in mock_post.call_args_list if c.args[0] == OPENROUTER_CHAT_URL]
         ant_calls = [c for c in mock_post.call_args_list if c.args[0] == ANTHROPIC_MESSAGES_URL]
-        assert len(or_calls) == 2   # initial + 1 retry
-        assert len(ant_calls) == 1
+        assert len(or_calls) == 3   # 2 primary attempts + 1 fallback-model attempt
+        assert len(ant_calls) == 0  # never Anthropic-direct
 
     def test_empty_choices_triggers_retry_then_fallback(self):
-        """Empty choices list → _RetryableError → retry → exhaust → Anthropic fallback."""
+        """Empty choices list → _RetryableError → retry → exhaust → OPENROUTER_FALLBACK_MODEL."""
         cfg = make_config()
         mal = MagicMock()
         mal.status_code = 200
@@ -147,13 +154,13 @@ class TestOpenRouterMalformedChoices:
         }
         with patch(
             "hypogeum.openrouter.requests.post",
-            side_effect=[mal, mal, _anthropic_ok()],
+            side_effect=[mal, mal, _openrouter_ok()],
         ) as mock_post:
             result = call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
 
-        assert result.via_fallback is True
+        assert result.model_used == FALLBACK_MODEL
         ant_calls = [c for c in mock_post.call_args_list if c.args[0] == ANTHROPIC_MESSAGES_URL]
-        assert len(ant_calls) == 1
+        assert len(ant_calls) == 0
 
     def test_missing_choices_does_not_raise_hardfailure_on_first_attempt(self):
         """The first malformed response must trigger a retry, not an immediate halt."""
@@ -163,20 +170,22 @@ class TestOpenRouterMalformedChoices:
         def side_effect(*args, **kwargs):
             nonlocal call_count
             call_count += 1
-            return _malformed_resp() if call_count <= 2 else _anthropic_ok()
+            return _malformed_resp() if call_count <= 2 else _openrouter_ok()
 
         with patch("hypogeum.openrouter.requests.post", side_effect=side_effect):
             call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
 
-        assert call_count == 3   # 2 OR attempts + 1 Anthropic fallback
+        assert call_count == 3   # 2 primary attempts + 1 fallback-model attempt
 
-    def test_all_paths_malformed_raises_hard_subclass(self):
-        """When OR and Anthropic both fail, a HardFailure subclass is raised."""
+    def test_all_paths_malformed_raises(self):
+        """When the primary AND the fallback model both return malformed
+        responses, call_claude raises (FallbackFailed) rather than returning
+        a bad result."""
+        from hypogeum.openrouter import FallbackFailed
         cfg = make_config()
         mal = _malformed_resp()
-        # All calls return malformed → Anthropic path sees empty content → EmptyResponse
         with patch("hypogeum.openrouter.requests.post", return_value=mal):
-            with pytest.raises(HardFailure):  # EmptyResponse is a HardFailure subclass
+            with pytest.raises(FallbackFailed):
                 call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg)
 
 

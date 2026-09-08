@@ -109,19 +109,22 @@ class TestExecutionPlansPage:
         assert resp.status_code == 200
 
     def test_contains_f5_guard_text(self, client):
+        # The page's run affordance is a dry run. The old "no live
+        # execution" banner prose was dropped when the interactive Dry-run
+        # panel was added; the guarantee (no Execute button — see
+        # test_f6_ux.TestExecutionPlansPage) is unchanged.
         resp = client.get("/execution-plans")
         html = resp.data.decode()
         assert "dry-run" in html.lower() or "dry run" in html.lower()
-        assert "no live execution" in html.lower()
 
     def test_shows_empty_draft_section(self, client):
         resp = client.get("/execution-plans")
         assert resp.status_code == 200
 
-    def test_f5_notice_mentions_executed_unreachable(self, client):
-        resp = client.get("/execution-plans")
-        html = resp.data.decode()
-        assert "executed" in html.lower()
+    def test_page_has_no_execute_button(self, client):
+        import re
+        html = client.get("/execution-plans").data.decode()
+        assert re.findall(r'<button[^>]*>[^<]*(?:[Ee]xecute|[Ss]tart run)[^<]*</button>', html) == []
 
 
 # ---------------------------------------------------------------------------

@@ -185,8 +185,13 @@ def _process_gated(db_path, project_root, worker_id="w1", topic="Test Topic"):
     )
 
 
-_TARGET = datetime(2026, 9, 3, 18, 0, tzinfo=ZoneInfo("Asia/Dubai"))
-_GENERATED = datetime(2026, 7, 21, 9, 0, tzinfo=timezone.utc)
+# Relative to now: the gated executor rejects a run whose target publish
+# time has already passed, so a fixed calendar date silently ages into a
+# stale target and fails the "succeeds" tests.
+_TARGET = (datetime.now(ZoneInfo("Asia/Dubai")) + timedelta(days=5)).replace(
+    hour=18, minute=0, second=0, microsecond=0
+)
+_GENERATED = datetime.now(timezone.utc) - timedelta(days=2)
 
 
 # ===========================================================================

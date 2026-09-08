@@ -387,15 +387,20 @@ class TestExecutionPlansPage:
         html = resp.data.decode()
         assert "Action Plans" in html or "action plans" in html.lower()
 
-    def test_page_has_dry_run_only_notice(self, client):
+    def test_page_offers_dry_run(self, client):
+        # The page's only run affordance is a dry run — the explicit
+        # "DRY-RUN ONLY" banner copy was dropped when the interactive
+        # Dry-run panel was added, but the guarantee (see
+        # test_page_has_no_execute_button_element) is unchanged.
         resp = client.get("/execution-plans")
         html = resp.data.decode()
-        assert "DRY-RUN ONLY" in html or "dry-run only" in html.lower() or "Dry-run only" in html
+        assert "dry-run" in html.lower() or "dry run" in html.lower()
 
-    def test_page_states_no_execute_button(self, client):
+    def test_page_has_no_execute_or_start_button(self, client):
         resp = client.get("/execution-plans")
         html = resp.data.decode()
-        assert "no execute button" in html.lower() or "There is no Execute button" in html
+        import re
+        assert re.findall(r'<button[^>]*>[^<]*(?:[Ee]xecute|[Ss]tart run)[^<]*</button>', html) == []
 
     def test_page_has_no_execute_button_element(self, client, db):
         _seed_plan(db)

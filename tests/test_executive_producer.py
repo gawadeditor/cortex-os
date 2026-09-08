@@ -805,7 +805,7 @@ class TestPipelineIntegration:
                     run_pipeline(TOPIC, EPISODE_ID, cfg, output_dir=tmp_path)
         assert exc_info.value.scorecard is scorecard
 
-    def test_pipeline_pass_continues_to_next_agent(self):
+    def test_pipeline_pass_continues_to_next_agent(self, tmp_path):
         """PASS decision — pipeline proceeds past EP through all 9 agents to completion."""
         from hypogeum.pipeline import run_pipeline
         cfg = make_config()
@@ -819,6 +819,7 @@ class TestPipelineIntegration:
 
         with patch("hypogeum.pipeline.run_executive_producer",
                    return_value=(_make_scorecard("PASS"), _make_brief())), \
+             patch("hypogeum.pipeline.validate_narration_completeness"), \
              patch("hypogeum.pipeline.run_research_director",
                    return_value=(_minimal_rp, None)), \
              patch("hypogeum.pipeline.run_narrative_architect",
@@ -853,10 +854,11 @@ class TestPipelineIntegration:
                                  "checks": [], "failures": [], "warnings": []}), \
              patch("hypogeum.pipeline.run_startup_checks",
                    return_value=self._make_startup_report()):
-            result = run_pipeline(TOPIC, EPISODE_ID, cfg)
+            result = run_pipeline(TOPIC, EPISODE_ID, cfg,
+                                  channel_id=None, db_path=tmp_path / "h.db")
         assert result.status == "completed"
 
-    def test_pipeline_warn_continues_to_next_agent(self):
+    def test_pipeline_warn_continues_to_next_agent(self, tmp_path):
         """WARN decision — pipeline proceeds past EP through all 9 agents to completion."""
         from hypogeum.pipeline import run_pipeline
         cfg = make_config()
@@ -870,6 +872,7 @@ class TestPipelineIntegration:
 
         with patch("hypogeum.pipeline.run_executive_producer",
                    return_value=(_make_scorecard("WARN", 6.5), _make_brief())), \
+             patch("hypogeum.pipeline.validate_narration_completeness"), \
              patch("hypogeum.pipeline.run_research_director",
                    return_value=(_minimal_rp, None)), \
              patch("hypogeum.pipeline.run_narrative_architect",
@@ -904,7 +907,8 @@ class TestPipelineIntegration:
                                  "checks": [], "failures": [], "warnings": []}), \
              patch("hypogeum.pipeline.run_startup_checks",
                    return_value=self._make_startup_report()):
-            result = run_pipeline(TOPIC, EPISODE_ID, cfg)
+            result = run_pipeline(TOPIC, EPISODE_ID, cfg,
+                                  channel_id=None, db_path=tmp_path / "h.db")
         assert result.status == "completed"
 
     def test_pipeline_stub_passes_output_dir(self):

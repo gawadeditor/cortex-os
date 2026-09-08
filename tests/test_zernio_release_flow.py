@@ -335,7 +335,15 @@ class TestRestartDoesNotMoveAlreadyPersistedSchedule:
         media_transport = FakeMediaTransport()
         publish_transport = FakePublishTransport()
 
-        now_1 = _dt.datetime(2026, 8, 22, 10, 0, tzinfo=_dt.timezone.utc)  # Saturday -> next slot: Sun Aug 23 14:00
+        # The publish path rejects a scheduledFor that is not in the (real)
+        # future, so anchor to a real upcoming Sunday rather than a fixed
+        # calendar date. now_1 = the Saturday before it, at 10:00.
+        _real_now = _dt.datetime.now(_dt.timezone.utc)
+        _days_to_sun = ((6 - _real_now.weekday()) % 7) or 7  # strictly the NEXT Sunday
+        expected_first_slot = (_real_now + _dt.timedelta(days=_days_to_sun)).replace(
+            hour=14, minute=0, second=0, microsecond=0
+        )
+        now_1 = (expected_first_slot - _dt.timedelta(days=1)).replace(hour=10)
         result_1 = publish_channel_release(
             CHANNEL_ID, EPISODE_ID, ["youtube"], _package(assets_root, n_shorts=0),
             assets_root=assets_root, db_path=db_path, now=now_1,
@@ -344,7 +352,7 @@ class TestRestartDoesNotMoveAlreadyPersistedSchedule:
         )
         assert result_1.status == "published", result_1.blocked_reason
         first_slot = result_1.schedule.slot
-        assert first_slot == _dt.datetime(2026, 8, 23, 14, 0, tzinfo=_dt.timezone.utc)
+        assert first_slot == expected_first_slot
         first_scheduled_for_sent = publish_transport.post_calls[0]["scheduledFor"]
         calls_after_first = len(publish_transport.post_calls)
 

@@ -143,14 +143,18 @@ def build_vertical_thumbnail_package(
         except Exception:  # noqa: BLE001
             pass
 
+        # Sonnet, not the expensive TD_PLANNING_MODEL (gpt-5.5-pro): this is
+        # a single prompt-craft turn producing a ~300-token JSON, the same
+        # tier the Thumbnail Strategy that feeds it already runs on.
         plan = run_agent(
             agent_name=_AGENT_NAME,
-            model_slug=getattr(config, "TD_PLANNING_MODEL", "anthropic/claude-sonnet-4.6"),
+            model_slug=getattr(config, "OPENROUTER_SONNET_MODEL_ID", "anthropic/claude-sonnet-4.6")
+            or "anthropic/claude-sonnet-4.6",
             system_prompt=system_prompt,
             input_package=input_package,
             output_schema="vertical_thumbnail_plan",
             episode_id=episode_id,
-            max_tokens=getattr(config, "TD_PLANNING_MAX_TOKENS", 4096),
+            max_tokens=2048,
             config=config,
             output_dir=base,
             channel_id=channel_id,

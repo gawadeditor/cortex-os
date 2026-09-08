@@ -338,6 +338,15 @@ class TestPipelineOISIsolation:
     verify that the patch is in place and effective.
     """
 
+    @pytest.fixture(autouse=True)
+    def _skip_narration_gate(self):
+        # The narration-completeness gate (between Audio and VPD) is a hard
+        # call, not one of the mockable _run_* stages; the deeply-nested
+        # with-patch block below is already at Python's nesting limit, so
+        # patch it here instead of adding another level.
+        with patch("hypogeum.pipeline.validate_narration_completeness"):
+            yield
+
     def _make_config(self):
         import os
         from unittest.mock import patch as p
@@ -558,6 +567,11 @@ class TestPipelineOISIsolation:
 
 class TestRunRegistryIsolation:
     """run_pipeline() must not write run rows to the production database."""
+
+    @pytest.fixture(autouse=True)
+    def _skip_narration_gate(self):
+        with patch("hypogeum.pipeline.validate_narration_completeness"):
+            yield
 
     def test_conftest_run_registry_patch_is_active(self):
         """The conftest autouse fixture must stub register_run in pipeline namespace."""

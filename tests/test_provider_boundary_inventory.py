@@ -255,16 +255,17 @@ class TestFakeAdapterRemainsTestOnly:
     and this must remain true throughout every commit in the program."""
 
     _ALLOWED_IMPORTERS = {
-        "hypogeum/submission_gate.py", "hypogeum/providers/muapi_video_adapter.py",
+        "hypogeum/submission_gate.py", "hypogeum/capability_boundary.py",
+        "hypogeum/providers/muapi_video_adapter.py",
         "hypogeum/providers/muapi_image_adapter.py", "hypogeum/providers/muapi_thumbnail_adapter.py",
         "hypogeum/providers/elevenlabs_voice_adapter.py", "hypogeum/providers/elevenlabs_music_adapter.py",
         "hypogeum/providers/openrouter_text_adapter.py", "hypogeum/providers/perplexity_adapter.py",
         "hypogeum/providers/muapi_upscale_adapter.py",
     }
-    """submission_gate.py imports fake_provider_adapter.py for the
-    shared AdapterInvocationCapability/AdapterResult/
-    compute_capability_checksum definitions -- the gate itself, not a
-    business-logic caller. hypogeum/providers/muapi_video_adapter.py
+    """submission_gate.py and capability_boundary.py import
+    fake_provider_adapter.py for the shared AdapterInvocationCapability/
+    AdapterResult/compute_capability_checksum definitions -- the
+    authorization boundary itself (ef1aeaa), not a business-logic caller. hypogeum/providers/muapi_video_adapter.py
     (Commit F) imports the exact same shared protocol dataclasses for
     the identical reason -- every real per-domain adapter implements
     FakeProviderAdapter's own protocol, so every real adapter module is

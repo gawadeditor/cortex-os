@@ -444,11 +444,23 @@ def relocate_episode_assets(
     }
 
     try:
-        from hypogeum.archive_storage import resolve_archive_root
+        from hypogeum.archive_storage import (
+            ensure_archive_root_mounted,
+            resolve_archive_root,
+        )
     except Exception as exc:  # noqa: BLE001
         rec["verdict"] = "FAILED"
         rec["failures"].append(f"archive_storage import failed: {exc}")
         return rec
+
+    # The archive root may be an SMB share that dropped while the box slept.
+    # Bring it back before we resolve/move — otherwise resolve_archive_root()
+    # silently falls back to the in-tree default and we "archive" into the
+    # working area. Best-effort; a failure here just means the fallback path.
+    try:
+        ensure_archive_root_mounted(db_path)
+    except Exception:  # noqa: BLE001
+        pass
 
     src = Path(output_dir) if output_dir is not None else (_WORKING_EPISODES_DIR / episode_id)
     rec["source_dir"] = str(src)

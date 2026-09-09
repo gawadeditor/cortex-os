@@ -50,6 +50,39 @@ def test_bad_db_value_falls_back_to_default(dbp):
     assert root == st._DEFAULT_ARCHIVE_ROOT
 
 
+def test_ensure_mounted_noop_when_unset(dbp):
+    """No configured root -> nothing to mount, returns True, runs no helper."""
+    from hypogeum import archive_storage as st
+    assert st.ensure_archive_root_mounted(db_path=dbp) is True
+
+
+def test_ensure_mounted_noop_for_non_volumes_path(dbp, tmp_path):
+    """A configured root that is not under /Volumes has no mount to manage."""
+    from hypogeum import archive_storage as st
+    target = tmp_path / "local-archive"
+    target.mkdir()
+    set_factory_setting("archive_root", str(target), db_path=dbp)
+    assert st.ensure_archive_root_mounted(db_path=dbp) is True
+
+
+def test_ensure_mounted_runs_helper_for_volumes_path(dbp, monkeypatch):
+    """A /Volumes/<share> root that is not mounted triggers the helper;
+    result reflects whether the mount point is mounted afterward."""
+    from hypogeum import archive_storage as st
+    set_factory_setting("archive_root", "/Volumes/NotReal/Cortex", db_path=dbp)
+
+    calls = []
+    monkeypatch.setattr(st.os.path, "ismount", lambda p: False)
+    monkeypatch.setattr(st, "_MOUNT_HELPER", st._PROJECT_ROOT / "scripts" / "mount_archive_share.sh")
+    monkeypatch.setattr(
+        st.subprocess, "run",
+        lambda *a, **k: calls.append((a, k)),
+    )
+    out = st.ensure_archive_root_mounted(db_path=dbp)
+    assert calls, "mount helper should have been invoked"
+    assert out is False  # ismount still False after the (stubbed) attempt
+
+
 def test_record_asset_reuse_appends_episode(dbp):
     from hypogeum import archive_storage as st
     conn = get_connection(dbp)

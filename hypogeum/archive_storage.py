@@ -20,6 +20,7 @@ catalog of record is the ``archive_index`` DB table.
 
 Public API:
     resolve_archive_root(db_path=None)      -> Path        (absolute, mkdir'd)
+    ensure_archive_root_mounted(db_path=None) -> bool       (remount an SMB root before a move)
     describe_archive_root(db_path=None)     -> dict         (root + source + stats)
     validate_archive_root(path_str)         -> (ok, error)
     set_archive_root(path_str, db_path=None)-> Path
@@ -30,6 +31,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple
@@ -39,6 +41,11 @@ _WORKING_EPISODES_DIR = (_PROJECT_ROOT / ".hypogeum-assets" / "episodes").resolv
 _DEFAULT_ARCHIVE_ROOT = (_PROJECT_ROOT / ".hypogeum-assets" / "archive").resolve()
 
 _SETTING_KEY = "archive_root"
+
+# Best-effort remount helper for a /Volumes/<share> archive root (SMB share on
+# a laptop that sleeps — every sleep drops the mount). See
+# ensure_archive_root_mounted() and scripts/mount_archive_share.sh.
+_MOUNT_HELPER = _PROJECT_ROOT / "scripts" / "mount_archive_share.sh"
 
 
 def _now_iso() -> str:
@@ -87,6 +94,46 @@ def resolve_archive_root(db_path: Optional[Path] = None) -> Path:
     candidate = candidate.resolve()
     candidate.mkdir(parents=True, exist_ok=True)
     return candidate
+
+
+def ensure_archive_root_mounted(db_path: Optional[Path] = None, *, timeout: int = 75) -> bool:
+    """Best-effort: if the configured archive root sits under a mount point
+    that is not currently mounted, run scripts/mount_archive_share.sh to
+    bring it back before an asset move.
+
+    Why this exists: the archive root is a user-mounted SMB share on a
+    MacBook that sleeps every few minutes (lid closed, on battery). Every
+    sleep drops the mount and LaunchAgent timers pause, so resolve_archive_
+    root() silently falls back to the in-tree default and episodes get
+    "archived" into the working tree. Callers about to relocate assets
+    (hypogeum.archive_relocation) call this first.
+
+    Returns True when the mount point is mounted after the attempt, or when
+    the configured root is not a /Volumes-backed path (nothing to do).
+    Never raises. No effect on non-macOS or when the helper is absent.
+    """
+    raw, source = _raw_configured_root(db_path)
+    if source == "default":
+        return True
+    try:
+        parts = Path(raw).expanduser().resolve().parts
+    except Exception:
+        return False
+    if len(parts) < 3 or parts[1] != "Volumes":
+        return True  # not /Volumes/<share>/... — no mount to manage
+    mount_point = Path(parts[0], parts[1], parts[2])
+    if os.path.ismount(mount_point):
+        return True
+    if not _MOUNT_HELPER.exists():
+        return False
+    try:
+        subprocess.run(
+            ["/bin/bash", str(_MOUNT_HELPER)],
+            timeout=timeout, capture_output=True, check=False,
+        )
+    except Exception:
+        return False
+    return os.path.ismount(mount_point)
 
 
 def describe_archive_root(db_path: Optional[Path] = None) -> dict:

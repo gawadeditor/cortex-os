@@ -49,6 +49,7 @@ parameters or discovers them by joining to run_authorization_grants
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -62,11 +63,42 @@ __all__ = [
     "reconcile_all_committed_charges",
     "get_projected_total_for_episode",
     "get_reconciled_episode_total",
+    "resolve_episode_id",
+    "legacy_call_type_operation",
+    "get_deduped_episode_total",
+    "get_deduped_episode_breakdown",
 ]
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# An episode identifier: "ep_" followed by hex/slug segments, never a ":".
+_EPISODE_ID_RE = re.compile(r"^ep_[A-Za-z0-9_]+$")
+
+
+def resolve_episode_id(grant_episode_id: Optional[str], idempotency_key: Optional[str]) -> str:
+    """Attribution source of record for one committed charge.
+
+    Channel-operating grants (ADR-016) are signed once per channel per
+    operating period and carry episode_id='*' -- every episode in that
+    period draws on the one grant, so `run_authorization_grants.episode_id`
+    cannot attribute a charge to an episode. The real episode is still
+    recoverable: every protected-path idempotency_key is minted as
+    f"{episode_id}:{stage-or-scene}:..." by the agents that reach a paid
+    provider (hypogeum.muapi, hypogeum.agent, hypogeum.elevenlabs,
+    hypogeum.perplexity all follow this shape). Prefer that leading
+    segment; fall back to the grant's own episode_id when the grant is
+    already episode-scoped ('run' grants) or the key is not in the
+    expected shape (older opaque-hash keys).
+    """
+    if grant_episode_id and grant_episode_id != "*":
+        return grant_episode_id
+    head = (idempotency_key or "").split(":", 1)[0]
+    if _EPISODE_ID_RE.match(head):
+        return head
+    return grant_episode_id or ""
 
 
 def ensure_tables(conn: sqlite3.Connection) -> None:
@@ -215,11 +247,14 @@ def reconcile_all_committed_charges(
     projected = 0
     already_present = 0
     for row in rows:
-        provider_job_id = _lookup_provider_job_id(assets_root, row["episode_id"], row["idempotency_key"])
+        # Attribute to the real episode, not the channel-operating grant's
+        # episode_id='*' (see resolve_episode_id).
+        episode_id = resolve_episode_id(row["episode_id"], row["idempotency_key"])
+        provider_job_id = _lookup_provider_job_id(assets_root, episode_id, row["idempotency_key"])
         inserted = project_committed_charge(
             conn,
             reservation_id=row["reservation_id"], grant_id=row["grant_id"], grant_version=row["grant_version"],
-            episode_id=row["episode_id"], channel_id=row["channel_id"], provider=row["provider"],
+            episode_id=episode_id, channel_id=row["channel_id"], provider=row["provider"],
             model=row["model"], provider_operation=row["provider_operation"],
             authorization_id=row["authorization_id"], charged_amount=Decimal(row["charged_amount"]),
             currency=row["currency"], idempotency_key=row["idempotency_key"],
@@ -265,3 +300,142 @@ def get_reconciled_episode_total(conn: sqlite3.Connection, episode_id: str) -> D
     ).fetchone()
     legacy_total = Decimal(str(legacy_row["total"]))
     return legacy_total + get_projected_total_for_episode(conn, episode_id)
+
+
+# ===========================================================================
+# De-duplicated episode cost (2026-09-09)
+# ===========================================================================
+#
+# WHY THIS EXISTS
+# ---------------
+# get_reconciled_episode_total() assumes the legacy `costs` table and the
+# protected-execution ledger (run_authorization_grant_consumption) are
+# DISJOINT records -- legacy = pre-gate/run-registered spend, ledger =
+# grant-authorized spend. That assumption is FALSE for every grant-era
+# episode: hypogeum.finance.record_cost() is still called on the gate
+# path (hypogeum.muapi._submit_scene_via_gate() -> record_cost(
+# call_type="scene_generation"), hypogeum.agent, hypogeum.elevenlabs,
+# ...), so the SAME real charge lands in BOTH tables. Summing them
+# double-counts (~2x for a modern episode).
+#
+# The ledger is the authoritative, COMPLETE record of every gated paid
+# call. This layer treats it as such: it takes the full ledger total for
+# an episode, then adds ONLY the legacy `costs` rows whose canonical
+# provider operation has no committed ledger charge for that same episode
+# (a genuinely un-gated or pre-grant charge -- e.g. music generated via a
+# cache path, or an entire pre-ADR-016 run).
+#
+# This function reads the ledger + costs directly and writes nothing --
+# it needs no projection-table backfill. To ADOPT it as the dashboard /
+# rollup figure, swap get_reconciled_episode_total(...) for
+# get_deduped_episode_total(...) in hypogeum.finance.write_episode_rollup()
+# and any dashboard cost view. Until then it is inert.
+
+# legacy costs.call_type -> canonical (provider, provider_operation) from
+# hypogeum.provider_domains.PROVIDER_OPERATION_DOMAINS. Every openrouter
+# call_type is an agent name (hypogeum.agent.run_agent sets
+# call_type=agent_name) and resolves to text.completion; every perplexity
+# call_type resolves to research.query. Only muapi / elevenlabs need an
+# explicit per-call_type row.
+_LEGACY_CALL_TYPE_OPERATION: dict = {
+    ("elevenlabs", "narration"): ("elevenlabs", "voice.narration_segment"),
+    ("elevenlabs", "music"): ("elevenlabs", "music.track"),
+    ("muapi", "scene_generation"): ("muapi", "video.text_to_video"),
+    ("muapi", "reference_image_generation"): ("muapi", "image.reference"),
+    ("muapi", "thumbnail_generation"): ("muapi", "image.thumbnail"),
+    ("muapi", "video_upscale"): ("muapi", "upscale.video"),
+}
+
+
+def legacy_call_type_operation(provider: Optional[str], call_type: Optional[str]):
+    """Canonical (provider, provider_operation) a legacy `costs` row maps
+    to, or None when it maps to no known gated operation (then it is
+    always counted -- it cannot be a duplicate of something unrecognised).
+    """
+    if provider == "openrouter":
+        return ("openrouter", "text.completion")
+    if provider == "perplexity":
+        return ("perplexity", "research.query")
+    return _LEGACY_CALL_TYPE_OPERATION.get((provider or "", call_type or ""))
+
+
+def _ledger_ops_for_episode(conn: sqlite3.Connection, episode_id: str) -> dict:
+    """{(provider, provider_operation): Decimal(total)} for every COMMITTED
+    ledger charge attributed to `episode_id` (channel-operating grants
+    resolved via resolve_episode_id)."""
+    try:
+        rows = conn.execute(
+            """
+            SELECT c.provider, c.provider_operation, c.charged_amount,
+                   c.idempotency_key, g.episode_id AS grant_episode_id
+            FROM run_authorization_grant_consumption c
+            JOIN run_authorization_grants g
+              ON c.grant_id = g.grant_id AND c.grant_version = g.grant_version
+            WHERE c.state = 'committed'
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}  # ledger tables absent (bare test DB) -- nothing gated
+    ops: dict = {}
+    for row in rows:
+        if resolve_episode_id(row["grant_episode_id"], row["idempotency_key"]) != episode_id:
+            continue
+        key = (row["provider"], row["provider_operation"])
+        amt = Decimal(str(row["charged_amount"] or "0"))
+        ops[key] = ops.get(key, Decimal("0")) + amt
+    return ops
+
+
+def get_deduped_episode_breakdown(conn: sqlite3.Connection, episode_id: str) -> dict:
+    """True episode spend with the legacy/ledger double-count removed.
+
+    Returns:
+        {
+          "episode_id": str,
+          "total": Decimal,
+          "ledger_total": Decimal,          # all committed gated charges
+          "legacy_only_total": Decimal,     # legacy rows with no ledger op
+          "has_ledger_charges": bool,       # False => pure pre-grant episode
+          "legacy_only_by_call_type": {call_type: Decimal},
+        }
+    """
+    ledger_ops = _ledger_ops_for_episode(conn, episode_id)
+    ledger_total = sum(ledger_ops.values(), Decimal("0"))
+
+    legacy_rows = conn.execute(
+        "SELECT provider, call_type, COALESCE(cost_usd, 0) AS cost_usd "
+        "FROM costs WHERE episode_id = ?",
+        (episode_id,),
+    ).fetchall()
+
+    has_ledger = bool(ledger_ops)
+    legacy_only: dict = {}
+    for row in legacy_rows:
+        cost = Decimal(str(row["cost_usd"]))
+        if not has_ledger:
+            # Pure pre-grant episode: the ledger has nothing, so `costs`
+            # is the only record -- count all of it.
+            legacy_only[row["call_type"]] = legacy_only.get(row["call_type"], Decimal("0")) + cost
+            continue
+        op = legacy_call_type_operation(row["provider"], row["call_type"])
+        if op is not None and op in ledger_ops:
+            continue  # already counted in the ledger total
+        legacy_only[row["call_type"]] = legacy_only.get(row["call_type"], Decimal("0")) + cost
+
+    legacy_only_total = sum(legacy_only.values(), Decimal("0"))
+    return {
+        "episode_id": episode_id,
+        "total": ledger_total + legacy_only_total,
+        "ledger_total": ledger_total,
+        "legacy_only_total": legacy_only_total,
+        "has_ledger_charges": has_ledger,
+        "legacy_only_by_call_type": legacy_only,
+    }
+
+
+def get_deduped_episode_total(conn: sqlite3.Connection, episode_id: str) -> Decimal:
+    """True episode spend, legacy/ledger double-count removed. Exact
+    Decimal arithmetic. See get_deduped_episode_breakdown() for the parts
+    and the module comment above for why get_reconciled_episode_total()
+    over-counts for grant-era episodes."""
+    return get_deduped_episode_breakdown(conn, episode_id)["total"]

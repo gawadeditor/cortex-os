@@ -267,11 +267,19 @@ def write_episode_rollup(
         # Roll total_cost_usd into the runs table so the dashboard can display it.
         # Uses episode_id to aggregate across all runs (reruns share the same episode).
         # Includes protected-path (Authorization Authority / gate) charges via
-        # hypogeum.cost_projection's reconciled total -- costs alone only ever
+        # hypogeum.cost_projection's de-duplicated total -- costs alone only ever
         # reflects legacy, run-registered pipeline spend; a grant-derived
-        # execution has no run_id and is never written there directly.
+        # execution has no run_id and is never written there directly. The
+        # de-duplicated total (adopted 2026-09-10, was get_reconciled_episode_total)
+        # takes the authoritative grant ledger as the complete record and adds
+        # only legacy `costs` rows with no matching committed ledger charge --
+        # get_reconciled_episode_total() summed the legacy `costs` rows and the
+        # ledger charges that duplicate them (the gate path still calls
+        # record_cost), over-counting every grant-era episode (measured
+        # 2026-09-10: ~11% across 75 episodes, one genuinely double-booked
+        # episode at ~2x). See hypogeum.cost_projection module comment.
         try:
-            from hypogeum.cost_projection import get_reconciled_episode_total as _reconciled_total
+            from hypogeum.cost_projection import get_deduped_episode_total as _reconciled_total
             conn2 = get_connection(resolved_db)
             try:
                 episode_total = float(_reconciled_total(conn2, episode_id))

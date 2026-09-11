@@ -7,8 +7,11 @@ the vertical-cover feature (commit d21df8c) existed.
 Those posts carry no custom cover, so every platform shows an auto-picked
 video frame. This tool, per future-scheduled short-native episode:
 
-  1. resolves its single aggregated Zernio post id;
-  2. skips it if the post already has a mediaItems[].thumbnail;
+  1. resolves EVERY Zernio post staged for the episode (a long-form-era
+     episode has main + short_001/002/003 as separate posts — resolving
+     only one left the other three with no cover);
+  2. for each: skips it if already published (fix-for-the-future only) or
+     if it already has a mediaItems[].thumbnail;
   3. synthesises a minimal topic_brief / script_package from the episode's
      stored title + topic (the real episode assets are archived) and runs
      the real Thumbnail Strategy -> thumbnail_concept_brief;
@@ -76,22 +79,31 @@ def _scheduled_episodes(conn, channels: set, only_episode: str | None):
         yield r["episode_id"], r["channel_id"], r["next_slot"]
 
 
-def _resolve_post(conn, episode_id: str):
-    row = conn.execute(
+def _resolve_posts(conn, episode_id: str):
+    """EVERY distinct Zernio post staged for this episode, as
+    (post_id, [platforms], deliverable_id). An episode from the long-form
+    era has one post per deliverable (main + short_001/002/003); a
+    short-native episode has one aggregated main_episode post. Earlier this
+    resolved a single post (LIMIT 1), so a multi-post episode had 3 of its
+    4 posts silently skipped — the reason ep_af078f34's shorts published
+    with no cover."""
+    rows = conn.execute(
         """
         SELECT pr.provider_publication_id AS post_id,
-               GROUP_CONCAT(DISTINCT pa.platform) AS platforms
+               GROUP_CONCAT(DISTINCT pa.platform) AS platforms,
+               MIN(pa.deliverable_id) AS deliverable_id
         FROM publishing_attempts pa
         JOIN publishing_receipts pr ON pr.attempt_id = pa.attempt_id
         WHERE pa.episode_id = ? AND pr.provider_publication_id IS NOT NULL
         GROUP BY pr.provider_publication_id
-        ORDER BY pa.attempt_number DESC LIMIT 1
+        ORDER BY deliverable_id
         """,
         (episode_id,),
-    ).fetchone()
-    if not row:
-        return None, []
-    return row["post_id"], sorted((row["platforms"] or "").split(","))
+    ).fetchall()
+    return [
+        (r["post_id"], sorted((r["platforms"] or "").split(",")), r["deliverable_id"] or "main_episode")
+        for r in rows
+    ]
 
 
 def _episode_meta(conn, episode_id: str):
@@ -188,32 +200,52 @@ def run(execute: bool, only_episode: str | None) -> int:
     for episode_id, channel_id, next_slot in targets:
         conn = get_connection(None)
         try:
-            post_id, platforms = _resolve_post(conn, episode_id)
+            posts = _resolve_posts(conn, episode_id)
             title, topic = _episode_meta(conn, episode_id)
         finally:
             conn.close()
 
         tag = f"{episode_id} [{channel_id}] slot={next_slot}"
-        if not post_id:
+        if not posts:
             print(f"  SKIP  {tag} — no Zernio post id"); skipped += 1; continue
 
-        try:
-            existing = provider.get_post(post_id).get("post") or {}
-        except Exception as exc:  # noqa: BLE001
-            print(f"  FAIL  {tag} — get_post: {exc}"); failed += 1; continue
+        # Which of this episode's posts still need a cover: NOT already
+        # published (fix-for-the-future only — never touch a live post),
+        # carries a video mediaItem, and has no thumbnail yet.
+        needy = []  # (post_id, platforms, deliverable_id, video_url, existing)
+        for post_id, platforms, deliverable_id in posts:
+            ptag = f"{tag} {deliverable_id}"
+            try:
+                existing = provider.get_post(post_id).get("post") or {}
+            except Exception as exc:  # noqa: BLE001
+                print(f"  FAIL  {ptag} — get_post: {exc}"); failed += 1; continue
 
-        media_items = existing.get("mediaItems") or []
-        if media_items and media_items[0].get("thumbnail"):
-            print(f"  SKIP  {tag} — already has a cover"); skipped += 1; continue
-        if not media_items or not media_items[0].get("url"):
-            print(f"  SKIP  {tag} — post has no video mediaItem"); skipped += 1; continue
-        video_url = media_items[0]["url"]
+            plat_entries = existing.get("platforms") or []
+            published = (existing.get("status") or "").lower() == "published" or any(
+                (pe.get("status") or "").lower() == "published" for pe in plat_entries
+            )
+            media_items = existing.get("mediaItems") or []
+            has_cover = bool(media_items and media_items[0].get("thumbnail"))
+            has_video = bool(media_items and media_items[0].get("url"))
+
+            if published:
+                print(f"  SKIP  {ptag} — already published (leaving the live post alone)"); continue
+            if has_cover:
+                print(f"  SKIP  {ptag} — already has a cover"); continue
+            if not has_video:
+                print(f"  SKIP  {ptag} — post has no video mediaItem"); continue
+            needy.append((post_id, platforms, deliverable_id, media_items[0]["url"], existing))
+
+        if not needy:
+            skipped += 1; continue
 
         if not execute:
-            print(f"  PLAN  {tag} -> post {post_id}, platforms {platforms}, title {title[:40]!r}")
+            for post_id, platforms, deliverable_id, _v, _e in needy:
+                print(f"  PLAN  {tag} -> post {post_id} ({deliverable_id}), platforms {platforms}")
             done += 1
             continue
 
+        # One 9:16 cover per episode, reused across every needy post.
         with tempfile.TemporaryDirectory(prefix=f"vtcover_{episode_id}_") as td:
             work = Path(td)
             if not _synth_concept_brief(episode_id, channel_id, title, topic, work, config):
@@ -246,32 +278,35 @@ def run(execute: bool, only_episode: str | None) -> int:
             except Exception as exc:  # noqa: BLE001
                 print(f"  FAIL  {tag} — staging: {exc}"); failed += 1; continue
 
-            media_ref = MediaReference(
-                url=video_url, media_type="video", thumbnail_url=cover_url,
-                title=existing.get("title") or title,
-            )
-            plat_settings = {"tiktok": {"video_cover_image_url": cover_url}} if "tiktok" in platforms else None
-            plat_specific = {"instagram": {"instagramThumbnail": cover_url}} if "instagram" in platforms else None
-
-            try:
-                results = provider.repair_existing_post(
-                    post_id,
-                    channel_id=channel_id, deliverable_id="main_episode",
-                    episode_id=episode_id, deliverable_type="main_episode",
-                    platforms=platforms,
-                    media=[media_ref],
+            for post_id, platforms, deliverable_id, video_url, existing in needy:
+                ptag = f"{tag} {deliverable_id}"
+                dtype = "main_episode" if deliverable_id == "main_episode" else "short"
+                media_ref = MediaReference(
+                    url=video_url, media_type="video", thumbnail_url=cover_url,
                     title=existing.get("title") or title,
-                    content=existing.get("content") or existing.get("caption") or (topic or title),
-                    platform_settings=plat_settings,
-                    platform_specific_data=plat_specific,
-                    db_path=None,
                 )
-            except Exception as exc:  # noqa: BLE001
-                print(f"  FAIL  {tag} — repair_existing_post: {exc}"); failed += 1; continue
+                plat_settings = {"tiktok": {"video_cover_image_url": cover_url}} if "tiktok" in platforms else None
+                plat_specific = {"instagram": {"instagramThumbnail": cover_url}} if "instagram" in platforms else None
 
-            statuses = {p: r.get("status") for p, r in (results or {}).items()}
-            print(f"  DONE  {tag} — cover added; PUT result {statuses}")
-            done += 1
+                try:
+                    results = provider.repair_existing_post(
+                        post_id,
+                        channel_id=channel_id, deliverable_id=deliverable_id,
+                        episode_id=episode_id, deliverable_type=dtype,
+                        platforms=platforms,
+                        media=[media_ref],
+                        title=existing.get("title") or title,
+                        content=existing.get("content") or existing.get("caption") or (topic or title),
+                        platform_settings=plat_settings,
+                        platform_specific_data=plat_specific,
+                        db_path=None,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    print(f"  FAIL  {ptag} — repair_existing_post: {exc}"); failed += 1; continue
+
+                statuses = {p: r.get("status") for p, r in (results or {}).items()}
+                print(f"  DONE  {ptag} — cover added; PUT result {statuses}")
+                done += 1
 
     print(f"\n{done} done · {skipped} skipped · {failed} failed")
     return 0 if failed == 0 else 1

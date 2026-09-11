@@ -1604,6 +1604,17 @@ class ZernioProvider:
                 merged_psd = dict(entry.get("platformSpecificData") or {})
                 merged_psd.update(new_data)
                 entry["platformSpecificData"] = merged_psd
+            # A caller-supplied `scheduled_for` is a real reschedule, not a
+            # content fix -- carry it onto every retained platform entry too.
+            # Zernio honours `platforms[].scheduledFor` over the top-level
+            # `scheduledFor`, so echoing the stale per-platform value back
+            # (the byte-for-byte-preservation default) would silently keep
+            # the old schedule. Only fires when the caller explicitly passes
+            # scheduled_for; the content-fix path (scheduled_for=None) still
+            # preserves each entry's own scheduledFor verbatim.
+            if scheduled_for is not None:
+                entry = dict(entry)
+                entry["scheduledFor"] = scheduled_for
             existing_platform_entries.append(entry)
 
         merged_platform_entries = existing_platform_entries + [

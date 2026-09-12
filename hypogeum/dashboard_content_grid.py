@@ -28,9 +28,56 @@ log = get_logger(agent="dashboard_content_grid")
 
 _CACHE_TTL_SECONDS = 900  # 15 min — matches the dashboard's other soft-refresh windows
 
+# Manually-generated covers for posts Zernio itself has no thumbnail for and
+# will never accept one on (repair_existing_post is rejected outright on a
+# published post -- confirmed live 2026-09-11/12 on all 4 platforms, and
+# Zernio's own docs only document post-publish editing for Discord). YouTube
+# is the one platform where a human CAN still fix this -- from Studio's own
+# "Edit thumbnail" control, not any API -- so these files exist purely for
+# the operator to upload there by hand. Never auto-applied; this mapping
+# only feeds the Grid page's "cover ready — YouTube only" note. Keyed by
+# Zernio post_id; add an entry here (and drop the file in
+# .hypogeum-assets/manual_youtube_covers/) whenever a new one turns up.
+_MANUAL_COVER_FILES = {
+    "6a9939e7823e3a6833083c3b": "ep_0e01db91",       # twinkle — Pip the Owl
+    "6a9c2b94852558ef893023c2": "ep_19c9fc5f",       # hypogeum — Petra
+    "6a995063aff2c842d38e452e": "ep_663eb92d",       # hypogeum — Colosseum
+    "6a9567a0ed870051aa8dd08d": "ep_af078f34_short_001",  # hypogeum — Malta 70Hz short
+    "6a99cf118272dfe44ae8724e": "ep_afd7fb9f",       # hypogeum — Valley of the Kings tomb
+    "6a9c209e578347d2c4a8ddd1": "ep_bc175310",       # twinkle — Turtle & the Moon
+    "6a9980306fef4de8c0100d7f": "ep_d4109e56",       # twinkle — Milo's Bakery
+    "6a98797bb801aca05bac4450": "ep_f38dc597",       # twinkle — Mia & the Candy Kingdom
+    "6a9b60d19b0f9840ea5b4fb3": "ep_f9184c3e",       # twinkle — Benny Bunny
+}
+_MANUAL_COVER_DIR = "manual_youtube_covers"  # under .hypogeum-assets/, served by /manual-cover/<key>.jpg
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _is_landscape(url: str) -> Optional[bool]:
+    """A handful of posts predate the vertical-cover pivot and still carry a
+    16:9 `candidate_1.jpg`-style cover (e.g. ep_af078f34's main -- see
+    project_vertical_thumbnail_gap memory). Forced into the grid's normal
+    9:16 box with `object-fit:contain`, a 16:9 image renders as a thin,
+    heavily-letterboxed strip that (when the source image is itself mostly
+    dark, as this channel's covers are) reads as a blank card. One small GET
+    + PIL on first sight of a URL, cached alongside it -- never re-checked
+    once known. Returns None (unknown -> render as if portrait) on any
+    failure; never raises."""
+    try:
+        import requests
+        from io import BytesIO
+        from PIL import Image
+        resp = requests.get(url, timeout=8)
+        resp.raise_for_status()
+        im = Image.open(BytesIO(resp.content))
+        w, h = im.size
+        return w > h
+    except Exception as exc:  # noqa: BLE001
+        log.warn("content_grid_landscape_probe_failed", url=url, error=str(exc)[:160])
+        return None
 
 
 def _resolve_posts(conn, channel_id: str) -> list[dict]:
@@ -78,6 +125,7 @@ def _fetch_live(provider, post_id: str) -> dict:
 
     media_items = post.get("mediaItems") or []
     thumbnail_url = media_items[0].get("thumbnail") if media_items else None
+    is_landscape = _is_landscape(thumbnail_url) if thumbnail_url else None
     platforms = []
     for p in post.get("platforms") or []:
         platforms.append({
@@ -92,6 +140,7 @@ def _fetch_live(provider, post_id: str) -> dict:
         "scheduled_for": post.get("scheduledFor"),
         "published_at": next((p["published_at"] for p in platforms if p.get("published_at")), None),
         "thumbnail_url": thumbnail_url,
+        "thumb_is_landscape": (1 if is_landscape else (0 if is_landscape is False else None)),
         "platforms_json": json.dumps(platforms),
         "fetch_error": None,
     }
@@ -115,19 +164,21 @@ def _cache_put(conn, *, post_id, channel_id, episode_id, deliverable_id, live: d
         """
         INSERT INTO content_grid_cache
             (post_id, channel_id, episode_id, deliverable_id, title, status,
-             scheduled_for, published_at, thumbnail_url, platforms_json, fetch_error, cached_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             scheduled_for, published_at, thumbnail_url, thumb_is_landscape,
+             platforms_json, fetch_error, cached_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(post_id) DO UPDATE SET
             channel_id=excluded.channel_id, episode_id=excluded.episode_id,
             deliverable_id=excluded.deliverable_id, title=excluded.title,
             status=excluded.status, scheduled_for=excluded.scheduled_for,
             published_at=excluded.published_at, thumbnail_url=excluded.thumbnail_url,
+            thumb_is_landscape=excluded.thumb_is_landscape,
             platforms_json=excluded.platforms_json, fetch_error=excluded.fetch_error,
             cached_at=excluded.cached_at
         """,
         (post_id, channel_id, episode_id, deliverable_id,
          live.get("title"), live.get("status"), live.get("scheduled_for"),
-         live.get("published_at"), live.get("thumbnail_url"),
+         live.get("published_at"), live.get("thumbnail_url"), live.get("thumb_is_landscape"),
          live.get("platforms_json", "[]"), live.get("fetch_error"), _now_iso()),
     )
 
@@ -166,6 +217,8 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
                 pass
 
             display_title = row.get("title") or _local_episode_title(conn, p["episode_id"])
+            has_cover = bool(row.get("thumbnail_url"))
+            manual_key = _MANUAL_COVER_FILES.get(p["post_id"]) if not has_cover else None
             out.append({
                 "post_id": p["post_id"],
                 "episode_id": p["episode_id"],
@@ -175,7 +228,12 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
                 "scheduled_for": row.get("scheduled_for"),
                 "published_at": row.get("published_at"),
                 "thumbnail_url": row.get("thumbnail_url"),
-                "has_cover": bool(row.get("thumbnail_url")),
+                "is_landscape": bool(row.get("thumb_is_landscape")),
+                "has_cover": has_cover,
+                "manual_cover_url": (f"/manual-cover/{manual_key}.jpg" if manual_key else None),
+                "manual_cover_note": ("Cover ready — YouTube only (upload from Studio; "
+                                      "Zernio/TikTok/Instagram/Facebook reject a post-publish "
+                                      "cover change)") if manual_key else None,
                 "platforms": platforms,
                 "fetch_error": row.get("fetch_error"),
             })

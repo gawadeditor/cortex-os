@@ -2998,6 +2998,22 @@ def api_providers_compare_image(run_id: str, provider: str):
     return send_file(str(img_path), mimetype="image/jpeg")
 
 
+@app.route("/manual-cover/<key>.jpg")
+def manual_cover_image(key: str):
+    """Serve one of the manually-generated covers for a post Zernio will
+    never accept a post-publish thumbnail PUT for (see
+    hypogeum.dashboard_content_grid._MANUAL_COVER_FILES) — for the operator
+    to download and upload by hand from each platform's own app/Studio."""
+    import re
+    from flask import send_file, abort
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{1,80}", key):
+        abort(400)
+    img_path = _ROOT / ".hypogeum-assets" / "manual_youtube_covers" / f"{key}.jpg"
+    if not img_path.exists():
+        abort(404)
+    return send_file(str(img_path), mimetype="image/jpeg")
+
+
 @app.route("/command")
 def command_page():
     cmd = _safe_command()

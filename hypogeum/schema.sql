@@ -2480,6 +2480,10 @@ CREATE TABLE IF NOT EXISTS content_grid_cache (
     scheduled_for  TEXT,
     published_at   TEXT,
     thumbnail_url  TEXT,
+    thumb_is_landscape INTEGER,  -- 0/1/NULL(unknown) -- a handful of pre-vertical-pivot
+                                  -- posts (see docstring) still carry a 16:9 cover; the
+                                  -- grid renders those in a 16:9 box instead of forcing
+                                  -- them into the 9:16 one and letterboxing to near-invisible
     platforms_json TEXT NOT NULL DEFAULT '[]',
     fetch_error    TEXT,
     cached_at      TEXT NOT NULL

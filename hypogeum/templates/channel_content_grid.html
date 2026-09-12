@@ -11,8 +11,15 @@
     .cg-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
                overflow: hidden; display: flex; flex-direction: column; }
     .cg-card.no-cover { border-color: var(--warn); }
-    .cg-poster { aspect-ratio: 9/16; background: var(--bg); position: relative; overflow: hidden; }
-    .cg-poster img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .cg-card.has-manual-cover { border-color: var(--accent-line); }
+    .cg-poster { aspect-ratio: 9/16; background: var(--bg); position: relative; overflow: hidden;
+                 display: flex; align-items: center; }
+    .cg-poster img { width: 100%; height: 100%; object-fit: contain; display: block; }
+    .cg-poster.is-landscape { aspect-ratio: 16/9; }
+    .cg-poster.is-landscape img { object-fit: cover; }
+    .cg-format-badge { position: absolute; bottom: 8px; left: 8px; background: rgba(0,0,0,.55);
+                        color: var(--muted); font-size: 9.5px; font-weight: 600; letter-spacing: .04em;
+                        padding: 2px 6px; border-radius: 5px; }
     .cg-poster-empty { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
                         color: var(--faint); }
     .cg-poster-empty svg { width: 28px; height: 28px; }
@@ -21,6 +28,13 @@
                       text-transform: uppercase; padding: 3px 7px; border-radius: 999px; display: flex;
                       align-items: center; gap: 4px; }
     .cg-warn-badge svg { width: 11px; height: 11px; }
+    .cg-manual-badge { position: absolute; top: 8px; right: 8px; background: var(--accent-bg); color: var(--accent);
+                        border: 1px solid var(--accent-line); font-size: 10px; font-weight: 700; letter-spacing: .04em;
+                        text-transform: uppercase; padding: 3px 7px; border-radius: 999px; display: flex;
+                        align-items: center; gap: 4px; }
+    .cg-manual-badge svg { width: 11px; height: 11px; }
+    .cg-manual-note { font-size: 10.5px; color: var(--faint); line-height: 1.4; }
+    .cg-manual-note a { color: var(--accent); }
     .cg-body { padding: 12px 13px 13px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
     .cg-title { font-size: 12.5px; font-weight: 600; line-height: 1.4;
                 display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
@@ -79,14 +93,21 @@
 
   <div class="cg-grid">
     {% for it in items %}
-    <div class="cg-card {{ 'no-cover' if not it.has_cover }}">
-      <div class="cg-poster">
+    <div class="cg-card {{ 'has-manual-cover' if (not it.has_cover and it.manual_cover_url) else ('no-cover' if not it.has_cover) }}">
+      <div class="cg-poster {{ 'is-landscape' if it.is_landscape }}">
         {% if it.thumbnail_url %}
           <img src="{{ it.thumbnail_url }}" alt="" loading="lazy">
+        {% elif it.manual_cover_url %}
+          <img src="{{ it.manual_cover_url }}" alt="" loading="lazy">
         {% else %}
           <div class="cg-poster-empty">{{ icon('warning') }}</div>
         {% endif %}
-        {% if not it.has_cover %}
+        {% if it.is_landscape %}
+        <span class="cg-format-badge">16:9 original</span>
+        {% endif %}
+        {% if not it.has_cover and it.manual_cover_url %}
+        <span class="cg-manual-badge">{{ icon('download') }} YouTube only</span>
+        {% elif not it.has_cover %}
         <span class="cg-warn-badge">{{ icon('warning') }} No cover</span>
         {% endif %}
       </div>
@@ -94,6 +115,9 @@
         <div class="cg-title" title="{{ it.display_title }}">{{ it.display_title }}</div>
         {% set when = it.published_at or it.scheduled_for %}
         {% if when %}<div class="cg-when">{{ when[:16] | replace('T', ' ') }} UTC</div>{% endif %}
+        {% if it.manual_cover_note %}
+        <div class="cg-manual-note">{{ it.manual_cover_note }} — <a href="{{ it.manual_cover_url }}" download>download</a></div>
+        {% endif %}
         {% if it.status %}
         <span class="cg-status-pill {{ 'published' if it.status == 'published' else ('scheduled' if it.status == 'scheduled' else 'other') }}">{{ it.status }}</span>
         {% endif %}

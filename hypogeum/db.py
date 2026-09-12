@@ -226,6 +226,10 @@ _V4_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "run_queue": [
         ("cancel_requested", "INTEGER NOT NULL DEFAULT 0"),
     ],
+    # content_grid_cache: added after the table's first release (2026-09-12)
+    "content_grid_cache": [
+        ("thumb_is_landscape", "INTEGER"),
+    ],
 }
 
 _V2_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {

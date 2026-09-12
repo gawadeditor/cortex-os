@@ -191,14 +191,17 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
 
     Deliberately three short DB sessions around one un-connected stretch of
     slow network I/O, not one connection held open end to end: a stale post
-    here means a live GET to Zernio plus a GET+PIL probe of its image, tens
-    of seconds for a channel with dozens of posts. SQLite (WAL, 2s busy
-    timeout) serialises writers -- holding one open write transaction for
-    that whole stretch (the original shape of this function) starved any
-    other request touching the DB, surfacing to an operator as "database is
-    locked" on a live dashboard with real concurrent traffic. Read the
-    cache, close; do every network call with no connection open at all;
-    write results back in one quick final transaction, close."""
+    means a live GET to Zernio plus a GET+PIL probe of its image. Holding
+    one open write transaction across that whole stretch (the original
+    shape of this function) starved any other request touching the DB
+    (SQLite/WAL serialises writers), surfacing to an operator as "database
+    is locked" on a live dashboard with real concurrent traffic -- fixed by
+    reading the cache, closing; doing every network call with no connection
+    open at all; writing results back in one quick final transaction, close.
+    Stale posts are then fetched concurrently (a thread pool, not one at a
+    time) -- run sequentially a channel with dozens of posts took tens of
+    seconds, long enough that a normal page load could race a browser/
+    proxy timeout and look intermittently broken rather than just slow."""
     initialize_schema(db_path)
 
     conn = get_connection(db_path)
@@ -212,20 +215,38 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
     finally:
         conn.close()
 
-    provider = None
-    fresh_rows = {}  # post_id -> live dict, only for posts that needed a re-fetch
-    rows_for_display = {}
-    for p in posts:
-        cached = cached_by_post.get(p["post_id"])
-        if cached is None or cached.get("_stale"):
-            if provider is None:
-                from hypogeum.publishing.zernio import ZernioProvider
-                provider = ZernioProvider()
-            live = _fetch_live(provider, p["post_id"])
-            fresh_rows[p["post_id"]] = live
-            rows_for_display[p["post_id"]] = {**p, "channel_id": channel_id, **live}
-        else:
-            rows_for_display[p["post_id"]] = cached
+    to_fetch = [p for p in posts
+                if (cached_by_post.get(p["post_id"]) is None
+                    or cached_by_post[p["post_id"]].get("_stale"))]
+    rows_for_display = {
+        p["post_id"]: cached_by_post[p["post_id"]] for p in posts if p not in to_fetch
+    }
+
+    # Each stale post costs a live Zernio GET plus (when it has a cover) a
+    # second GET+PIL probe for orientation -- sequentially, tens of seconds
+    # for a channel with dozens of posts, long enough to look flaky (a slow
+    # page load racing a browser/proxy timeout looks identical to a broken
+    # one). Fetched concurrently instead: these are independent, read-only,
+    # network-bound calls (each opens its own short-lived DB connection
+    # only for the quick credential SELECT before the network call, per
+    # ZernioProvider.get_post -- safe under WAL from multiple threads).
+    fresh_rows = {}  # post_id -> live dict
+    if to_fetch:
+        from hypogeum.publishing.zernio import ZernioProvider
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        provider = ZernioProvider()
+        with ThreadPoolExecutor(max_workers=min(8, len(to_fetch))) as pool:
+            future_to_post = {
+                pool.submit(_fetch_live, provider, p["post_id"]): p for p in to_fetch
+            }
+            for future in as_completed(future_to_post):
+                p = future_to_post[future]
+                try:
+                    live = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    live = {"fetch_error": str(exc)[:200]}
+                fresh_rows[p["post_id"]] = live
+                rows_for_display[p["post_id"]] = {**p, "channel_id": channel_id, **live}
 
     if fresh_rows:
         conn = get_connection(db_path)

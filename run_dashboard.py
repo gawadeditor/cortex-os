@@ -7700,6 +7700,33 @@ def channel_publishing_page(channel_id):
                            flash=request.args.get("flash"))
 
 
+@app.route("/channel/<channel_id>/grid")
+def channel_content_grid_page(channel_id):
+    """Every post this channel has staged or published on Zernio — poster,
+    per-platform status, scheduled/published date. An in-dashboard view of
+    what would otherwise mean opening Zernio itself post by post."""
+    db = _db_path()
+    channel = get_channel_detail(channel_id, db_path=db)
+    if channel is None:
+        return render_template("not_found.html", kind="Channel", id=channel_id), 404
+
+    from hypogeum.dashboard_content_grid import get_content_grid
+    force_refresh = request.args.get("refresh") == "1"
+    items = []
+    load_error = None
+    try:
+        items = get_content_grid(channel_id, db_path=db, force_refresh=force_refresh)
+    except Exception as exc:  # noqa: BLE001
+        load_error = str(exc)
+
+    missing_cover_count = sum(1 for i in items if not i["has_cover"])
+
+    return render_template("channel_content_grid.html",
+                           channel=channel, channel_id=channel_id, items=items, load_error=load_error,
+                           missing_cover_count=missing_cover_count,
+                           refreshed=force_refresh)
+
+
 @app.route("/channel/<channel_id>/settings")
 def channel_settings_page(channel_id):
     """One place for this channel's brand / models / publishing / production

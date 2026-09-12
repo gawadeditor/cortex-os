@@ -31,6 +31,7 @@
     ('Analytics',  '/analytics?channel_id=' ~ cid ~ _sc,            ['/analytics', '/intelligence/performance', '/intelligence/platform']),
     ('Revenue',    '/intelligence/monetization?channel_id=' ~ cid ~ _sc, ['/intelligence/monetization']),
     ('Publishing', '/channel/' ~ cid ~ '/publishing' ~ _s,         ['/channel/' ~ cid ~ '/publishing']),
+    ('Grid',       '/channel/' ~ cid ~ '/grid' ~ _s,               ['/channel/' ~ cid ~ '/grid']),
     ('Settings',   '/channel/' ~ cid ~ '/settings' ~ _s,           ['/channel/' ~ cid ~ '/settings', '/channel/' ~ cid ~ '/edit', '/channel/' ~ cid ~ '/operations']),
   ] -%}
 {%- endif -%}

@@ -2458,3 +2458,30 @@ CREATE TABLE IF NOT EXISTS channel_publish_slots (
     PRIMARY KEY (channel_id, slot_utc)
 );
 CREATE INDEX IF NOT EXISTS idx_channel_publish_slots_ch ON channel_publish_slots(channel_id, slot_utc);
+
+-- ---------------------------------------------------------------------------
+-- content_grid_cache (2026-09-12)
+-- Local cache of the per-post view hypogeum.dashboard_content_grid renders
+-- on /channel/<id>/grid -- an in-dashboard "Zernio grid": poster, per-
+-- platform status/date, for every post a channel has staged or published.
+-- Zernio's own GET /posts/{id} is the source of truth; a live fetch on every
+-- page load for a channel with dozens of posts is slow and rate-limit-risky,
+-- so each post's last-fetched shape is cached here with a timestamp and
+-- refreshed only when stale (see get_content_grid()'s TTL) or on an explicit
+-- operator refresh. Rows are disposable -- safe to drop/rebuild any time.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS content_grid_cache (
+    post_id        TEXT NOT NULL PRIMARY KEY,
+    channel_id     TEXT NOT NULL,
+    episode_id     TEXT NOT NULL,
+    deliverable_id TEXT NOT NULL,
+    title          TEXT,
+    status         TEXT,
+    scheduled_for  TEXT,
+    published_at   TEXT,
+    thumbnail_url  TEXT,
+    platforms_json TEXT NOT NULL DEFAULT '[]',
+    fetch_error    TEXT,
+    cached_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_content_grid_cache_ch ON content_grid_cache(channel_id, scheduled_for);

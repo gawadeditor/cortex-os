@@ -187,29 +187,63 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
     """Every post this channel has on Zernio, newest scheduled/published
     first. Each item: {post_id, episode_id, deliverable_id, display_title,
     status, scheduled_for, published_at, thumbnail_url, has_cover,
-    platforms: [...], stale, fetch_error}."""
+    platforms: [...], stale, fetch_error}.
+
+    Deliberately three short DB sessions around one un-connected stretch of
+    slow network I/O, not one connection held open end to end: a stale post
+    here means a live GET to Zernio plus a GET+PIL probe of its image, tens
+    of seconds for a channel with dozens of posts. SQLite (WAL, 2s busy
+    timeout) serialises writers -- holding one open write transaction for
+    that whole stretch (the original shape of this function) starved any
+    other request touching the DB, surfacing to an operator as "database is
+    locked" on a live dashboard with real concurrent traffic. Read the
+    cache, close; do every network call with no connection open at all;
+    write results back in one quick final transaction, close."""
     initialize_schema(db_path)
+
     conn = get_connection(db_path)
     try:
         posts = _resolve_posts(conn, channel_id)
         if not posts:
             return []
+        cached_by_post = {} if force_refresh else {
+            p["post_id"]: _cache_get(conn, p["post_id"]) for p in posts
+        }
+    finally:
+        conn.close()
 
-        provider = None
+    provider = None
+    fresh_rows = {}  # post_id -> live dict, only for posts that needed a re-fetch
+    rows_for_display = {}
+    for p in posts:
+        cached = cached_by_post.get(p["post_id"])
+        if cached is None or cached.get("_stale"):
+            if provider is None:
+                from hypogeum.publishing.zernio import ZernioProvider
+                provider = ZernioProvider()
+            live = _fetch_live(provider, p["post_id"])
+            fresh_rows[p["post_id"]] = live
+            rows_for_display[p["post_id"]] = {**p, "channel_id": channel_id, **live}
+        else:
+            rows_for_display[p["post_id"]] = cached
+
+    if fresh_rows:
+        conn = get_connection(db_path)
+        try:
+            for p in posts:
+                if p["post_id"] in fresh_rows:
+                    _cache_put(conn, channel_id=channel_id, episode_id=p["episode_id"],
+                               deliverable_id=p["deliverable_id"], post_id=p["post_id"],
+                               live=fresh_rows[p["post_id"]])
+            conn.commit()
+        finally:
+            conn.close()
+
+    conn = get_connection(db_path)
+    try:
         out = []
         for p in posts:
-            cached = None if force_refresh else _cache_get(conn, p["post_id"])
-            if cached is None or cached.get("_stale"):
-                if provider is None:
-                    from hypogeum.publishing.zernio import ZernioProvider
-                    provider = ZernioProvider()
-                live = _fetch_live(provider, p["post_id"])
-                _cache_put(conn, channel_id=channel_id, episode_id=p["episode_id"],
-                           deliverable_id=p["deliverable_id"], post_id=p["post_id"], live=live)
-                row = {**p, "channel_id": channel_id, **live}
-            else:
-                row = cached
-
+            row = rows_for_display[p["post_id"]]
             platforms = []
             try:
                 platforms = json.loads(row.get("platforms_json") or "[]")
@@ -237,7 +271,6 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
                 "platforms": platforms,
                 "fetch_error": row.get("fetch_error"),
             })
-        conn.commit()
     finally:
         conn.close()
 

@@ -7733,6 +7733,7 @@ def channel_content_grid_page(channel_id):
     try:
         items = get_content_grid(channel_id, db_path=db, force_refresh=force_refresh)
     except Exception as exc:  # noqa: BLE001
+        app.logger.warning("content grid load error (channel=%s): %s", channel_id, exc, exc_info=True)
         load_error = str(exc)
 
     missing_cover_count = sum(1 for i in items if not i["has_cover"])

@@ -63,7 +63,7 @@
      eyebrow='Revenue' ~ (' · this channel' if d.channel_scoped else ''),
      title='Getting the channels paid',
      lede='None of these channels earn money yet. Every platform only starts paying a creator once the channel clears a follower count and a recent-activity bar. This page measures exactly how far each channel is from each of those bars.',
-     figure=(d.eligible_pairs ~ ' / ' ~ _pairs) if _pairs else ('0 / ' ~ _pairs) if _pairs else '—',
+     figure=(d.eligible_pairs ~ ' / ' ~ _pairs) if _pairs else '—',
      figure_label='channel + platform combinations earning',
      pill=('No platform paying yet' if not d.eligible_pairs else (d.eligible_pairs ~ ' earning')),
      pill_class='is-warn' if not d.eligible_pairs else 'is-good') %}

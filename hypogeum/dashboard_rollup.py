@@ -3,13 +3,19 @@ hypogeum/dashboard_rollup.py — aggregated KPIs for the Factory Overview and
 each Channel Overview.
 
 The Factory Overview answers "how is the whole operation doing?": total
-views, watch time, engagement, episodes published, spend. The Channel
+views, watch time, engagement, episodes live, spend. The Channel
 Overview answers the same, scoped to one channel.
 
 Everything is derived from the local DB — `platform_analytics` (real
-`source='api'` rows only, never mock), `costs`, `publication_intents`,
+`source='api'` rows only, never mock), `costs`, `content_grid_cache`,
 `runs`. A metric with no data comes back as `None`, and the template shows
 an em-dash rather than a fake zero.
+
+`episodes_published` means confirmed LIVE on at least one platform (see
+`_live_count`), not merely "Zernio accepted the submission" -- that
+signal includes posts still scheduled for the future, which made this
+number disagree with the Analytics page's own episode count until the
+2026-09-15 fix.
 
 Public API:
     get_factory_rollup(db_path=None) -> dict
@@ -139,16 +145,59 @@ def _spend(episode_ids: Optional[set], all_map: dict, d30_map: dict
         return None, None
 
 
-def _published_count(conn, channel_id: Optional[str], ep_chan: dict) -> int:
+def _live_count(conn, channel_id: Optional[str], ep_chan: dict) -> int:
+    """Episodes confirmed LIVE on at least one platform -- the one episode
+    count meant to read the same everywhere in the dashboard (this card,
+    the exec dashboard, and close to -- though not always identical to,
+    given real-world sync lag -- the Analytics page's own "episodes with
+    data", which is a subset of this). A `publication_intents`/
+    `publishing_attempts` row of 'succeeded' only means Zernio ACCEPTED
+    the submission, which is true the moment a post is merely scheduled;
+    it is not proof of being live, which is why that signal is not used
+    here (see project memory on the 2026-09-15 "submitted vs live"
+    dashboard-wording fix).
+
+    Two signals, unioned:
+      - content_grid_cache.status == 'published' -- Zernio's own live
+        status, refreshed whenever the Grid page is opened.
+      - a platform_analytics source='api' row -- real performance data
+        is only possible for something that actually went out, so its
+        mere presence proves liveness even before the Grid page has ever
+        cached this channel's posts.
+    Never raises."""
+    live: set[str] = set()
     try:
-        rows = conn.execute(
-            "SELECT DISTINCT episode_id FROM publication_intents WHERE status='succeeded'"
-        ).fetchall()
+        if channel_id is None:
+            rows = conn.execute(
+                "SELECT DISTINCT episode_id FROM content_grid_cache WHERE status = 'published'"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT DISTINCT episode_id FROM content_grid_cache "
+                "WHERE channel_id = ? AND status = 'published'",
+                (channel_id,),
+            ).fetchall()
+        live.update(r["episode_id"] for r in rows if r["episode_id"])
     except Exception:  # noqa: BLE001
-        return 0
-    if channel_id is None:
-        return len(rows)
-    return sum(1 for r in rows if ep_chan.get(r["episode_id"]) == channel_id)
+        pass
+    try:
+        for r in conn.execute(
+            "SELECT DISTINCT episode_id FROM platform_analytics WHERE source = 'api'"
+        ):
+            eid = r["episode_id"]
+            # platform_analytics.episode_id is sometimes raw title/caption
+            # text for a row whose late_post_id matched no receipt (see
+            # dashboard_analytics._analytics_key_channel_map's docstring) --
+            # skip anything that isn't a real, resolved episode, or the
+            # factory-wide total stops being the sum of the per-channel
+            # ones (the invariant tests/test_dashboard_rollup.py checks).
+            if not eid or eid not in ep_chan:
+                continue
+            if channel_id is None or ep_chan[eid] == channel_id:
+                live.add(eid)
+    except Exception:  # noqa: BLE001
+        pass
+    return len(live)
 
 
 def _active_runs(conn, channel_id: Optional[str]) -> int:
@@ -224,7 +273,7 @@ def get_channel_rollup(channel_id: str, db_path: Optional[Path] = None) -> dict:
         out.update({k: a[k] for k in ("views", "watch_time_s", "engagements", "platforms")})
         all_map, d30_map = _billed_maps(_db(db_path))
         out["spend_all_usd"], out["spend_30d_usd"] = _spend(my_eps, all_map, d30_map)
-        out["episodes_published"] = _published_count(conn, channel_id, ep_chan)
+        out["episodes_published"] = _live_count(conn, channel_id, ep_chan)
         out["active_runs"] = _active_runs(conn, channel_id)
     finally:
         conn.close()
@@ -241,7 +290,7 @@ def get_factory_rollup(db_path: Optional[Path] = None) -> dict:
         out.update({k: a[k] for k in ("views", "watch_time_s", "engagements", "platforms")})
         all_map, d30_map = _billed_maps(_db(db_path))
         out["spend_all_usd"], out["spend_30d_usd"] = _spend(None, all_map, d30_map)
-        out["episodes_published"] = _published_count(conn, None, ep_chan)
+        out["episodes_published"] = _live_count(conn, None, ep_chan)
         out["active_runs"] = _active_runs(conn, None)
         out["pending_approvals"] = _pending_approvals(conn)
 
@@ -259,7 +308,7 @@ def get_factory_rollup(db_path: Optional[Path] = None) -> dict:
             out["by_channel"].append({
                 "channel_id": cid, "name": getattr(cp, "name", cid) or cid,
                 "views": ca["views"], "watch_time_s": ca["watch_time_s"],
-                "episodes_published": _published_count(conn, cid, ep_chan),
+                "episodes_published": _live_count(conn, cid, ep_chan),
                 "spend_all_usd": csp_all, "spend_30d_usd": csp_30,
                 "active_runs": _active_runs(conn, cid),
                 "views_series": _channel_view_series(conn, my_eps),

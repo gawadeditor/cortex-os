@@ -486,16 +486,21 @@ def _load_failed_run_id(conn) -> Optional[str]:
 
 
 def _load_failed_run_count(conn) -> int:
-    """Failed runs in the last 48h that still need an operator: no later
-    success for the episode, episode not superseded, topic not abandoned.
-    Matches the /failures page — a raw 'failed' count is mostly archaeology
-    (orphans, superseded, recovered)."""
+    """Failed runs that still need an operator: no later success for the
+    episode, episode not superseded, topic not abandoned. Matches
+    `dashboard_live.get_recent_failures` (the /failures page) exactly, so
+    the Control room's "All clear" card can never say all-clear while
+    /failures — linked directly from that same card — shows something.
+    No time window: an unresolved failure from 3 days ago is not "all
+    clear" just because it's aged out of a 48h cutoff (that cutoff used
+    to exist here only, and only, letting the two disagree — fixed
+    2026-09-15). A raw 'failed' count is mostly archaeology (orphans,
+    superseded, recovered), which both queries already exclude."""
     try:
         row = conn.execute(
             """
             SELECT COUNT(*) AS cnt FROM runs r
             WHERE r.status = 'failed'
-              AND r.started_at >= datetime('now', '-48 hours')
               AND EXISTS (SELECT 1 FROM episodes e WHERE e.episode_id = r.episode_id
                           AND COALESCE(e.status,'') != 'superseded')
               AND NOT EXISTS (SELECT 1 FROM runs r2 WHERE r2.episode_id = r.episode_id

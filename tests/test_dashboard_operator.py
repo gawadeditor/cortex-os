@@ -107,6 +107,32 @@ class TestDashboardHome:
         fh = overview.get("factory_health", {})
         assert fh.get("failed_count", 0) >= 1
 
+    def test_failed_runs_count_has_no_time_window(self, tmp_path):
+        """An actionable failure older than 48h must still count — the
+        Control room's "All clear" card and /failures (get_recent_failures,
+        which has no time window) must never disagree just because a
+        failure is old but still genuinely unresolved."""
+        from hypogeum.dashboard_executive import get_executive_overview
+        from hypogeum.db import get_connection, initialize_schema
+        db = tmp_path / "test.db"
+        initialize_schema(db)
+        conn = get_connection(db)
+        conn.execute(
+            "INSERT INTO runs (run_id, episode_id, status, started_at) VALUES "
+            "(?,?,?,datetime('now', '-5 days'))",
+            ["run_fail_old", "ep_old_fail", "failed"],
+        )
+        conn.execute(
+            "INSERT INTO episodes (episode_id, status, created_at) VALUES (?,?,datetime('now'))",
+            ["ep_old_fail", "failed"],
+        )
+        conn.commit()
+        conn.close()
+
+        overview = get_executive_overview(db_path=db)
+        fh = overview.get("factory_health", {})
+        assert fh.get("failed_count", 0) >= 1
+
     def test_factory_health_degraded_when_failures(self, tmp_path):
         from hypogeum.dashboard_executive import get_executive_overview
         from hypogeum.db import get_connection, initialize_schema

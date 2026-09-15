@@ -293,7 +293,8 @@
   </div>
   <div class="t1-card">
     <div class="t1-val" data-countup="{{ rollup.episodes_published }}">{{ rollup.episodes_published }}</div>
-    <div class="t1-lbl">Episodes published</div>
+    <div class="t1-lbl">Episodes submitted</div>
+    <div class="t1-sub">accepted for publishing — includes ones still scheduled, not live yet</div>
   </div>
   <div class="t1-card">
     <div class="t1-val">{% if rollup.spend_30d_usd is not none %}${{ big(rollup.spend_30d_usd) }}{% else %}—{% endif %}</div>
@@ -321,7 +322,7 @@
     <div class="ch-metric-primary">
       <div>
         <div class="ch-metric-num">{{ big(ch.views) }}</div>
-        <div class="ch-metric-cap">views · {{ ch.episodes_published }} published</div>
+        <div class="ch-metric-cap">views · {{ ch.episodes_published }} submitted</div>
       </div>
       {% if ch.views_series and ch.views_series | length >= 2 %}
       <div class="ch-metric-spark">{{ sparkline(ch.views_series, width=120, height=34) }}</div>

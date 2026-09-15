@@ -51,12 +51,25 @@ def db_path(tmp_path):
 
 @pytest.fixture()
 def seeded(db_path):
-    """Seed mock analytics for two episodes across two platforms, extract insights."""
-    for ep in ("ep_alpha", "ep_beta"):
-        for p in ("youtube", "tiktok"):
-            seed_mock_analytics(ep, p, db_path=db_path)
-        extract_insights(ep, db_path=db_path)
-        generate_actions(ep, db_path=db_path)
+    """Seed analytics for two episodes across two platforms, extract insights.
+
+    Uses seed_mock_analytics() purely for its deterministic synthetic
+    values, then relabels the rows source='api' — these tests exercise
+    the real-data display path (get_analytics_overview et al.), which
+    correctly excludes source='mock' rows (never shown as a real KPI);
+    testing the actual mock-seeding *feature* is TestFlaskSeedMockRoute's
+    job, not this fixture's."""
+    conn = get_connection(db_path)
+    try:
+        for ep in ("ep_alpha", "ep_beta"):
+            for p in ("youtube", "tiktok"):
+                seed_mock_analytics(ep, p, db_path=db_path)
+            extract_insights(ep, db_path=db_path)
+            generate_actions(ep, db_path=db_path)
+        conn.execute("UPDATE platform_analytics SET source='api' WHERE source='mock'")
+        conn.commit()
+    finally:
+        conn.close()
     return db_path
 
 

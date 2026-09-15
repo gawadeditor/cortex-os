@@ -80,6 +80,15 @@ def get_analytics_overview(db_path: Optional[Path] = None,
     performance table, action / insight counts. Factory-wide by default;
     scoped to one channel when ``channel_id`` is given (rows whose key
     cannot be attributed to a channel are then excluded). Non-blocking.
+
+    Both scopes go through `_overview_from_analytics` -- the factory-wide
+    path used to read two SQL views (`v_platform_kpis`/
+    `v_episode_performance`, schema.sql) that summed EVERY daily snapshot
+    per episode+platform instead of the latest one alone, and never
+    filtered to `source='api'` -- overcounting real views up to ~7x on
+    live data and letting mock-seeded rows count as real KPIs (a direct
+    violation of this project's own "mock is never a real KPI" rule,
+    enforced correctly everywhere else in this module). Fixed 2026-09-15.
     """
     try:
         from hypogeum.db import get_connection
@@ -88,60 +97,9 @@ def get_analytics_overview(db_path: Optional[Path] = None,
 
         conn = get_connection(db)
         try:
-            if channel_id:
-                return _channel_scoped_overview(conn, channel_id)
-            # Platform breakdown from view
-            try:
-                plat_rows = conn.execute("SELECT * FROM v_platform_kpis").fetchall()
-            except Exception:
-                plat_rows = []
-
-            # Episode performance from view
-            try:
-                ep_rows = conn.execute(
-                    "SELECT * FROM v_episode_performance ORDER BY episode_created_at DESC LIMIT 60"
-                ).fetchall()
-            except Exception:
-                ep_rows = []
-            # Drop rows whose "episode_id" is really a platform post title /
-            # caption that was synced but never linked to an episode Cortex
-            # made — they render as fake episodes. Their views still count in
-            # the platform totals.
-            _real_ep = _re.compile(r"^(ep[_-][a-z0-9]|[0-9a-f]{8}-[0-9a-f]{4})", _re.I)
-            ep_rows = [r for r in ep_rows
-                       if _real_ep.match(str(dict(r).get("episode_id") or ""))
-                       or dict(r).get("episode_title")][:30]
-
-            recent = conn.execute(
-                "SELECT episode_id, platform, snapshot_date, views, ctr, avg_view_pct, "
-                "avg_watch_time_s, imported_at, source "
-                "FROM platform_analytics "
-                "ORDER BY imported_at DESC LIMIT 10"
-            ).fetchall()
-
-            pending_count = conn.execute(
-                "SELECT COUNT(*) AS n FROM learning_actions WHERE status='pending'"
-            ).fetchone()["n"]
-
-            total_insights = conn.execute(
-                "SELECT COUNT(*) AS n FROM analytics_insights"
-            ).fetchone()["n"]
-
+            return _overview_from_analytics(conn, channel_id)
         finally:
             conn.close()
-
-        platform_breakdown = {}
-        for r in plat_rows:
-            d = dict(r)
-            platform_breakdown[d["platform"]] = d
-
-        return {
-            "platform_breakdown":    platform_breakdown,
-            "recent_snapshots":      [dict(r) for r in recent],
-            "episodes":              [dict(r) for r in ep_rows],
-            "pending_action_count":  pending_count,
-            "total_insights":        total_insights,
-        }
     except Exception:
         return {
             "platform_breakdown":   {},
@@ -152,16 +110,18 @@ def get_analytics_overview(db_path: Optional[Path] = None,
         }
 
 
-def _channel_scoped_overview(conn, channel_id: str) -> dict:
-    """Analytics overview computed straight from platform_analytics (real API
-    rows only) for the keys that resolve to ``channel_id``."""
-    kmap = _analytics_key_channel_map(conn)
-    mine = {k for k, c in kmap.items() if c == channel_id}
-
+def _overview_from_analytics(conn, channel_id: Optional[str] = None) -> dict:
+    """Analytics overview computed straight from platform_analytics (real
+    `source='api'` rows only, deduplicated to the latest snapshot per
+    (episode, platform) -- the same aggregation `get_platform_summary()`
+    already does). Factory-wide (`channel_id=None`) includes every real
+    row, including a legacy title-keyed one the resolver can't place to a
+    channel -- its views still count toward the real platform totals even
+    though it can't be listed as a named episode. Scoped to one channel
+    otherwise (rows whose key doesn't resolve to it are excluded)."""
     empty = {"platform_breakdown": {}, "recent_snapshots": [], "episodes": [],
-             "pending_action_count": 0, "total_insights": 0, "channel_scoped": True}
-    if not mine:
-        return empty
+             "pending_action_count": 0, "total_insights": 0,
+             "channel_scoped": channel_id is not None}
 
     rows = []
     try:
@@ -172,9 +132,15 @@ def _channel_scoped_overview(conn, channel_id: str) -> dict:
             "ORDER BY snapshot_date DESC")]
     except Exception:  # noqa: BLE001
         return empty
-    rows = [r for r in rows if r["episode_id"] in mine]
-    if not rows:
-        return empty
+
+    if channel_id is not None:
+        kmap = _analytics_key_channel_map(conn)
+        mine = {k for k, c in kmap.items() if c == channel_id}
+        if not mine:
+            return empty
+        rows = [r for r in rows if r["episode_id"] in mine]
+        if not rows:
+            return empty
 
     # latest snapshot per (key, platform)
     latest: dict = {}
@@ -183,9 +149,10 @@ def _channel_scoped_overview(conn, channel_id: str) -> dict:
 
     titles = _episode_title_map(conn, {k for k, _ in latest})
 
-    # Key names mirror v_platform_kpis / v_episode_performance exactly — the
-    # analytics.html template reads `episodes_tracked` / `avg_view_pct` /
-    # `platforms_tracked`, and the factory-wide path already returns those.
+    # Key names mirror what the old v_platform_kpis / v_episode_performance
+    # views used to return -- analytics.html reads `episodes_tracked` /
+    # `avg_view_pct` / `platforms_tracked` / `total_views` / `avg_ctr` /
+    # `insight_count`, none of which this drops.
     platform_breakdown: dict = {}
     episodes: dict = {}
     for (key, plat), r in latest.items():
@@ -215,20 +182,35 @@ def _channel_scoped_overview(conn, channel_id: str) -> dict:
         pb.pop("_ctrs", None)
         pb.pop("_rets", None)
 
-    # Same guard as the factory-wide path: don't list platform captions /
-    # post-ids that were synced but never linked to an episode.
+    # Don't list platform captions / post-ids that were synced but never
+    # linked to an episode Cortex made — they'd render as fake episodes.
+    # Their views still counted in the platform totals above.
     _real_ep = _re.compile(r"^(ep[_-][a-z0-9]|[0-9a-f]{8}-[0-9a-f]{4})", _re.I)
     _eps = [e for e in episodes.values()
             if _real_ep.match(str(e.get("episode_id") or ""))
             or titles.get(e.get("episode_id"))]
+    _eps = sorted(_eps, key=lambda e: -(e["total_views"] or 0))
+    if channel_id is None:
+        _eps = _eps[:30]  # matches the old view-backed path's cap
+
+    pending_count = total_insights = 0
+    try:
+        pending_count = conn.execute(
+            "SELECT COUNT(*) AS n FROM learning_actions WHERE status='pending'"
+        ).fetchone()["n"]
+        total_insights = conn.execute(
+            "SELECT COUNT(*) AS n FROM analytics_insights"
+        ).fetchone()["n"]
+    except Exception:  # noqa: BLE001
+        pass
 
     return {
         "platform_breakdown":   platform_breakdown,
         "recent_snapshots":     rows[:10],
-        "episodes":             sorted(_eps, key=lambda e: -(e["total_views"] or 0)),
-        "pending_action_count": 0,
-        "total_insights":       0,
-        "channel_scoped":       True,
+        "episodes":             _eps,
+        "pending_action_count": pending_count if channel_id is None else 0,
+        "total_insights":       total_insights if channel_id is None else 0,
+        "channel_scoped":       channel_id is not None,
     }
 
 
@@ -326,7 +308,6 @@ def get_episode_performance(
 
         insights = list_insights(episode_id=episode_id, db_path=db_path)
         actions  = list_actions(db_path=db_path)
-        ep_actions = [a for a in actions if a.get("source_episode") == episode_id]
 
         # Get episode metadata and production cost
         from hypogeum.db import get_connection
@@ -347,6 +328,15 @@ def get_episode_performance(
 
         episode_meta = dict(ep_row) if ep_row else {}
         production_cost = round(cost_row["total"] or 0.0, 6) if cost_row else 0.0
+
+        # A learning_action's source_episode is sometimes the episode's
+        # legacy title text, not its real id (see episode_channel_resolver.py's
+        # docstring) -- match either so an action on a title-keyed row isn't
+        # silently invisible on this episode's own performance page.
+        _keys = {episode_id}
+        if episode_meta.get("title"):
+            _keys.add(episode_meta["title"])
+        ep_actions = [a for a in actions if a.get("source_episode") in _keys]
 
         # Group insights by dimension
         insights_by_dim: dict[str, list] = {}
@@ -370,16 +360,48 @@ def get_episode_performance(
 # Learning state (delegates to learning_engine)
 # ===========================================================================
 
-def get_learning_state(db_path: Optional[Path] = None) -> dict:
+def get_learning_state(db_path: Optional[Path] = None, *,
+                       channel_id: Optional[str] = None) -> dict:
     """
     Full learning dashboard state: factory summary, pending actions,
-    applied actions, recommendations by dimension.
+    applied actions, recommendations by dimension. The factory summary
+    (`get_factory_learning_state`'s counts/platform-coverage/dimension
+    breakdown) stays factory-wide either way -- it's an operational health
+    snapshot, not a per-channel actionable list. `pending_actions_list` /
+    `applied_actions_list` / `recommendations` ARE filtered to
+    `channel_id` when given (every other Intelligence page already
+    accepts and applies channel scope; this one silently didn't, even
+    though get_recommendations already supported it -- fixed 2026-09-15).
     """
     try:
+        from hypogeum.learning_engine import _action_channel
         state   = get_factory_learning_state(db_path=db_path)
         pending = list_actions(status="pending",   db_path=db_path)
         applied = list_actions(status="applied",   db_path=db_path)
-        recs    = get_recommendations(db_path=db_path)
+
+        episode_map = None
+        if channel_id is not None:
+            from hypogeum.db import get_connection
+            from hypogeum.dashboard_live import _db as _resolve_db
+            from hypogeum.episode_channel_resolver import build_episode_channel_map
+            extra_keys = set()
+            for a in (pending + applied):
+                ep = a.get("source_episode") or (a.get("evidence") or {}).get("source_episode")
+                if isinstance(ep, list):
+                    extra_keys.update(e for e in ep if e)
+                elif ep:
+                    extra_keys.add(ep)
+            conn = get_connection(_resolve_db(db_path))
+            try:
+                episode_map = build_episode_channel_map(conn, extra_keys=extra_keys)
+            finally:
+                conn.close()
+            pending = [a for a in pending
+                       if _action_channel(a, episode_map=episode_map) == channel_id]
+            applied = [a for a in applied
+                       if _action_channel(a, episode_map=episode_map) == channel_id]
+
+        recs = get_recommendations(db_path=db_path, channel_id=channel_id)
 
         # Read existing pipeline-internal learning_records too
         try:

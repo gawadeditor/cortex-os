@@ -8350,7 +8350,8 @@ def intelligence_episode_page(episode_id):
 
 @app.route("/intelligence/learning")
 def intelligence_learning_page():
-    state = get_learning_state(db_path=_db_path())
+    ch = request.args.get("channel_id") or _scope_channel()
+    state = get_learning_state(db_path=_db_path(), channel_id=ch or None)
     # "What Cortex changed and why" — applied learning directives per channel.
     changelog = []
     try:

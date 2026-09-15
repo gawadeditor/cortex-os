@@ -885,9 +885,19 @@ def dismiss_action(
     return _ok(action_id=action_id, status="dismissed")
 
 
-def _action_channel(action: dict, db_path: Optional[Path]) -> Optional[str]:
+def _action_channel(action: dict, db_path: Optional[Path] = None, *,
+                     episode_map: Optional[dict] = None) -> Optional[str]:
     """Best-effort channel attribution for a learning_action: explicit in
-    the evidence (content_volume), else via the source episode's channel."""
+    the evidence (content_volume), else via the source episode's channel,
+    resolved by the shared episode_channel_resolver (id match, then title/
+    fuzzy/platform-owner fallbacks for the legacy rows keyed by raw title
+    text -- this used to be a narrower, exact-title-only copy of that same
+    heuristic, so it could disagree with the Analytics page about which
+    channel a row belonged to).
+
+    Pass a pre-built `episode_map` (from `build_episode_channel_map`) when
+    calling this in a loop -- see `get_recommendations`, which used to
+    open a fresh connection and re-resolve from scratch for every action."""
     ev = action.get("evidence") or {}
     if ev.get("channel_id"):
         return ev["channel_id"]
@@ -896,33 +906,16 @@ def _action_channel(action: dict, db_path: Optional[Path]) -> Optional[str]:
         ep = ep[0] if ep else None
     if not ep:
         return None
+    if episode_map is not None:
+        return episode_map.get(ep)
     try:
         from hypogeum.db import get_connection
+        from hypogeum.episode_channel_resolver import build_episode_channel_map
         conn = get_connection(db_path or _DEFAULT_DB)
         try:
-            row = conn.execute(
-                "SELECT channel_id FROM runs WHERE episode_id = ? AND channel_id IS NOT NULL "
-                "UNION SELECT channel_id FROM episode_topics WHERE episode_id = ? AND channel_id IS NOT NULL "
-                "LIMIT 1",
-                (ep, ep),
-            ).fetchone()
-            if row is None:
-                # Prod analytics rows (and therefore insights/actions) are often
-                # keyed by episode TITLE, not id. Resolve the channel by matching
-                # the title on episodes / episode_topics.
-                row = conn.execute(
-                    "SELECT r.channel_id FROM episodes e "
-                    "  JOIN runs r ON r.episode_id = e.episode_id "
-                    "  WHERE e.title = ? AND r.channel_id IS NOT NULL "
-                    "UNION "
-                    "SELECT channel_id FROM episode_topics "
-                    "  WHERE topic_text = ? AND channel_id IS NOT NULL "
-                    "LIMIT 1",
-                    (ep, ep),
-                ).fetchone()
+            return build_episode_channel_map(conn).get(ep)
         finally:
             conn.close()
-        return row[0] if row else None
     except Exception:  # noqa: BLE001
         return None
 
@@ -942,13 +935,26 @@ def get_recommendations(db_path: Optional[Path] = None, *, channel_id: Optional[
           }, ...
         }
     """
+    episode_map: Optional[dict] = None
+    if channel_id is not None:
+        try:
+            from hypogeum.db import get_connection
+            from hypogeum.episode_channel_resolver import build_episode_channel_map
+            conn = get_connection(db_path or _DEFAULT_DB)
+            try:
+                episode_map = build_episode_channel_map(conn)
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            episode_map = {}
+
     recs: dict = {}
     for status, confidence_base in [("applied", 0.85), ("pending", 0.60)]:
         for action in list_actions(status=status, db_path=db_path):
             dim = action["dimension"]
             if dim in recs:
                 continue   # applied takes precedence over pending
-            if channel_id is not None and _action_channel(action, db_path) != channel_id:
+            if channel_id is not None and _action_channel(action, episode_map=episode_map) != channel_id:
                 continue
             evidence = action.get("evidence") or {}
             source_eps = evidence.get("source_episode") or action.get("source_episode") or []

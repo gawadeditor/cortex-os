@@ -36,23 +36,14 @@ def _db(db_path):
 
 
 def _episode_channel_map(conn) -> dict:
-    """episode_id -> channel_id, resolved from runs first, then episode_topics."""
-    m: dict[str, str] = {}
-    try:
-        for r in conn.execute(
-            "SELECT episode_id, channel_id FROM runs "
-            "WHERE episode_id IS NOT NULL AND channel_id IS NOT NULL"):
-            m.setdefault(r["episode_id"], r["channel_id"])
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        for r in conn.execute(
-            "SELECT episode_id, channel_id FROM episode_topics "
-            "WHERE episode_id IS NOT NULL AND channel_id IS NOT NULL"):
-            m.setdefault(r["episode_id"], r["channel_id"])
-    except Exception:  # noqa: BLE001
-        pass
-    return m
+    """Thin wrapper over the shared resolver (episode_channel_resolver.py)
+    -- see that module's docstring for why this used to be its own,
+    narrower copy of the same heuristic (missing the title/fuzzy/platform-
+    owner fallbacks dashboard_analytics.py had, so a legacy title-keyed
+    analytics row was invisible here even when the Analytics page could
+    place it)."""
+    from hypogeum.episode_channel_resolver import build_episode_channel_map
+    return build_episode_channel_map(conn)
 
 
 def _blank_rollup() -> dict:

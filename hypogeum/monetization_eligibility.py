@@ -134,16 +134,44 @@ def _platform_insight(channel_id: str, platform: str, conn) -> dict:
 
 def _views_last_days(channel_id: str, platform: str, days: int, conn) -> Optional[int]:
     """Sum of the latest per-episode view count for this channel+platform,
-    for episodes published within `days`. None if we have no api rows."""
+    for episodes published within `days`. None if we have no api rows.
+
+    Which episodes belong to this channel is resolved by the shared
+    episode_channel_resolver rather than a bare `episode_topics.channel_id`
+    lookup -- the latter missed any legacy platform_analytics row keyed by
+    raw title text instead of a real episode_id (pre-Zernio imports have
+    no episode_topics row at all), silently undercounting a channel's real
+    views for a monetization-eligibility number. The `days` publish-date
+    window still only applies to episodes episode_topics actually tracks a
+    target_publish_at for -- a resolver-only (title-keyed) episode has no
+    date to filter on and is kept, same as the original SQL's "date IS
+    NULL" branch treated a missing date as no constraint."""
+    from hypogeum.episode_channel_resolver import build_episode_channel_map
+    ep_chan = build_episode_channel_map(conn)
+    my_eps = {e for e, c in ep_chan.items() if c == channel_id}
+    if not my_eps:
+        return None
+    try:
+        too_old = {
+            r["episode_id"] for r in conn.execute(
+                "SELECT episode_id FROM episode_topics "
+                "WHERE channel_id=? AND target_publish_at IS NOT NULL "
+                "AND target_publish_at < date('now', ?)",
+                (channel_id, f"-{int(days)} days"),
+            )
+        }
+    except Exception:  # noqa: BLE001
+        too_old = set()
+    my_eps -= too_old
+    if not my_eps:
+        return None
+    placeholders = ",".join("?" * len(my_eps))
     try:
         rows = conn.execute(
-            "SELECT MAX(pa.views) AS v FROM platform_analytics pa "
-            "WHERE pa.platform=? AND pa.source='api' AND pa.views IS NOT NULL "
-            "AND pa.episode_id IN ("
-            "  SELECT et.episode_id FROM episode_topics et WHERE et.channel_id=?"
-            "  AND (et.target_publish_at IS NULL OR et.target_publish_at >= date('now', ?))"
-            ") GROUP BY pa.episode_id",
-            (platform, channel_id, f"-{int(days)} days"),
+            f"SELECT MAX(pa.views) AS v FROM platform_analytics pa "
+            f"WHERE pa.platform=? AND pa.source='api' AND pa.views IS NOT NULL "
+            f"AND pa.episode_id IN ({placeholders}) GROUP BY pa.episode_id",
+            [platform, *my_eps],
         ).fetchall()
     except Exception:  # noqa: BLE001
         return None

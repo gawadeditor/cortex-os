@@ -41,99 +41,14 @@ def _safe_sum(vals: list) -> float:
 # ===========================================================================
 
 def _analytics_key_channel_map(conn) -> dict:
-    """
-    platform_analytics.episode_id in production is often the *title text*,
-    not an ep_xxxx id. Map every distinct key to a channel_id via: exact
-    id match in runs / episode_topics, then title match against
-    episodes.title / titles.title_text / episode_topics.topic_text.
-    Keys that resolve to nothing are omitted (shown only in factory scope).
-    """
-    keys = set()
-    try:
-        for r in conn.execute("SELECT DISTINCT episode_id FROM platform_analytics"):
-            if r[0]:
-                keys.add(r[0])
-    except Exception:  # noqa: BLE001
-        return {}
-
-    # id -> channel
-    id_chan: dict[str, str] = {}
-    for sql in ("SELECT episode_id, channel_id FROM runs "
-                "WHERE episode_id IS NOT NULL AND channel_id IS NOT NULL",
-                "SELECT episode_id, channel_id FROM episode_topics "
-                "WHERE episode_id IS NOT NULL AND channel_id IS NOT NULL"):
-        try:
-            for r in conn.execute(sql):
-                id_chan.setdefault(r[0], r[1])
-        except Exception:  # noqa: BLE001
-            pass
-
-    # title -> channel  (title -> episode_id -> channel; and topic_text direct)
-    title_chan: dict[str, str] = {}
-    try:
-        for r in conn.execute(
-            "SELECT e.title AS t, r.channel_id AS c FROM episodes e "
-            "JOIN runs r ON r.run_id = e.run_id "
-            "WHERE e.title IS NOT NULL AND r.channel_id IS NOT NULL"):
-            title_chan.setdefault(r["t"], r["c"])
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        for r in conn.execute(
-            "SELECT t.title_text AS t, r.channel_id AS c FROM titles t "
-            "JOIN runs r ON r.run_id = t.run_id "
-            "WHERE t.title_text IS NOT NULL AND r.channel_id IS NOT NULL"):
-            title_chan.setdefault(r["t"], r["c"])
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        for r in conn.execute(
-            "SELECT topic_text AS t, channel_id AS c FROM episode_topics "
-            "WHERE topic_text IS NOT NULL AND channel_id IS NOT NULL"):
-            title_chan.setdefault(r["t"], r["c"])
-    except Exception:  # noqa: BLE001
-        pass
-
-    # platform -> the single channel bound to it (fallback for keys that
-    # match no episode/title — e.g. after old episodes were cleaned out).
-    plat_owner: dict[str, str] = {}
-    try:
-        seen: dict[str, set] = {}
-        for r in conn.execute(
-            "SELECT platform, channel_id FROM channel_provider_bindings "
-            "WHERE enabled = 1 AND capability = 'publishing'"):
-            seen.setdefault(r[0], set()).add(r[1])
-        plat_owner = {p: next(iter(cs)) for p, cs in seen.items() if len(cs) == 1}
-    except Exception:  # noqa: BLE001
-        pass
-    key_plats: dict[str, set] = {}
-    try:
-        for r in conn.execute("SELECT DISTINCT episode_id, platform FROM platform_analytics"):
-            key_plats.setdefault(r[0], set()).add(r[1])
-    except Exception:  # noqa: BLE001
-        pass
-
-    out: dict[str, str] = {}
-    for k in keys:
-        if k in id_chan:
-            out[k] = id_chan[k]
-            continue
-        if k in title_chan:
-            out[k] = title_chan[k]
-            continue
-        hit = None
-        for t, c in title_chan.items():
-            if t and (t.startswith(k[:40]) or k.startswith(t[:40])):
-                hit = c
-                break
-        if hit:
-            out[k] = hit
-            continue
-        # fallback: attribute to the sole channel bound to this key's platform(s)
-        owners = {plat_owner[p] for p in key_plats.get(k, set()) if p in plat_owner}
-        if len(owners) == 1:
-            out[k] = next(iter(owners))
-    return out
+    """Thin wrapper over the shared resolver (episode_channel_resolver.py)
+    -- kept as a local name since every caller in this file already says
+    `_analytics_key_channel_map(conn)`. See that module's docstring for
+    why this used to be four separate, silently-diverging copies of the
+    same heuristic (dashboard_analytics, dashboard_rollup, learning_engine,
+    monetization_eligibility)."""
+    from hypogeum.episode_channel_resolver import build_episode_channel_map
+    return build_episode_channel_map(conn)
 
 
 def _episode_title_map(conn, episode_ids: set) -> dict:

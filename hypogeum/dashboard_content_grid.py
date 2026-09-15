@@ -27,6 +27,7 @@ from hypogeum.logger import get_logger
 log = get_logger(agent="dashboard_content_grid")
 
 _CACHE_TTL_SECONDS = 900  # 15 min — matches the dashboard's other soft-refresh windows
+_LIVE_FETCH_TIMEOUT_SECONDS = 12  # short: one slow post must not stall the whole page load
 
 # Manually-generated covers for posts Zernio itself has no thumbnail for and
 # will never accept one on (repair_existing_post is rejected outright on a
@@ -110,13 +111,20 @@ def _local_episode_title(conn, episode_id: str) -> str:
     return row["title"] or row["topic"] or episode_id
 
 
-def _fetch_live(provider, post_id: str) -> dict:
+def _fetch_live(provider, post_id: str, *, known_thumbnail_url: Optional[str] = None,
+                 known_is_landscape: Optional[bool] = None) -> dict:
     """One GET /posts/{id}, normalised into the row shape this module
     caches and the template renders. Never raises -- a transport failure
-    lands in `fetch_error`, the row still renders (poster-less, dated
-    'unknown') rather than disappearing."""
+    lands in `fetch_error`; the caller preserves the previous cached
+    fields for this post rather than blanking them out.
+
+    `known_thumbnail_url`/`known_is_landscape` let a repeat fetch of an
+    already-seen post skip the orientation probe's extra GET+PIL decode
+    when the cover hasn't changed -- the one-GET-per-URL promise in
+    `_is_landscape`'s docstring, actually enforced here rather than just
+    described."""
     try:
-        res = provider.get_post(post_id)
+        res = provider.get_post(post_id, timeout=_LIVE_FETCH_TIMEOUT_SECONDS)
     except Exception as exc:  # noqa: BLE001
         return {"fetch_error": str(exc)[:200]}
     post = res.get("post") or {}
@@ -125,7 +133,10 @@ def _fetch_live(provider, post_id: str) -> dict:
 
     media_items = post.get("mediaItems") or []
     thumbnail_url = media_items[0].get("thumbnail") if media_items else None
-    is_landscape = _is_landscape(thumbnail_url) if thumbnail_url else None
+    if thumbnail_url and thumbnail_url == known_thumbnail_url and known_is_landscape is not None:
+        is_landscape = known_is_landscape
+    else:
+        is_landscape = _is_landscape(thumbnail_url) if thumbnail_url else None
     platforms = []
     for p in post.get("platforms") or []:
         platforms.append({
@@ -209,14 +220,18 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
         posts = _resolve_posts(conn, channel_id)
         if not posts:
             return []
-        cached_by_post = {} if force_refresh else {
-            p["post_id"]: _cache_get(conn, p["post_id"]) for p in posts
-        }
+        # Always read the cache, even on a forced refresh -- it is the
+        # last-known-good fallback if the live fetch below errors, not
+        # just a freshness check. `force_refresh` only changes which
+        # posts get re-fetched (all of them), never whether we have a
+        # fallback to fall back to.
+        cached_by_post = {p["post_id"]: _cache_get(conn, p["post_id"]) for p in posts}
     finally:
         conn.close()
 
     to_fetch = [p for p in posts
-                if (cached_by_post.get(p["post_id"]) is None
+                if (force_refresh
+                    or cached_by_post.get(p["post_id"]) is None
                     or cached_by_post[p["post_id"]].get("_stale"))]
     rows_for_display = {
         p["post_id"]: cached_by_post[p["post_id"]] for p in posts if p not in to_fetch
@@ -235,9 +250,16 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
         from hypogeum.publishing.zernio import ZernioProvider
         from concurrent.futures import ThreadPoolExecutor, as_completed
         provider = ZernioProvider()
-        with ThreadPoolExecutor(max_workers=min(8, len(to_fetch))) as pool:
+        with ThreadPoolExecutor(max_workers=min(12, len(to_fetch))) as pool:
             future_to_post = {
-                pool.submit(_fetch_live, provider, p["post_id"]): p for p in to_fetch
+                pool.submit(
+                    _fetch_live, provider, p["post_id"],
+                    known_thumbnail_url=(cached_by_post.get(p["post_id"]) or {}).get("thumbnail_url"),
+                    known_is_landscape=(lambda v: bool(v) if v is not None else None)(
+                        (cached_by_post.get(p["post_id"]) or {}).get("thumb_is_landscape")
+                    ),
+                ): p
+                for p in to_fetch
             }
             for future in as_completed(future_to_post):
                 p = future_to_post[future]
@@ -245,6 +267,23 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
                     live = future.result()
                 except Exception as exc:  # noqa: BLE001
                     live = {"fetch_error": str(exc)[:200]}
+                if live.get("fetch_error"):
+                    # A transient Zernio failure must not blank out data we
+                    # already had -- keep the last known-good fields for
+                    # this post and just surface the new error alongside
+                    # them, so a flaky refresh cycle degrades to "slightly
+                    # stale" rather than "looks empty/broken".
+                    old = cached_by_post.get(p["post_id"]) or {}
+                    live = {
+                        "title": old.get("title"),
+                        "status": old.get("status"),
+                        "scheduled_for": old.get("scheduled_for"),
+                        "published_at": old.get("published_at"),
+                        "thumbnail_url": old.get("thumbnail_url"),
+                        "thumb_is_landscape": old.get("thumb_is_landscape"),
+                        "platforms_json": old.get("platforms_json", "[]"),
+                        "fetch_error": live["fetch_error"],
+                    }
                 fresh_rows[p["post_id"]] = live
                 rows_for_display[p["post_id"]] = {**p, "channel_id": channel_id, **live}
 

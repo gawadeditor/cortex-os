@@ -670,7 +670,8 @@ class ZernioProvider:
     def supports_platform(self, platform: str) -> bool:
         return platform in self.supported_platforms
 
-    def get_post(self, provider_post_id: str, *, db_path: Optional[Path] = None) -> dict:
+    def get_post(self, provider_post_id: str, *, db_path: Optional[Path] = None,
+                 timeout: float = _DEFAULT_TIMEOUT_SECONDS) -> dict:
         """
         Read-only GET /v1/posts/{postId} -- returns the parsed Post
         object exactly as Zernio returns it (never mutates, never
@@ -684,6 +685,11 @@ class ZernioProvider:
         thumbnail) was actually applied -- this is the read path that
         proves the difference.
 
+        `timeout` defaults to the shared 30s but can be shortened by a
+        caller (e.g. the dashboard content grid) that would rather fail
+        one card fast and keep the last-known-good cached data than
+        stall an entire page load behind a single slow response.
+
         Raises ZernioTransportError on a network failure. A non-200
         response is returned as-is (status_code + json_body) for the
         caller to interpret; this method itself never raises on a
@@ -696,7 +702,7 @@ class ZernioProvider:
             )
         headers = {"Authorization": f"Bearer {credential}"}
         del credential
-        response = self._transport.get(url=f"{_ZERNIO_POSTS_URL}/{provider_post_id}", headers=headers, timeout=_DEFAULT_TIMEOUT_SECONDS)
+        response = self._transport.get(url=f"{_ZERNIO_POSTS_URL}/{provider_post_id}", headers=headers, timeout=timeout)
         if response.status_code != 200 or not isinstance(response.json_body, dict):
             return {"status_code": response.status_code, "post": None, "error": response.json_body}
         return {"status_code": response.status_code, "post": response.json_body.get("post", response.json_body), "error": None}

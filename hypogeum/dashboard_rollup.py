@@ -49,7 +49,8 @@ def _episode_channel_map(conn) -> dict:
 def _blank_rollup() -> dict:
     return {
         "views": None, "watch_time_s": None, "engagements": None,
-        "episodes_published": 0, "spend_all_usd": None, "spend_30d_usd": None,
+        "episodes_published": 0, "videos_live": 0,
+        "spend_all_usd": None, "spend_30d_usd": None,
         "revenue_est_usd": None, "subscribers": None,
         "platforms": [], "by_channel": [],
         "active_runs": 0, "pending_approvals": 0,
@@ -191,6 +192,27 @@ def _live_count(conn, channel_id: Optional[str], ep_chan: dict) -> int:
     return len(live)
 
 
+def _video_count(conn, channel_id: Optional[str]) -> int:
+    """Distinct PUBLISHED posts/deliverables -- the companion count to
+    _live_count's distinct-EPISODE number: an episode with a main video
+    plus two shorts, all live, is 1 in _live_count but 3 here. Sourced
+    from content_grid_cache (Zernio's own per-post live status, refreshed
+    by the Grid page) -- a pre-Zernio legacy episode has no post-level
+    record there and so contributes to the episode count but not this
+    one. Never raises."""
+    try:
+        if channel_id is None:
+            return conn.execute(
+                "SELECT COUNT(*) FROM content_grid_cache WHERE status = 'published'"
+            ).fetchone()[0]
+        return conn.execute(
+            "SELECT COUNT(*) FROM content_grid_cache WHERE channel_id = ? AND status = 'published'",
+            (channel_id,),
+        ).fetchone()[0]
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def _active_runs(conn, channel_id: Optional[str]) -> int:
     try:
         if channel_id is None:
@@ -265,6 +287,7 @@ def get_channel_rollup(channel_id: str, db_path: Optional[Path] = None) -> dict:
         all_map, d30_map = _billed_maps(_db(db_path))
         out["spend_all_usd"], out["spend_30d_usd"] = _spend(my_eps, all_map, d30_map)
         out["episodes_published"] = _live_count(conn, channel_id, ep_chan)
+        out["videos_live"] = _video_count(conn, channel_id)
         out["active_runs"] = _active_runs(conn, channel_id)
     finally:
         conn.close()
@@ -282,6 +305,7 @@ def get_factory_rollup(db_path: Optional[Path] = None) -> dict:
         all_map, d30_map = _billed_maps(_db(db_path))
         out["spend_all_usd"], out["spend_30d_usd"] = _spend(None, all_map, d30_map)
         out["episodes_published"] = _live_count(conn, None, ep_chan)
+        out["videos_live"] = _video_count(conn, None)
         out["active_runs"] = _active_runs(conn, None)
         out["pending_approvals"] = _pending_approvals(conn)
 
@@ -300,6 +324,7 @@ def get_factory_rollup(db_path: Optional[Path] = None) -> dict:
                 "channel_id": cid, "name": getattr(cp, "name", cid) or cid,
                 "views": ca["views"], "watch_time_s": ca["watch_time_s"],
                 "episodes_published": _live_count(conn, cid, ep_chan),
+                "videos_live": _video_count(conn, cid),
                 "spend_all_usd": csp_all, "spend_30d_usd": csp_30,
                 "active_runs": _active_runs(conn, cid),
                 "views_series": _channel_view_series(conn, my_eps),

@@ -34,6 +34,7 @@ from hypogeum.dashboard_live import (
     get_queue_snapshot,
     get_live_metrics,
     get_recent_failures,
+    get_factory_pulse,
     tail_log,
 )
 
@@ -605,3 +606,30 @@ class TestNoSideEffects:
         size_before = log_file.stat().st_size
         tail_log(log_path=log_file)
         assert log_file.stat().st_size == size_before
+
+
+# ===========================================================================
+# TestGetFactoryPulse
+# ===========================================================================
+
+class TestGetFactoryPulse:
+    def test_queued_count_not_capped_by_item_preview_limit(self, db_path):
+        """The preview list is deliberately capped at 20 fetched rows (5
+        shown) -- the COUNT must not be, or a backlog past 20 silently
+        under-reports on the Control room card while /discover's own
+        COUNT(*)-based number stays correct (the two-pages-disagree bug
+        pattern this session has been fixing throughout)."""
+        conn = get_connection(db_path)
+        for i in range(25):
+            conn.execute(
+                "INSERT INTO episode_topics (topic_id, channel_id, topic_text, status, "
+                "created_at, updated_at) VALUES (?,?,?,?,?,?)",
+                (f"topic_{i}", "cha", f"Topic {i}", "queued",
+                 "2026-01-01T00:00:00", "2026-01-01T00:00:00"),
+            )
+        conn.commit()
+        conn.close()
+
+        pulse = get_factory_pulse(db_path=db_path)
+        assert pulse["queued"]["count"] == 25
+        assert len(pulse["queued"]["items"]) == 5

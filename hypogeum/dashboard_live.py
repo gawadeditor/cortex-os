@@ -527,13 +527,20 @@ def get_factory_pulse(
             # ── queued / in-production topics ───────────────────────────
             try:
                 for state, key in (("queued", "queued"), ("claimed", "in_production")):
+                    # count is a real COUNT(*), not len(rows) -- the item
+                    # preview below is capped at 20 fetched, so a `queued`
+                    # backlog past 20 used to silently under-report the
+                    # count itself instead of just truncating the preview.
+                    total = conn.execute(
+                        "SELECT COUNT(*) FROM episode_topics WHERE status = ?", [state]
+                    ).fetchone()[0]
                     rows = conn.execute("""
                         SELECT topic_id, channel_id, topic_text, discovery_score
                         FROM episode_topics WHERE status = ?
                         ORDER BY priority ASC, created_at ASC LIMIT 20
                     """, [state]).fetchall()
                     out[key] = {
-                        "count": len(rows),
+                        "count": total,
                         "items": [{
                             "channel_id": r["channel_id"],
                             "topic": r["topic_text"],

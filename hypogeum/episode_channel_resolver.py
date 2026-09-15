@@ -15,19 +15,24 @@ invisible to Learning or Monetization. This module is the single
 implementation all four now call, so they can never disagree again.
 
 Public API:
-    build_episode_channel_map(conn) -> dict[str, str]
+    build_episode_channel_map(conn, extra_keys=None) -> dict[str, str]
 """
 from __future__ import annotations
 
+from typing import Optional
 
-def build_episode_channel_map(conn) -> dict[str, str]:
+
+def build_episode_channel_map(conn, extra_keys: Optional[set] = None) -> dict[str, str]:
     """{episode_id_or_legacy_title_key: channel_id}, covering every real
-    episode_id known via `runs`/`episode_topics` PLUS every distinct
-    `platform_analytics.episode_id` key that isn't a real id, resolved
-    via (in order): exact title match, fuzzy title-prefix match, then —
-    only when exactly one channel is bound to every platform that key has
-    data on — a platform-owner fallback. A key that resolves to nothing
-    under all of these is simply absent, never guessed. Never raises."""
+    episode_id known via `runs`/`episode_topics`, every distinct
+    `platform_analytics.episode_id` key, and any caller-supplied
+    `extra_keys` (e.g. a `learning_actions.source_episode` value, which
+    isn't necessarily ever written to `platform_analytics` at all) —
+    resolved via (in order): exact id match, exact title match, fuzzy
+    title-prefix match, then — only when exactly one channel is bound to
+    every platform that key has analytics data on — a platform-owner
+    fallback. A key that resolves to nothing under all of these is simply
+    absent, never guessed. Never raises."""
     # id -> channel (the common case: covers every episode with a run,
     # whether or not it has any analytics yet — dashboard_rollup's spend/
     # live-count filtering needs this even for analytics-less episodes).
@@ -42,7 +47,7 @@ def build_episode_channel_map(conn) -> dict[str, str]:
         except Exception:  # noqa: BLE001
             pass
 
-    keys = set(id_chan)
+    keys = set(id_chan) | set(extra_keys or ())
     try:
         for r in conn.execute("SELECT DISTINCT episode_id FROM platform_analytics"):
             if r[0]:
@@ -51,11 +56,16 @@ def build_episode_channel_map(conn) -> dict[str, str]:
         pass
 
     # title -> channel  (title -> episode_id -> channel; and topic_text direct)
+    # Joined on episode_id, not `episodes.run_id = runs.run_id`: an
+    # episode's own `run_id` column is often never backfilled (e.g. a
+    # freshly-inserted test/legacy row), which would silently drop every
+    # title for such an episode even though `runs` correctly links its
+    # episode_id to a channel.
     title_chan: dict[str, str] = {}
     try:
         for r in conn.execute(
             "SELECT e.title AS t, r.channel_id AS c FROM episodes e "
-            "JOIN runs r ON r.run_id = e.run_id "
+            "JOIN runs r ON r.episode_id = e.episode_id "
             "WHERE e.title IS NOT NULL AND r.channel_id IS NOT NULL"):
             title_chan.setdefault(r["t"], r["c"])
     except Exception:  # noqa: BLE001

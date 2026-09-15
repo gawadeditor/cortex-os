@@ -913,7 +913,12 @@ def _action_channel(action: dict, db_path: Optional[Path] = None, *,
         from hypogeum.episode_channel_resolver import build_episode_channel_map
         conn = get_connection(db_path or _DEFAULT_DB)
         try:
-            return build_episode_channel_map(conn).get(ep)
+            # `ep` (a learning_actions.source_episode value) is very often
+            # a raw title, not a real episode_id, and isn't necessarily in
+            # platform_analytics at all -- pass it as an extra_key so the
+            # resolver's title/fuzzy fallbacks actually get a chance to
+            # place it, not just the id-based map.
+            return build_episode_channel_map(conn, extra_keys={ep}).get(ep)
         finally:
             conn.close()
     except Exception:  # noqa: BLE001
@@ -935,14 +940,27 @@ def get_recommendations(db_path: Optional[Path] = None, *, channel_id: Optional[
           }, ...
         }
     """
+    actions_by_status = {
+        status: list_actions(status=status, db_path=db_path)
+        for status, _ in [("applied", 0.85), ("pending", 0.60)]
+    }
+
     episode_map: Optional[dict] = None
     if channel_id is not None:
         try:
             from hypogeum.db import get_connection
             from hypogeum.episode_channel_resolver import build_episode_channel_map
+            extra_keys = set()
+            for actions in actions_by_status.values():
+                for action in actions:
+                    ev = action.get("source_episode") or (action.get("evidence") or {}).get("source_episode")
+                    if isinstance(ev, list):
+                        extra_keys.update(e for e in ev if e)
+                    elif ev:
+                        extra_keys.add(ev)
             conn = get_connection(db_path or _DEFAULT_DB)
             try:
-                episode_map = build_episode_channel_map(conn)
+                episode_map = build_episode_channel_map(conn, extra_keys=extra_keys)
             finally:
                 conn.close()
         except Exception:  # noqa: BLE001
@@ -950,7 +968,7 @@ def get_recommendations(db_path: Optional[Path] = None, *, channel_id: Optional[
 
     recs: dict = {}
     for status, confidence_base in [("applied", 0.85), ("pending", 0.60)]:
-        for action in list_actions(status=status, db_path=db_path):
+        for action in actions_by_status[status]:
             dim = action["dimension"]
             if dim in recs:
                 continue   # applied takes precedence over pending

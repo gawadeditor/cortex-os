@@ -435,7 +435,8 @@ class TestFlaskImportRoutes:
 class TestFlaskLearningApiActionRoutes:
     def test_api_apply_action_200(self, flask_client, db_path):
         aid = store_action({"source_episode": "ep1", "dimension": "title",
-                            "action_type": "test", "rationale": "R"}, db_path=db_path)
+                            "action_type": "test", "rationale": "R",
+                            "evidence_json": '{"channel_id": "cha"}'}, db_path=db_path)
         r = flask_client.post(f"/api/learning/action/{aid}/apply",
                               content_type="application/json")
         assert r.status_code == 200

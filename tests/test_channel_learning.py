@@ -50,7 +50,16 @@ def test_apply_action_writes_directive_for_advisory_dimension(tmp_path):
         "Rewrite opening 15 seconds — early drop-off"]
 
 
-def test_apply_action_no_channel_falls_back_to_plain_ack(tmp_path):
+def test_apply_action_no_channel_fails_instead_of_a_false_applied(tmp_path):
+    """An advisory action whose source episode resolves to no channel must
+    NOT be silently marked 'applied' -- that used to happen (a confident
+    "Applied" badge for a directive that was never written), confirmed
+    live on real "Pacing"/"Topic choice" recommendations sourced from
+    unresolvable legacy episodes, reapplied with zero effect on ~7
+    separate days over two weeks. It must fail instead, same contract as
+    content_volume's own unresolvable-channel case -- the action stays
+    'pending' so it's honestly still actionable (or the operator can
+    Dismiss it if it's not relevant)."""
     db = tmp_path / "t.db"
     initialize_schema(db)
     aid = store_action({
@@ -59,8 +68,10 @@ def test_apply_action_no_channel_falls_back_to_plain_ack(tmp_path):
         "created_at": "2026-09-01",
     }, db_path=db)
     res = apply_action(aid, db_path=db)
-    assert res["ok"] and res["status"] == "applied"
-    assert "directive_id" not in res
+    assert res["ok"] is False
+    assert res["code"] == "unresolvable_channel"
+    from hypogeum.analytics_store import get_action
+    assert get_action(aid, db_path=db)["status"] == "pending"
 
 
 def test_content_volume_still_executes_cadence_not_a_directive(tmp_path):

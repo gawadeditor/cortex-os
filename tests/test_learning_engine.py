@@ -338,11 +338,16 @@ class TestGenerateActions:
 
 class TestApplyDismissActions:
     def _make_pending(self, db_path):
+        # explicit channel_id in evidence: _action_channel() checks this
+        # before trying to resolve "ep1" (a throwaway id with no real
+        # runs/episode_topics row) to a channel -- these tests exercise
+        # generic apply/dismiss lifecycle, not channel attribution.
         return store_action({
             "source_episode": "ep1",
             "dimension":      "thumbnail",
             "action_type":    "test",
             "rationale":      "Low CTR",
+            "evidence_json":  '{"channel_id": "cha"}',
         }, db_path=db_path)
 
     def test_apply_returns_ok(self, db_path):
@@ -596,7 +601,8 @@ class TestContentVolumeRecommendation:
 
     def test_other_dimensions_stay_advisory(self, db_path):
         aid = store_action({"source_episode": "ep9", "dimension": "hook",
-                            "action_type": "change", "rationale": "advisory"}, db_path=db_path)
+                            "action_type": "change", "rationale": "advisory",
+                            "evidence_json": _json.dumps({"channel_id": "cha"})}, db_path=db_path)
         res = apply_action(aid, db_path=db_path)
         assert res["ok"] is True and "cadence_after" not in res
 

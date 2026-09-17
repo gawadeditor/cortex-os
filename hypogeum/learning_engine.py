@@ -838,35 +838,57 @@ def apply_action(
 
     # Advisory dimensions (thumbnail / hook / pacing / topic / title /
     # description) become a channel-scoped learning directive the relevant
-    # agent reads on the next episode — Channel Learning. Falls back to a
-    # plain acknowledgement when no channel can be attributed.
+    # agent reads on the next episode — Channel Learning.
+    #
+    # Matches content_volume's own contract above: if the directive can't
+    # actually be recorded, this must fail (action stays 'pending') rather
+    # than mark 'applied' anyway. It used to do the latter -- when
+    # _action_channel() couldn't resolve a channel (a source_episode that's
+    # a legacy title-keyed row with no real episode_id, e.g. from a
+    # pre-Zernio import) or record_directive() itself failed, the directive
+    # was silently never written while the action was still stamped
+    # 'applied', showing a confident "Applied" badge in the UI for a
+    # recommendation that changed nothing. Confirmed live: "Pacing" and
+    # "Topic choice" actions sourced from two specific unresolvable legacy
+    # episodes were marked Applied on ~7 separate days over two weeks with
+    # zero channel_learning_directives rows ever created. Fixed 2026-09-17.
     dim = action["dimension"]
-    directive_result = None
     try:
         from hypogeum.channel_learning import record_directive, _ADVISORY_DIMENSIONS
-        if dim in _ADVISORY_DIMENSIONS:
-            channel_id = _action_channel(action, db_path)
-            if channel_id:
-                ev = action.get("evidence") or {}
-                directive_result = record_directive(
-                    channel_id, dim, action["action_type"],
-                    action.get("rationale") or f"{action['action_type']} — {dim}",
-                    source_action_id=action_id,
-                    source_episode=action.get("source_episode")
-                    or (ev.get("source_episode") if isinstance(ev.get("source_episode"), str) else None),
-                    db_path=db_path,
-                )
     except Exception as exc:  # noqa: BLE001
-        directive_result = {"ok": False, "error": str(exc)}
+        return _err(f"channel_learning unavailable: {exc}")
+    if dim in _ADVISORY_DIMENSIONS:
+        channel_id = _action_channel(action, db_path)
+        if not channel_id:
+            return _err(
+                "could not attribute this action to a channel -- its source "
+                "episode does not resolve to one (see episode_channel_resolver); "
+                "no directive was recorded", "unresolvable_channel",
+            )
+        ev = action.get("evidence") or {}
+        directive_result = record_directive(
+            channel_id, dim, action["action_type"],
+            action.get("rationale") or f"{action['action_type']} — {dim}",
+            source_action_id=action_id,
+            source_episode=action.get("source_episode")
+            or (ev.get("source_episode") if isinstance(ev.get("source_episode"), str) else None),
+            db_path=db_path,
+        )
+        if not directive_result.get("ok"):
+            return _err(f"record_directive failed: {directive_result.get('error')}",
+                       "directive_failed")
+        ok = update_action_status(action_id, "applied", db_path=db_path)
+        if not ok:
+            return _err("update failed")
+        return _ok(action_id=action_id, status="applied",
+                    channel_id=directive_result["channel_id"],
+                    directive_id=directive_result["directive_id"])
 
+    # Every other dimension: plain acknowledgement, nothing to write.
     ok = update_action_status(action_id, "applied", db_path=db_path)
     if not ok:
         return _err("update failed")
-    out = _ok(action_id=action_id, status="applied")
-    if directive_result and directive_result.get("ok"):
-        out["directive_id"] = directive_result["directive_id"]
-        out["channel_id"] = directive_result["channel_id"]
-    return out
+    return _ok(action_id=action_id, status="applied")
 
 
 def dismiss_action(

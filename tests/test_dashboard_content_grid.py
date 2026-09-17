@@ -145,3 +145,47 @@ def test_landscape_probe_skipped_when_thumbnail_unchanged(tmp_path, monkeypatch)
     # and the previously-known value (landscape=True) must be reused.
     assert probe_calls["n"] == 0
     assert items[0]["is_landscape"] is True
+
+
+def test_manually_resolved_cover_suppresses_warning_but_keeps_poster(tmp_path, monkeypatch):
+    """Zernio's own record can never reflect a native, out-of-band platform
+    edit (e.g. uploading a cover directly from YouTube Studio or a Facebook
+    Page's own settings) -- once the operator confirms they've done that
+    everywhere, the post must stop showing as "no cover" while still using
+    the manual file as its poster, since that's the accurate cover now."""
+    db_path = tmp_path / "test.db"
+    _seed_post(db_path, channel_id="hypogeum", episode_id="ep_1", post_id="post_resolved")
+    _seed_cache_row(db_path, post_id="post_resolved", channel_id="hypogeum", episode_id="ep_1",
+                     age_seconds=10, thumbnail_url=None)
+
+    monkeypatch.setitem(cg._MANUAL_COVER_FILES, "post_resolved", "ep_1")
+    monkeypatch.setattr(cg, "_MANUALLY_COVER_RESOLVED", {"post_resolved"})
+
+    items = cg.get_content_grid("hypogeum", db_path=db_path)
+
+    assert len(items) == 1
+    item = items[0]
+    assert item["has_cover"] is True
+    assert item["manual_cover_url"] == "/manual-cover/ep_1.jpg"
+    assert "confirmed" in item["manual_cover_note"].lower()
+
+
+def test_manual_cover_pending_still_warns_until_resolved(tmp_path, monkeypatch):
+    """The same post, before the operator confirms it's resolved, must
+    still show the cover-ready-to-upload prompt and no_cover=False only
+    once resolved."""
+    db_path = tmp_path / "test.db"
+    _seed_post(db_path, channel_id="hypogeum", episode_id="ep_1", post_id="post_pending")
+    _seed_cache_row(db_path, post_id="post_pending", channel_id="hypogeum", episode_id="ep_1",
+                     age_seconds=10, thumbnail_url=None)
+
+    monkeypatch.setitem(cg._MANUAL_COVER_FILES, "post_pending", "ep_1")
+    monkeypatch.setattr(cg, "_MANUALLY_COVER_RESOLVED", set())
+
+    items = cg.get_content_grid("hypogeum", db_path=db_path)
+
+    assert len(items) == 1
+    item = items[0]
+    assert item["has_cover"] is False
+    assert item["manual_cover_url"] == "/manual-cover/ep_1.jpg"
+    assert "confirmed" not in item["manual_cover_note"].lower()

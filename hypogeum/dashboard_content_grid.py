@@ -30,14 +30,15 @@ _CACHE_TTL_SECONDS = 900  # 15 min — matches the dashboard's other soft-refres
 _LIVE_FETCH_TIMEOUT_SECONDS = 12  # short: one slow post must not stall the whole page load
 
 # Manually-generated covers for posts Zernio itself has no thumbnail for and
-# will never accept one on (repair_existing_post is rejected outright on a
-# published post -- confirmed live 2026-09-11/12 on all 4 platforms, and
-# Zernio's own docs only document post-publish editing for Discord). YouTube
-# is the one platform where a human CAN still fix this -- from Studio's own
-# "Edit thumbnail" control, not any API -- so these files exist purely for
-# the operator to upload there by hand. Never auto-applied; this mapping
-# only feeds the Grid page's "cover ready — YouTube only" note. Keyed by
-# Zernio post_id; add an entry here (and drop the file in
+# will never accept one on via its own API (repair_existing_post is rejected
+# outright on a published post -- confirmed live 2026-09-11/12 on all 4
+# platforms). A human CAN still fix this directly on the platform itself,
+# outside Zernio entirely: YouTube from Studio's own "Edit thumbnail"
+# control, and Facebook from the Page's own post-editing settings (found
+# and confirmed working live by the operator 2026-09-17) -- so these files
+# exist purely for the operator to upload there by hand. Never auto-applied;
+# this mapping only feeds the Grid page's cover-ready note. Keyed by Zernio
+# post_id; add an entry here (and drop the file in
 # .hypogeum-assets/manual_youtube_covers/) whenever a new one turns up.
 _MANUAL_COVER_FILES = {
     "6a9939e7823e3a6833083c3b": "ep_0e01db91",       # twinkle — Pip the Owl
@@ -51,6 +52,27 @@ _MANUAL_COVER_FILES = {
     "6a9b60d19b0f9840ea5b4fb3": "ep_f9184c3e",       # twinkle — Benny Bunny
 }
 _MANUAL_COVER_DIR = "manual_youtube_covers"  # under .hypogeum-assets/, served by /manual-cover/<key>.jpg
+
+# Posts from _MANUAL_COVER_FILES the operator has confirmed they've already
+# uploaded by hand on every platform that has a manual fix path (2026-09-17:
+# all 9 then-known ones, on both YouTube and Facebook). Zernio's own post
+# record can never reflect this -- a native, out-of-band platform edit never
+# syncs back to it -- so without this list the Grid page would nag "no
+# cover" on these forever even though they're actually fine. Purely a
+# manually-maintained acknowledgement, same spirit as _MANUAL_COVER_FILES
+# itself: move a post_id here once you've actually uploaded its file
+# everywhere you can, never before.
+_MANUALLY_COVER_RESOLVED = {
+    "6a9939e7823e3a6833083c3b",  # twinkle — Pip the Owl
+    "6a9c2b94852558ef893023c2",  # hypogeum — Petra
+    "6a995063aff2c842d38e452e",  # hypogeum — Colosseum
+    "6a9567a0ed870051aa8dd08d",  # hypogeum — Malta 70Hz short
+    "6a99cf118272dfe44ae8724e",  # hypogeum — Valley of the Kings tomb
+    "6a9c209e578347d2c4a8ddd1",  # twinkle — Turtle & the Moon
+    "6a9980306fef4de8c0100d7f",  # twinkle — Milo's Bakery
+    "6a98797bb801aca05bac4450",  # twinkle — Mia & the Candy Kingdom
+    "6a9b60d19b0f9840ea5b4fb3",  # twinkle — Benny Bunny
+}
 
 
 def _now_iso() -> str:
@@ -311,8 +333,15 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
                 pass
 
             display_title = row.get("title") or _local_episode_title(conn, p["episode_id"])
-            has_cover = bool(row.get("thumbnail_url"))
-            manual_key = _MANUAL_COVER_FILES.get(p["post_id"]) if not has_cover else None
+            zernio_has_cover = bool(row.get("thumbnail_url"))
+            manual_key = _MANUAL_COVER_FILES.get(p["post_id"]) if not zernio_has_cover else None
+            resolved_manually = p["post_id"] in _MANUALLY_COVER_RESOLVED
+            # Zernio's own record never reflects a native, out-of-band
+            # platform edit -- once the operator confirms they've uploaded
+            # the manual file everywhere by hand, treat the post as covered
+            # (no more "no cover" warning) while still showing that same
+            # file as the poster image, since it's the accurate one now.
+            has_cover = zernio_has_cover or resolved_manually
             out.append({
                 "post_id": p["post_id"],
                 "episode_id": p["episode_id"],
@@ -325,9 +354,15 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
                 "is_landscape": bool(row.get("thumb_is_landscape")),
                 "has_cover": has_cover,
                 "manual_cover_url": (f"/manual-cover/{manual_key}.jpg" if manual_key else None),
-                "manual_cover_note": ("Cover ready — YouTube only (upload from Studio; "
-                                      "Zernio/TikTok/Instagram/Facebook reject a post-publish "
-                                      "cover change)") if manual_key else None,
+                "manual_cover_note": (
+                    "Cover confirmed uploaded by hand (Zernio's own record can't reflect a "
+                    "native platform edit, so this page can't detect it automatically)"
+                    if manual_key and resolved_manually else
+                    "Cover ready — YouTube + Facebook accept a manual upload from their own "
+                    "settings; Zernio/TikTok/Instagram reject a post-publish cover change via "
+                    "any API"
+                    if manual_key else None
+                ),
                 "platforms": platforms,
                 "fetch_error": row.get("fetch_error"),
             })

@@ -35,7 +35,7 @@ def _resolve(db_path: Optional[Path]) -> Optional[Path]:
 
 
 def _log_sync(
-    conn,
+    db_path: Optional[Path],
     *,
     platform: str,
     channel_id: Optional[str],
@@ -45,17 +45,37 @@ def _log_sync(
     window_days: int,
     triggered_by: str,
 ) -> str:
+    """Own short-lived connection: open, write, commit, close immediately.
+
+    Previously took a `conn` shared across run_platform_sync()'s entire
+    call -- a chain of slow, sequential external API calls (Zernio,
+    YouTube, Meta, TikTok, per-client syncs) that can run for minutes.
+    The FIRST _log_sync() call on that shared conn opened an uncommitted
+    write transaction that then sat open for the rest of the function
+    (only committed once, at the very end), so every one of the ~74
+    separate, otherwise-independent per-post writes sync_zernio_analytics
+    makes on its OWN short-lived connections collided with it and failed
+    with "database is locked" -- and if any later step in that same chain
+    hung on a slow network call, the transaction (and the lock) stayed
+    open indefinitely, poisoning every other concurrent sync attempt
+    (a second manual click, the hourly worker sync) for as long as the
+    first one was stuck. Fixed 2026-09-17."""
     sync_id = str(uuid.uuid4())
-    conn.execute(
-        """INSERT INTO platform_sync_log
-           (sync_id, platform, channel_id, status, records_imported,
-            errors_json, window_days, triggered_by, synced_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            sync_id, platform, channel_id, status, records_imported,
-            errors_json, window_days, triggered_by, _now(),
-        ),
-    )
+    conn = get_connection(_resolve(db_path) or _DEFAULT_DB_PATH)
+    try:
+        conn.execute(
+            """INSERT INTO platform_sync_log
+               (sync_id, platform, channel_id, status, records_imported,
+                errors_json, window_days, triggered_by, synced_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                sync_id, platform, channel_id, status, records_imported,
+                errors_json, window_days, triggered_by, _now(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
     return sync_id
 
 
@@ -64,7 +84,6 @@ def _sync_youtube(
     db_path: Optional[Path],
     window_days: int,
     triggered_by: str,
-    conn,
 ) -> dict:
     """Run YouTube sync, log result. Returns per-platform result dict."""
     import json as _json
@@ -72,7 +91,7 @@ def _sync_youtube(
         from hypogeum.config import Config
         cfg = Config()
     except Exception as exc:
-        _log_sync(conn, platform="youtube", channel_id=channel_id,
+        _log_sync(db_path, platform="youtube", channel_id=channel_id,
                   status="error", records_imported=0,
                   errors_json=_json.dumps([str(exc)]),
                   window_days=window_days, triggered_by=triggered_by)
@@ -82,7 +101,7 @@ def _sync_youtube(
     if not (cfg.YOUTUBE_REFRESH_TOKEN
             and cfg.YOUTUBE_CLIENT_ID
             and cfg.YOUTUBE_CLIENT_SECRET):
-        _log_sync(conn, platform="youtube", channel_id=channel_id,
+        _log_sync(db_path, platform="youtube", channel_id=channel_id,
                   status="not_connected", records_imported=0, errors_json=None,
                   window_days=window_days, triggered_by=triggered_by)
         return {"platform": "youtube", "status": "not_connected",
@@ -95,14 +114,14 @@ def _sync_youtube(
         records = result.get("synced_count", 0)
         errors  = result.get("errors") or []
         status  = "ok" if result.get("ok") else "error"
-        _log_sync(conn, platform="youtube", channel_id=channel_id,
+        _log_sync(db_path, platform="youtube", channel_id=channel_id,
                   status=status, records_imported=records,
                   errors_json=_json.dumps(errors) if errors else None,
                   window_days=window_days, triggered_by=triggered_by)
         return {"platform": "youtube", "status": status,
                 "records_imported": records, "errors": errors}
     except Exception as exc:
-        _log_sync(conn, platform="youtube", channel_id=channel_id,
+        _log_sync(db_path, platform="youtube", channel_id=channel_id,
                   status="error", records_imported=0,
                   errors_json=_json.dumps([str(exc)]),
                   window_days=window_days, triggered_by=triggered_by)
@@ -116,7 +135,6 @@ def _sync_meta(
     db_path: Optional[Path],
     window_days: int,
     triggered_by: str,
-    conn,
 ) -> dict:
     """Run Meta Graph API sync for facebook or instagram, log result."""
     import json as _json
@@ -124,7 +142,7 @@ def _sync_meta(
         from hypogeum.config import Config
         cfg = Config()
     except Exception as exc:
-        _log_sync(conn, platform=platform, channel_id=channel_id,
+        _log_sync(db_path, platform=platform, channel_id=channel_id,
                   status="error", records_imported=0,
                   errors_json=_json.dumps([str(exc)]),
                   window_days=window_days, triggered_by=triggered_by)
@@ -134,7 +152,7 @@ def _sync_meta(
 
     token = get_meta_token(platform, db_path=db_path)
     if not token:
-        _log_sync(conn, platform=platform, channel_id=channel_id,
+        _log_sync(db_path, platform=platform, channel_id=channel_id,
                   status="not_connected", records_imported=0, errors_json=None,
                   window_days=window_days, triggered_by=triggered_by)
         return {"platform": platform, "status": "not_connected", "records_imported": 0,
@@ -148,14 +166,14 @@ def _sync_meta(
         note     = result.get("note")
         if note and not errors:
             errors = [note]
-        _log_sync(conn, platform=platform, channel_id=channel_id,
+        _log_sync(db_path, platform=platform, channel_id=channel_id,
                   status=status, records_imported=records,
                   errors_json=_json.dumps(errors) if errors else None,
                   window_days=window_days, triggered_by=triggered_by)
         return {"platform": platform, "status": status,
                 "records_imported": records, "errors": errors}
     except Exception as exc:
-        _log_sync(conn, platform=platform, channel_id=channel_id,
+        _log_sync(db_path, platform=platform, channel_id=channel_id,
                   status="error", records_imported=0,
                   errors_json=_json.dumps([str(exc)]),
                   window_days=window_days, triggered_by=triggered_by)
@@ -168,7 +186,6 @@ def _sync_tiktok(
     db_path: Optional[Path],
     window_days: int,
     triggered_by: str,
-    conn,
 ) -> dict:
     """Run TikTok Video API analytics sync, log result."""
     import json as _json
@@ -176,7 +193,7 @@ def _sync_tiktok(
         from hypogeum.config import Config
         cfg = Config()
     except Exception as exc:
-        _log_sync(conn, platform="tiktok", channel_id=channel_id,
+        _log_sync(db_path, platform="tiktok", channel_id=channel_id,
                   status="error", records_imported=0,
                   errors_json=_json.dumps([str(exc)]),
                   window_days=window_days, triggered_by=triggered_by)
@@ -191,14 +208,14 @@ def _sync_tiktok(
         if note and not errors:
             errors = [note]
         status  = "ok" if result.get("ok") else "error"
-        _log_sync(conn, platform="tiktok", channel_id=channel_id,
+        _log_sync(db_path, platform="tiktok", channel_id=channel_id,
                   status=status, records_imported=records,
                   errors_json=_json.dumps(errors) if errors else None,
                   window_days=window_days, triggered_by=triggered_by)
         return {"platform": "tiktok", "status": status,
                 "records_imported": records, "errors": errors}
     except Exception as exc:
-        _log_sync(conn, platform="tiktok", channel_id=channel_id,
+        _log_sync(db_path, platform="tiktok", channel_id=channel_id,
                   status="error", records_imported=0,
                   errors_json=_json.dumps([str(exc)]),
                   window_days=window_days, triggered_by=triggered_by)
@@ -210,7 +227,6 @@ def _sync_zernio(
     db_path: Optional[Path],
     window_days: int,
     triggered_by: str,
-    conn,
 ) -> list[dict]:
     """One GET /v1/analytics pass covering every published post on all four
     platforms, mapped back to the Cortex episode via the publishing ledger.
@@ -221,7 +237,7 @@ def _sync_zernio(
         out = sync_zernio_analytics(db_path=db_path, window_days=min(window_days, 30))
     except Exception as exc:  # noqa: BLE001
         for p in ("youtube", "tiktok", "instagram", "facebook"):
-            _log_sync(conn, platform=p, channel_id=channel_id, status="error",
+            _log_sync(db_path, platform=p, channel_id=channel_id, status="error",
                       records_imported=0, errors_json=_json.dumps([str(exc)]),
                       window_days=window_days, triggered_by=triggered_by)
         return [{"platform": p, "status": "error", "records_imported": 0,
@@ -234,7 +250,7 @@ def _sync_zernio(
         n = int(per_platform.get(p, 0))
         status = "ok" if out.get("ok") else "error"
         errs = None if out.get("ok") else _json.dumps([out.get("error") or "no data"])
-        _log_sync(conn, platform=p, channel_id=channel_id, status=status,
+        _log_sync(db_path, platform=p, channel_id=channel_id, status=status,
                   records_imported=n, errors_json=errs,
                   window_days=window_days, triggered_by=triggered_by)
         rows.append({"platform": p, "status": status, "records_imported": n,
@@ -262,60 +278,61 @@ def run_platform_sync(
     Returns:
         {ok, results: [{platform, status, records_imported, error?}], total_records}
     """
-    db = _resolve(db_path) or _DEFAULT_DB_PATH
-    conn = get_connection(db)
     target = [p for p in _SUPPORTED_PLATFORMS if not platforms or p in platforms]
 
+    # No connection is held open across this function -- it's a chain of
+    # slow, sequential external API calls (Zernio, YouTube, Meta, TikTok,
+    # per-client syncs) that can run for minutes; every write below opens
+    # its own short-lived connection via _log_sync()/the individual sync
+    # modules instead (see _log_sync's docstring for the "database is
+    # locked" cascade this used to cause).
     results = []
-    try:
-        # Primary: one Zernio pass for every platform.
-        if not platforms or set(platforms) & set(_SUPPORTED_PLATFORMS):
-            try:
-                results.extend(_sync_zernio(channel_id, db_path, window_days, triggered_by, conn))
-            except Exception:  # noqa: BLE001
-                pass
-            # Account-level aggregate rollups (content-decay / best-time /
-            # posting-frequency / follower-stats) — separate endpoints,
-            # separate table; a failure here must never fail the per-post sync.
-            try:
-                from hypogeum.publishing.zernio_aggregate_sync import sync_zernio_aggregates
-                sync_zernio_aggregates(db_path=db_path)
-            except Exception:  # noqa: BLE001
-                pass
-            # Platform-native account analytics (YouTube channel-insights +
-            # retention curves, IG/YT demographics, per-account follower
-            # series). Own tables; failure-isolated from the per-post sync.
-            try:
-                from hypogeum.publishing.zernio_native_sync import sync_zernio_native_analytics
-                sync_zernio_native_analytics(db_path=db_path)
-            except Exception:  # noqa: BLE001
-                pass
-            # Cortex Advisory: pull every active client's externally-published
-            # content + performance. Own tables (content_items, client-scoped
-            # platform_analytics); failure-isolated.
-            try:
-                from hypogeum.publishing.client_content_sync import sync_all_clients
-                sync_all_clients(db_path=db_path)
-            except Exception:  # noqa: BLE001
-                pass
 
-        for platform in target:
-            if platform == "youtube":
-                r = _sync_youtube(channel_id, db_path, window_days, triggered_by, conn)
-            elif platform in ("facebook", "instagram"):
-                r = _sync_meta(platform, channel_id, db_path, window_days, triggered_by, conn)
-            elif platform == "tiktok":
-                r = _sync_tiktok(channel_id, db_path, window_days, triggered_by, conn)
-            else:
-                import json as _json
-                _log_sync(conn, platform=platform, channel_id=channel_id,
-                          status="skipped", records_imported=0, errors_json=None,
-                          window_days=window_days, triggered_by=triggered_by)
-                r = {"platform": platform, "status": "skipped", "records_imported": 0}
-            results.append(r)
-        conn.commit()
-    finally:
-        conn.close()
+    # Primary: one Zernio pass for every platform.
+    if not platforms or set(platforms) & set(_SUPPORTED_PLATFORMS):
+        try:
+            results.extend(_sync_zernio(channel_id, db_path, window_days, triggered_by))
+        except Exception:  # noqa: BLE001
+            pass
+        # Account-level aggregate rollups (content-decay / best-time /
+        # posting-frequency / follower-stats) — separate endpoints,
+        # separate table; a failure here must never fail the per-post sync.
+        try:
+            from hypogeum.publishing.zernio_aggregate_sync import sync_zernio_aggregates
+            sync_zernio_aggregates(db_path=db_path)
+        except Exception:  # noqa: BLE001
+            pass
+        # Platform-native account analytics (YouTube channel-insights +
+        # retention curves, IG/YT demographics, per-account follower
+        # series). Own tables; failure-isolated from the per-post sync.
+        try:
+            from hypogeum.publishing.zernio_native_sync import sync_zernio_native_analytics
+            sync_zernio_native_analytics(db_path=db_path)
+        except Exception:  # noqa: BLE001
+            pass
+        # Cortex Advisory: pull every active client's externally-published
+        # content + performance. Own tables (content_items, client-scoped
+        # platform_analytics); failure-isolated.
+        try:
+            from hypogeum.publishing.client_content_sync import sync_all_clients
+            sync_all_clients(db_path=db_path)
+        except Exception:  # noqa: BLE001
+            pass
+
+    for platform in target:
+        if platform == "youtube":
+            r = _sync_youtube(channel_id, db_path, window_days, triggered_by)
+        elif platform in ("facebook", "instagram"):
+            r = _sync_meta(platform, channel_id, db_path, window_days, triggered_by)
+        elif platform == "tiktok":
+            r = _sync_tiktok(channel_id, db_path, window_days, triggered_by)
+        else:
+            import json as _json
+            _log_sync(db_path, platform=platform, channel_id=channel_id,
+                      status="skipped", records_imported=0, errors_json=None,
+                      window_days=window_days, triggered_by=triggered_by)
+            r = {"platform": platform, "status": "skipped", "records_imported": 0}
+        results.append(r)
 
     # Per platform, count the best single provider rather than summing
     # Zernio + native-API rows for the same platform.

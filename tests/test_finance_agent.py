@@ -22,17 +22,20 @@ import pytest
 from hypogeum.agents.finance_agent import (
     _ELEVENLABS_COST_PER_1K_CHARS,
     _ELEVENLABS_MUSIC_COST_PER_TRACK,
-    _MUAPI_CLIPS_PER_SECTION,
     _MUAPI_COST_PER_CLIP,
+    _MUAPI_DEFAULT_TIER_CLIP_PRICE_FALLBACK,
     _MUAPI_IMAGE_DEFAULT_COST,
+    _MUSIC_TRACKS_ASSUMED,
     _OPENROUTER_PLANNING_FLAT,
     _append_to_ledger,
     _compute_music_cost,
     _compute_thumbnail_cost,
     _count_generated_clips,
+    _estimate_beat_count,
     _estimate_narration_chars,
     _estimate_section_count,
     _read_narration_chars_billed,
+    _resolve_clip_price,
     run_budget_authorization,
     run_cost_ledger,
 )
@@ -471,15 +474,62 @@ class TestBudgetAuthorizationCostEstimation:
 
     def test_cost_breakdown_muapi_component(self):
         sp = make_script_package(section_count=2)
+        cfg = make_config()
         with tempfile.TemporaryDirectory() as tmp:
             rec = run_budget_authorization(
                 script_package=sp,
                 episode_id="ep_test",
-                config=make_config(),
+                config=cfg,
                 output_dir=Path(tmp),
             )
-        expected_muapi = 2 * _MUAPI_CLIPS_PER_SECTION * _MUAPI_COST_PER_CLIP
+        expected_price = _resolve_clip_price(None, cfg, None)
+        expected_muapi = _estimate_beat_count(sp) * expected_price
         assert abs(rec["cost_breakdown"]["estimated_muapi_usd"] - expected_muapi) < 0.001
+
+    def test_muapi_cost_scales_with_beat_count_not_just_section_count(self):
+        """2026-09-19 regression: a long-form episode with many beats per
+        section must NOT be priced the same as a short with few beats per
+        section just because both have the same section count."""
+        few_beats = make_script_package(section_count=2)  # 2 beats/section
+        many_beats = make_script_package(section_count=2)
+        for section in many_beats["sections"]:
+            section["narration_beats"] = section["narration_beats"] * 10  # 20 beats/section
+        cfg = make_config()
+        with tempfile.TemporaryDirectory() as tmp:
+            rec_few = run_budget_authorization(
+                script_package=few_beats, episode_id="ep_few", config=cfg, output_dir=Path(tmp))
+        with tempfile.TemporaryDirectory() as tmp:
+            rec_many = run_budget_authorization(
+                script_package=many_beats, episode_id="ep_many", config=cfg, output_dir=Path(tmp))
+        assert rec_many["cost_breakdown"]["estimated_muapi_usd"] > \
+            rec_few["cost_breakdown"]["estimated_muapi_usd"] * 5
+
+    def test_muapi_cost_uses_channel_adopted_price(self):
+        sp = make_script_package(section_count=2)  # 4 beats
+        cfg = make_config()
+        with patch("hypogeum.channel_config.resolve_channel_video_model",
+                   return_value=("wan2.7-text-to-video", 0.65)):
+            with tempfile.TemporaryDirectory() as tmp:
+                rec = run_budget_authorization(
+                    script_package=sp, episode_id="ep_test", config=cfg,
+                    output_dir=Path(tmp), channel_id="twinkle_mini_tales",
+                )
+        assert abs(rec["cost_breakdown"]["estimated_muapi_usd"] - (4 * 0.65)) < 0.001
+        assert rec["cost_breakdown"]["clip_price_usd"] == 0.65
+
+    def test_music_cost_is_flat_not_scaled_by_section_count(self):
+        cfg = make_config()
+        with tempfile.TemporaryDirectory() as tmp:
+            rec_small = run_budget_authorization(
+                script_package=make_script_package(section_count=1),
+                episode_id="ep_small", config=cfg, output_dir=Path(tmp))
+        with tempfile.TemporaryDirectory() as tmp:
+            rec_big = run_budget_authorization(
+                script_package=make_script_package(section_count=6),
+                episode_id="ep_big", config=cfg, output_dir=Path(tmp))
+        expected = _MUSIC_TRACKS_ASSUMED * _ELEVENLABS_MUSIC_COST_PER_TRACK
+        assert rec_small["cost_breakdown"]["estimated_music_usd"] == round(expected, 4)
+        assert rec_big["cost_breakdown"]["estimated_music_usd"] == round(expected, 4)
 
     def test_cost_breakdown_openrouter_flat(self):
         with tempfile.TemporaryDirectory() as tmp:

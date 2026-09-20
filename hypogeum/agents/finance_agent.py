@@ -62,10 +62,22 @@ from hypogeum.schemas import validate
 # ---------------------------------------------------------------------------
 
 _ELEVENLABS_COST_PER_1K_CHARS: float = 0.30   # USD per 1,000 characters billed
-_MUAPI_COST_PER_CLIP: float = 0.15            # USD per clip (Runway rate, conservative)
-_MUAPI_CLIPS_PER_SECTION: int = 3             # clips planned per main-episode section
+_MUAPI_COST_PER_CLIP: float = 0.15            # USD per clip (Runway rate, conservative) —
+                                               # used only by run_cost_ledger's post-hoc
+                                               # fallback; the real per-provider spend of
+                                               # record is the `costs` DB table, so this
+                                               # rough constant was left as-is in the
+                                               # 2026-09-19 fix (see _resolve_clip_price
+                                               # for the channel-real-price version used by
+                                               # the pre-spend run_budget_authorization gate).
+_MUAPI_DEFAULT_TIER_CLIP_PRICE_FALLBACK: float = 0.39  # USD/clip when a channel has no
+                                               # adopted model yet — the global default tier
+                                               # (veo3.1-lite-text-to-video)'s real catalogue
+                                               # price, not an unrelated flat guess.
 _OPENROUTER_PLANNING_FLAT: float = 0.05       # flat estimate for all LLM planning calls
-_MUSIC_COST_PER_SECTION: float = 0.20         # USD per section (ElevenLabs Music generation)
+_MUSIC_TRACKS_ASSUMED: int = 1                # one continuous background track per main
+                                               # episode is the observed pattern (see
+                                               # _estimate_beat_count's sibling rationale)
 
 # Image model costs (USD per image generation call)
 _MUAPI_IMAGE_COSTS: dict = {
@@ -83,7 +95,7 @@ _ELEVENLABS_MUSIC_COST_PER_TRACK: float = 0.20   # USD per generated music track
 # the same script_package/ceiling -- part of the checkpoint binding key below,
 # so a pricing change explicitly invalidates any existing checkpointed
 # authorization rather than being silently masked by checkpoint reuse.
-_FINANCE_AUTHORIZATION_BINDING_VERSION: str = "1.0"
+_FINANCE_AUTHORIZATION_BINDING_VERSION: str = "1.1"  # 2026-09-19: beat/real-price muapi+music fix
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +139,43 @@ def _estimate_narration_chars(script_package: dict) -> int:
 
 def _estimate_section_count(script_package: dict) -> int:
     return len(script_package.get("sections", []))
+
+
+def _estimate_beat_count(script_package: dict) -> int:
+    """Total main-episode narration beats across every section — one beat
+    becomes one scene becomes one paid video clip (see hypogeum.muapi and
+    hypogeum.agents.audio_agent._collect_main_beats for the same convention
+    elsewhere in the pipeline). Section COUNT alone says nothing about how
+    many beats a section holds — a 6-section long-form episode can have
+    31+ beats total where a 6-"section" short has 6-8, so section_count was
+    silently treating both as the same clip budget (2026-09-19 fix, found
+    while testing the twinkle long-form workflow: a real 31-beat episode
+    priced out at a 6-clip short's cost)."""
+    return sum(
+        len(section.get("narration_beats", []))
+        for section in script_package.get("sections", [])
+    )
+
+
+def _resolve_clip_price(channel_id: Optional[str], config: Config, db_path: Optional[Path]) -> float:
+    """The USD price of one video clip for this channel: its own adopted
+    model's captured price when it has one, else the global default tier's
+    real catalogue price — never a flat cross-channel placeholder. A channel
+    on a $0.65/clip model must not be estimated at some other model's rate."""
+    if channel_id:
+        try:
+            from hypogeum.channel_config import resolve_channel_video_model
+            _model, price = resolve_channel_video_model(channel_id, db_path=db_path)
+            if price:
+                return float(price)
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        from hypogeum.muapi import MODEL_CREDIT_COSTS, _tier_to_model
+        model = _tier_to_model(config.MUAPI_DEFAULT_TIER, None, config)
+        return float(MODEL_CREDIT_COSTS.get(model, _MUAPI_DEFAULT_TIER_CLIP_PRICE_FALLBACK))
+    except Exception:  # noqa: BLE001
+        return _MUAPI_DEFAULT_TIER_CLIP_PRICE_FALLBACK
 
 
 def _read_narration_chars_billed(narration_package: Optional[dict]) -> int:
@@ -278,6 +327,7 @@ def run_budget_authorization(
     config: Config,
     output_dir: Optional[Path] = None,
     db_path: Optional[Path] = None,
+    channel_id: Optional[str] = None,
 ) -> dict:
     """
     Pre-run budget gate. Called after Script Engine, before VPD.
@@ -296,6 +346,9 @@ def run_budget_authorization(
                          None (default) resolves to the production DB, which
                          is correct for real pipeline runs; tests must always
                          pass an isolated path.
+        channel_id:     Channel identifier used to price the video estimate at
+                         this channel's own adopted model rate (see
+                         _resolve_clip_price). None = global default tier price.
 
     Returns:
         finance_record dict (phase="authorization") with one of:
@@ -378,13 +431,16 @@ def run_budget_authorization(
     # Check 2 — estimate basis (script_package has sections)
     # ----------------------------------------------------------------
     section_count = _estimate_section_count(script_package)
+    beat_count = _estimate_beat_count(script_package)
     narration_chars = _estimate_narration_chars(script_package)
+    clip_price = _resolve_clip_price(channel_id, config, db_path)
 
     if section_count > 0:
         _add_check(checks, failures, warnings,
                    "c_estimate_basis", "pass",
-                   f"Estimate basis: {section_count} sections, "
-                   f"{narration_chars:,} narration characters")
+                   f"Estimate basis: {section_count} sections, {beat_count} beats "
+                   f"(= planned clips), {narration_chars:,} narration characters, "
+                   f"${clip_price:.2f}/clip")
     else:
         _add_check(checks, failures, warnings,
                    "c_estimate_basis", "warn",
@@ -393,10 +449,16 @@ def run_budget_authorization(
     # ----------------------------------------------------------------
     # Compute cost breakdown
     # ----------------------------------------------------------------
+    # 2026-09-19: estimated_muapi_usd used to be section_count * a fixed
+    # "3 clips/section" guess at a flat $0.15 "Runway rate" — a short's clip
+    # budget applied unchanged to every episode regardless of actual length,
+    # and ignoring the channel's real adopted model price. One beat is one
+    # planned video clip (see _estimate_beat_count's docstring); price it at
+    # what this channel's clips actually cost.
     estimated_narration_usd = (narration_chars / 1000.0) * _ELEVENLABS_COST_PER_1K_CHARS
-    estimated_muapi_usd = section_count * _MUAPI_CLIPS_PER_SECTION * _MUAPI_COST_PER_CLIP
+    estimated_muapi_usd = beat_count * clip_price
     estimated_openrouter_usd = _OPENROUTER_PLANNING_FLAT
-    estimated_music_usd = section_count * _MUSIC_COST_PER_SECTION
+    estimated_music_usd = _MUSIC_TRACKS_ASSUMED * _ELEVENLABS_MUSIC_COST_PER_TRACK
     total_estimated = (
         estimated_narration_usd
         + estimated_muapi_usd
@@ -411,6 +473,8 @@ def run_budget_authorization(
         "estimated_music_usd": round(estimated_music_usd, 4),
         "total_estimated_usd": round(total_estimated, 4),
         "section_count": section_count,
+        "beat_count": beat_count,
+        "clip_price_usd": round(clip_price, 4),
         "narration_chars": narration_chars,
     }
 

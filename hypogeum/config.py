@@ -378,6 +378,16 @@ class Config:
     ELEVENLABS_MUSIC_DEFAULT_DURATION: int # default: 120 (seconds; multiply by 1000 for API ms)
 
     # ------------------------------------------------------------------
+    # VODER — local, free music generation (2026-09-20). Evaluated as an
+    # ElevenLabs Music alternative; see hypogeum/voder_music.py. Voice
+    # modes (TTS/cloning) are NOT wired in — VODER's length control on
+    # those was found unreliable during evaluation.
+    # ------------------------------------------------------------------
+    MUSIC_PROVIDER: str                    # "elevenlabs" (default) or "voder"
+    VODER_HOME: Optional[str]              # path to the VODER checkout; None disables voder
+    VODER_TTM_TIMEOUT_SECONDS: int         # default: 900 (music gen; first run also downloads models)
+
+    # ------------------------------------------------------------------
     # BytePlus ModelArk — Seedance 2.0 official direct provider (Phase 1H)
     # ------------------------------------------------------------------
     BYTEPLUS_ARK_API_KEY: Optional[str]
@@ -786,6 +796,12 @@ class Config:
         self.ELEVENLABS_MUSIC_DEFAULT_DURATION = _get_int(
             "ELEVENLABS_MUSIC_DEFAULT_DURATION", default=120
         )
+
+        # --- VODER (local music generation) ---
+        self.MUSIC_PROVIDER = (_get_optional("MUSIC_PROVIDER", default="elevenlabs") or "elevenlabs").lower()
+        self.VODER_HOME = _get_optional("VODER_HOME")
+        self.VODER_TTM_TIMEOUT_SECONDS = _get_int("VODER_TTM_TIMEOUT_SECONDS", default=900)
+
         # Background music is a required deliverable: when True (default),
         # a render with any section left without music is an assembly QA
         # FAILURE, not a warning. Set MUSIC_REQUIRED=false only for a

@@ -282,6 +282,13 @@ class ModelProfile:
     # probe evidence → treated as unqualified.
     video_model_native_width:  Optional[int] = None
     video_model_native_height: Optional[int] = None
+    # Per-channel background-music provider override ("elevenlabs" | "voder").
+    # None (default) = use the global config.MUSIC_PROVIDER for this channel.
+    # Added 2026-09-20 so a channel can run on VODER (free, local) while
+    # another stays on ElevenLabs, without a factory-wide env flag forcing
+    # the same choice on every channel. See hypogeum.elevenlabs.generate_
+    # music_track()'s channel_id-first resolution and hypogeum/voder_music.py.
+    music_provider: Optional[str] = None
     created_at:        str            = ""
     metadata_version:  str            = METADATA_VERSION
 
@@ -664,6 +671,8 @@ _MODEL_PROFILE_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     # (treated as unqualified — re-run the bake-off).
     ("video_model_native_width", "INTEGER"),
     ("video_model_native_height", "INTEGER"),
+    # 2026-09-20: per-channel music provider override — see ModelProfile.music_provider's own docstring.
+    ("music_provider", "TEXT"),
 ]
 
 
@@ -775,6 +784,8 @@ def _row_to_model(row) -> ModelProfile:
         video_model_native_height = (
             row["video_model_native_height"]
             if "video_model_native_height" in row.keys() else None),
+        music_provider = (
+            row["music_provider"] if "music_provider" in row.keys() else None),
         created_at        = row["created_at"],
         metadata_version  = row["metadata_version"],
     )
@@ -1221,6 +1232,7 @@ def update_model_profile(
         "video_model_duration_seconds",
         "video_i2v_model", "video_i2v_model_price_usd", "video_i2v_model_duration_seconds",
         "video_model_native_width", "video_model_native_height",
+        "music_provider",
     }
     try:
         assignments, params = [], []
@@ -1280,6 +1292,25 @@ def resolve_channel_video_model(
         return mp.video_model, mp.video_model_price_usd
     except Exception:  # noqa: BLE001
         return None, None
+
+
+def resolve_channel_music_provider(
+    channel_id: str, db_path: Optional[Path] = None,
+) -> Optional[str]:
+    """This channel's music-provider override ("elevenlabs" | "voder"), or
+    None when it has no model profile or no override set -- callers then
+    fall back to the global config.MUSIC_PROVIDER. Never raises. Mirrors
+    resolve_channel_video_model for the music-provider field."""
+    try:
+        ch = get_channel_profile(channel_id, db_path=db_path)
+        if not ch or not ch.model_profile_id:
+            return None
+        mp = get_model_profile(ch.model_profile_id, db_path=db_path)
+        if not mp or not mp.music_provider:
+            return None
+        return mp.music_provider
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def resolve_channel_i2v_model(

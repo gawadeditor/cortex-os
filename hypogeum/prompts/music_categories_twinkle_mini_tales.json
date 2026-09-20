@@ -1,0 +1,16 @@
+{
+  "_meta": {
+    "PROMPT_VERSION": "v1",
+    "OWNER_AGENT": "music_agent",
+    "MODEL_TARGET": "channel-agnostic (elevenlabs/music_v1 or voder/acestep)",
+    "PURPOSE": "Category-specific background music generation prompts for twinkle_mini_tales — a bedtime lullaby channel for ages 2-6. Same category KEYS as hypogeum's music_categories.json (the narrative-signal-to-category mapping in timeline_builder.py is shared and unaware of channel), reworded so each slot fits the channel's own tone (gentle, whimsical, soothing, wonder-filled — see channel_creative_brief) instead of hypogeum's documentary/mystery register. Added 2026-09-20 after discovering twinkle's real published episodes were scored with hypogeum's 'Slow atmospheric dark underscore... unresolved tension' Mystery track."
+  },
+  "categories": {
+    "Mystery": "Soft, curious lullaby underscore. Solo music box or gentle celesta only. 60-70 BPM. No percussion. A small, cosy wonder — never eerie, never unresolved tension. Background underscore level, for a bedtime story's gentle question.",
+    "Discovery": "Warm, unhurried lullaby with a light, hopeful lift. 65-80 BPM. Soft strings or a single acoustic guitar entering gently mid-track. Arc from quiet to a little brighter, never building to a climax. Underscore level throughout.",
+    "Investigation": "Playful, unhurried music-box pattern with soft plucked strings. 60-75 BPM. Convey gentle, curious searching — like tiptoeing through a quiet forest — never urgency. Underscore only.",
+    "Ancient Civilizations": "Gentle lullaby with a light storybook-fairytale character — soft harp or celesta, warm and dreamy. 60-70 BPM. Evocative of an old, cosy bedtime tale, not an ancient world.",
+    "Tension": "The gentlest version of a wobble: soft, slightly uncertain music-box motif, still warm underneath. 65-80 BPM. Convey a small, safe worry that a child can feel resolve — never dissonant, never urgent, never unresolved by the track's end.",
+    "Resolution": "Warm, slowing lullaby — solo piano or soft strings, drifting toward stillness. 50-65 BPM and slowing further. A sense of settling into sleep, safe and held. Natural fade to near-silence is ideal."
+  }
+}

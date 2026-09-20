@@ -86,6 +86,8 @@ from hypogeum.execution_envelope import GenerationExecutionEnvelope
 from hypogeum.prompt_loader import load_music_categories
 
 _MUSIC_CATEGORIES_FILE = Path(__file__).resolve().parent / "prompts" / "music_categories.json"
+_MUSIC_PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
+_CHANNEL_MUSIC_CATEGORY_CACHE: dict[str, dict] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -1500,7 +1502,7 @@ def _generate_music_via_gate(
     )
     from hypogeum.provider_receipt import WriteAheadReceiptStore
 
-    prompt = _build_music_prompt(category=category, tone_arc=tone_arc)
+    prompt = _build_music_prompt(category=category, tone_arc=tone_arc, channel_id=channel_id)
     model_id = config.ELEVENLABS_MUSIC_MODEL_ID or _MUSIC_DEFAULT_MODEL_ID
 
     duration_ms = int(required_duration_seconds * 1000)
@@ -1644,6 +1646,67 @@ def _generate_music_via_gate(
     )
 
 
+def _generate_music_via_voder(
+    *, category: str, required_duration_seconds: float, tone_arc: Optional[str],
+    channel_id: Optional[str], library_path: Path, assets_root: Path, config: Config, log,
+) -> MusicTrackResult:
+    """
+    Cache-miss music generation via VODER (hypogeum.voder_music) — local,
+    free, no reservation/grant/gate. Mirrors the ElevenLabs legacy branch's
+    asset-storage and library-write shape exactly (same MusicTrackResult,
+    same music-library.json entry shape) so nothing downstream needs to
+    know which provider actually generated a given track; only
+    provider="voder" in the library entry and $0.00 in the cost ledger
+    tell them apart.
+    """
+    from hypogeum.voder_music import VoderMusicError, generate_music_via_voder
+
+    prompt = _build_music_prompt(category=category, tone_arc=tone_arc, channel_id=channel_id)
+
+    track_id = str(uuid.uuid4())
+    category_slug = _MUSIC_CATEGORY_SLUGS.get(category, category.lower().replace(" ", "-"))
+    channel_prefix = f"channel/{channel_id}" if channel_id and channel_id != "hypogeum" else "channel"
+    music_dir = assets_root / channel_prefix / "music" / category_slug
+    music_dir.mkdir(parents=True, exist_ok=True)
+    local_path = music_dir / f"{category_slug}_{track_id}.wav"
+    asset_id = f"{channel_prefix}/music/{category_slug}/{category_slug}_{track_id}"
+
+    try:
+        actual_duration_seconds = generate_music_via_voder(
+            style_prompt=prompt, required_duration_seconds=required_duration_seconds,
+            output_path=local_path, config=config, log=log,
+        )
+    except VoderMusicError as exc:
+        raise ElevenLabsError(f"VODER music generation failed for category {category!r}: {exc}") from exc
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    new_entry = {
+        "track_id": track_id,
+        "category": category,
+        "path": asset_id,
+        "source": "ai_generated",
+        "provider": "voder",
+        "model_id": "acestep",
+        "duration_seconds": actual_duration_seconds,
+        "prompt_used": prompt,
+        "generated_at": now_iso,
+        "usage_count": 0,
+        "last_used_date": None,
+    }
+    _append_to_music_library(library_path=library_path, entry=new_entry, log=log)
+
+    _finance.record_cost(
+        provider="voder", model="acestep", call_type="music",
+        cost_usd=0.0, tokens_or_credits=actual_duration_seconds, asset_id=asset_id,
+    )
+
+    return MusicTrackResult(
+        track_id=track_id, category=category, asset_id=asset_id,
+        local_path=local_path, source="ai_generated",
+        duration_seconds=actual_duration_seconds, prompt_used=prompt,
+    )
+
+
 def generate_music_track(
     category: str,
     required_duration_seconds: float,
@@ -1682,10 +1745,34 @@ def generate_music_track(
     """
     log = get_logger(episode_id=episode_id, agent=agent or "elevenlabs_music")
 
-    if not config.ELEVENLABS_API_KEY:
+    # Per-channel override (ModelProfile.music_provider) beats the global
+    # config.MUSIC_PROVIDER default — 2026-09-20, so one channel can run on
+    # VODER while another stays on ElevenLabs without a factory-wide flag.
+    effective_provider = config.MUSIC_PROVIDER
+    if channel_id:
+        try:
+            from hypogeum.channel_config import resolve_channel_music_provider
+            override = resolve_channel_music_provider(channel_id)
+            if override:
+                effective_provider = override
+        except Exception:  # noqa: BLE001
+            pass
+
+    using_voder = effective_provider == "voder"
+    if not using_voder and not config.ELEVENLABS_API_KEY:
         raise ElevenLabsAuthFailure()
 
-    library_path = assets_root / "channel" / "music" / _MUSIC_LIBRARY_FILENAME
+    # Per-channel library (2026-09-20): "hypogeum" (and any caller with no
+    # channel_id) keeps the original shared path — it already has a real,
+    # paid-for track cache there and must not be orphaned. Every other
+    # channel gets its own library, so a channel's tracks are never mixed
+    # with another channel's mood/category (see
+    # project_twinkle_music_library_gap_20260920 — twinkle's real episodes
+    # were being scored with hypogeum's Mystery/Tension documentary tracks).
+    if channel_id and channel_id != "hypogeum":
+        library_path = assets_root / "channel" / channel_id / "music" / _MUSIC_LIBRARY_FILENAME
+    else:
+        library_path = assets_root / "channel" / "music" / _MUSIC_LIBRARY_FILENAME
 
     # ------------------------------------------------------------------
     # §5.A Library search gate
@@ -1707,6 +1794,17 @@ def generate_music_track(
     )
     if hit is not None:
         return hit
+
+    # ------------------------------------------------------------------
+    # Cache miss, VODER path — local, free, no reservation/grant needed.
+    # See hypogeum/voder_music.py's own docstring for scope (music only).
+    # ------------------------------------------------------------------
+    if using_voder:
+        return _generate_music_via_voder(
+            category=category, required_duration_seconds=required_duration_seconds,
+            tone_arc=tone_arc, channel_id=channel_id, library_path=library_path,
+            assets_root=assets_root, config=config, log=log,
+        )
 
     # Weekly reservation boundary -- established BEFORE the gate branch so
     # BOTH the grant-derived gate path and the legacy path carry it. Music
@@ -1747,7 +1845,7 @@ def generate_music_track(
     # ------------------------------------------------------------------
     # Cache miss — generate via ElevenLabs Music POST /v1/music
     # ------------------------------------------------------------------
-    prompt = _build_music_prompt(category=category, tone_arc=tone_arc)
+    prompt = _build_music_prompt(category=category, tone_arc=tone_arc, channel_id=channel_id)
     model_id = config.ELEVENLABS_MUSIC_MODEL_ID or _MUSIC_DEFAULT_MODEL_ID
 
     # C3: Convert seconds to milliseconds; clamp to API range
@@ -1849,14 +1947,15 @@ def generate_music_track(
     # ------------------------------------------------------------------
     track_id = str(uuid.uuid4())
     category_slug = _MUSIC_CATEGORY_SLUGS.get(category, category.lower().replace(" ", "-"))
-    music_dir = assets_root / "channel" / "music" / category_slug
+    channel_prefix = f"channel/{channel_id}" if channel_id and channel_id != "hypogeum" else "channel"
+    music_dir = assets_root / channel_prefix / "music" / category_slug
     music_dir.mkdir(parents=True, exist_ok=True)
 
     filename = f"{category_slug}_{track_id}.mp3"
     local_path = music_dir / filename
     local_path.write_bytes(audio_bytes)
 
-    asset_id = f"channel/music/{category_slug}/{category_slug}_{track_id}"
+    asset_id = f"{channel_prefix}/music/{category_slug}/{category_slug}_{track_id}"
 
     log.info(
         "elevenlabs_music_library_written",
@@ -2172,12 +2271,42 @@ def repair_music_library_durations(
     return result
 
 
-def _build_music_prompt(category: str, tone_arc: Optional[str]) -> str:
+def _resolve_music_category_prompts(channel_id: Optional[str]) -> dict:
+    """
+    Category name -> prompt text, for this channel.
+
+    The category KEYS ("Mystery", "Discovery", ...) are shared/global —
+    timeline_builder.py's narrative-signal-to-category mapping picks one
+    of these names without any channel awareness, so changing the key set
+    per channel would break that mapping. What *is* channel-specific is
+    the prompt TEXT behind each key: hypogeum's "Mystery" means an
+    atmospheric documentary underscore; a bedtime channel's "Mystery"
+    should mean a soft, curious lullaby motif. Added 2026-09-20 after
+    twinkle's real episodes were found scored with hypogeum's mystery/
+    tension tracks verbatim (see memory: project_twinkle_music_library_gap_20260920).
+
+    Falls back to the global file when no `music_categories_{channel_id}.json`
+    exists for this channel, or when channel_id is None.
+    """
+    if not channel_id:
+        return _MUSIC_CATEGORY_PROMPTS
+    if channel_id in _CHANNEL_MUSIC_CATEGORY_CACHE:
+        return _CHANNEL_MUSIC_CATEGORY_CACHE[channel_id]
+    channel_file = _MUSIC_PROMPTS_DIR / f"music_categories_{channel_id}.json"
+    prompts = load_music_categories(channel_file) if channel_file.exists() else _MUSIC_CATEGORY_PROMPTS
+    _CHANNEL_MUSIC_CATEGORY_CACHE[channel_id] = prompts
+    return prompts
+
+
+def _build_music_prompt(
+    category: str, tone_arc: Optional[str], channel_id: Optional[str] = None,
+) -> str:
     """
     Construct the music generation prompt from category + optional tone arc.
     Tone arc extension capped at _TONE_ARC_MAX_CHARS per §15 security consideration.
     """
-    base = _MUSIC_CATEGORY_PROMPTS.get(category, category)
+    category_prompts = _resolve_music_category_prompts(channel_id)
+    base = category_prompts.get(category, category)
     if not tone_arc or not tone_arc.strip():
         return base
     arc = tone_arc.strip()[:_TONE_ARC_MAX_CHARS]

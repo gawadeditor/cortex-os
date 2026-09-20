@@ -62,3 +62,13 @@ operating_grant_spec_*.json
 # Local environment backups / scratch PR bodies — never commit
 .env.bak.*
 PR_BODY.md
+
+# VODER (2026-09-20) — vendored external tool, own git history/model
+# weights. Local music-generation provider (hypogeum/voder_music.py) —
+# see MUSIC_PROVIDER in config.py. Never tracked inside this repo.
+vendor/voder/VODER/
+
+# MoneyPrinterTurbo (2026-09-19) — vendored external repo, cloned for a
+# source-level review only (SEO/metadata generation patterns). Own git
+# history; never tracked inside this repo.
+experiments/moneyprinterturbo_review/MoneyPrinterTurbo/

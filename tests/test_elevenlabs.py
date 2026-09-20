@@ -69,6 +69,9 @@ from hypogeum.elevenlabs import (
     _SRT_MAX_WORDS_PER_LINE,
     MUSIC_USD_PER_SEC,
     _MUSIC_MAX_DURATION_MS,
+    _build_music_prompt,
+    _resolve_music_category_prompts,
+    _CHANNEL_MUSIC_CATEGORY_CACHE,
 )
 
 
@@ -1426,3 +1429,158 @@ class TestProbeAudioDurationSeconds:
     def test_rate_limit_no_arg_init(self):
         exc = ElevenLabsRateLimitError()
         assert "429" in str(exc)
+
+
+# ---------------------------------------------------------------------------
+# TestChannelSpecificMusicCategories — 2026-09-20
+# ---------------------------------------------------------------------------
+
+class TestChannelSpecificMusicCategories:
+    def setup_method(self):
+        _CHANNEL_MUSIC_CATEGORY_CACHE.clear()
+
+    def test_no_channel_id_uses_global_prompts(self):
+        prompts = _resolve_music_category_prompts(None)
+        assert "atmospheric" in prompts["Mystery"].lower()
+
+    def test_unknown_channel_falls_back_to_global(self):
+        prompts = _resolve_music_category_prompts("some_channel_with_no_file")
+        assert "atmospheric" in prompts["Mystery"].lower()
+
+    def test_twinkle_gets_its_own_prompts(self):
+        prompts = _resolve_music_category_prompts("twinkle_mini_tales")
+        assert "lullaby" in prompts["Mystery"].lower()
+        assert "atmospheric" not in prompts["Mystery"].lower()
+
+    def test_twinkle_prompts_are_cached(self):
+        first = _resolve_music_category_prompts("twinkle_mini_tales")
+        assert "twinkle_mini_tales" in _CHANNEL_MUSIC_CATEGORY_CACHE
+        second = _resolve_music_category_prompts("twinkle_mini_tales")
+        assert first is second
+
+    def test_build_music_prompt_routes_by_channel(self):
+        hypogeum_prompt = _build_music_prompt("Mystery", tone_arc=None, channel_id=None)
+        twinkle_prompt = _build_music_prompt("Mystery", tone_arc=None, channel_id="twinkle_mini_tales")
+        assert hypogeum_prompt != twinkle_prompt
+        assert "lullaby" in twinkle_prompt.lower()
+
+
+# ---------------------------------------------------------------------------
+# TestVoderMusicProviderRouting — 2026-09-20
+# ---------------------------------------------------------------------------
+
+class TestVoderMusicProviderRouting:
+    def _config_for_voder(self, tmp_path, api_key=None):
+        cfg = _make_config(api_key=api_key or "")
+        cfg.MUSIC_PROVIDER = "voder"
+        cfg.VODER_HOME = str(tmp_path / "voder_home")
+        return cfg
+
+    def _mock_voder_success(self, duration=45.0):
+        return patch(
+            "hypogeum.voder_music.generate_music_via_voder", return_value=duration,
+        )
+
+    def test_voder_provider_does_not_require_elevenlabs_key(self, tmp_path):
+        cfg = self._config_for_voder(tmp_path, api_key="")
+        with self._mock_voder_success(), \
+             patch("hypogeum.elevenlabs._finance.record_cost"):
+            result = generate_music_track(
+                category="Resolution", required_duration_seconds=45.0,
+                config=cfg, episode_id="ep_001", assets_root=tmp_path,
+                channel_id="test_channel_no_prod_override",
+            )
+        assert result.source == "ai_generated"
+
+    def test_voder_provider_writes_to_per_channel_library(self, tmp_path):
+        cfg = self._config_for_voder(tmp_path)
+        with self._mock_voder_success(), \
+             patch("hypogeum.elevenlabs._finance.record_cost"):
+            generate_music_track(
+                category="Resolution", required_duration_seconds=45.0,
+                config=cfg, episode_id="ep_001", assets_root=tmp_path,
+                channel_id="test_channel_no_prod_override",
+            )
+        per_channel_library = tmp_path / "channel" / "test_channel_no_prod_override" / "music" / "music-library.json"
+        shared_library = tmp_path / "channel" / "music" / "music-library.json"
+        assert per_channel_library.exists()
+        assert not shared_library.exists()
+
+    def test_hypogeum_channel_keeps_shared_library(self, tmp_path):
+        cfg = self._config_for_voder(tmp_path)
+        with self._mock_voder_success(), \
+             patch("hypogeum.elevenlabs._finance.record_cost"):
+            generate_music_track(
+                category="Resolution", required_duration_seconds=45.0,
+                config=cfg, episode_id="ep_001", assets_root=tmp_path,
+                channel_id="hypogeum",
+            )
+        shared_library = tmp_path / "channel" / "music" / "music-library.json"
+        assert shared_library.exists()
+
+    def test_voder_library_entry_records_provider_and_zero_cost(self, tmp_path):
+        cfg = self._config_for_voder(tmp_path)
+        with self._mock_voder_success(duration=45.0), \
+             patch("hypogeum.elevenlabs._finance.record_cost") as mock_record_cost:
+            generate_music_track(
+                category="Resolution", required_duration_seconds=45.0,
+                config=cfg, episode_id="ep_001", assets_root=tmp_path,
+                channel_id="test_channel_no_prod_override",
+            )
+        library_path = tmp_path / "channel" / "test_channel_no_prod_override" / "music" / "music-library.json"
+        import json as _json
+        entry = _json.loads(library_path.read_text())["tracks"][0]
+        assert entry["provider"] == "voder"
+        assert entry["source"] == "ai_generated"
+        kwargs = mock_record_cost.call_args[1]
+        assert kwargs["provider"] == "voder"
+        assert kwargs["cost_usd"] == 0.0
+
+    def test_voder_failure_raises_elevenlabs_error(self, tmp_path):
+        cfg = self._config_for_voder(tmp_path)
+        from hypogeum.voder_music import VoderMusicError
+        with patch("hypogeum.voder_music.generate_music_via_voder",
+                   side_effect=VoderMusicError("boom")):
+            with pytest.raises(ElevenLabsError):
+                generate_music_track(
+                    category="Resolution", required_duration_seconds=45.0,
+                    config=cfg, episode_id="ep_001", assets_root=tmp_path,
+                    channel_id="test_channel_no_prod_override",
+                )
+
+    def test_default_provider_still_requires_elevenlabs_key(self, tmp_path):
+        """Regression guard: only the voder path skips the API-key check —
+        the default (unset MUSIC_PROVIDER) elevenlabs path must not."""
+        cfg = _make_config(api_key="")
+        with pytest.raises(ElevenLabsAuthFailure):
+            generate_music_track(
+                category="Resolution", required_duration_seconds=45.0,
+                config=cfg, episode_id="ep_001", assets_root=tmp_path,
+                channel_id="test_channel_no_prod_override",
+            )
+
+    def test_channel_override_beats_global_default(self, tmp_path):
+        """A channel with music_provider='voder' on its ModelProfile must
+        route to VODER even when the factory-wide config.MUSIC_PROVIDER is
+        still 'elevenlabs' — one channel opts in without a global flag."""
+        cfg = _make_config(api_key="")
+        cfg.MUSIC_PROVIDER = "elevenlabs"  # factory-wide default unchanged
+        with patch("hypogeum.channel_config.resolve_channel_music_provider", return_value="voder"), \
+             self._mock_voder_success(), \
+             patch("hypogeum.elevenlabs._finance.record_cost"):
+            result = generate_music_track(
+                category="Resolution", required_duration_seconds=45.0,
+                config=cfg, episode_id="ep_001", assets_root=tmp_path,
+                channel_id="some_channel_with_override",
+            )
+        assert result.source == "ai_generated"
+
+    def test_channel_with_no_override_uses_global_default(self, tmp_path):
+        cfg = _make_config(api_key="")  # elevenlabs default, no key -> must fail closed
+        with patch("hypogeum.channel_config.resolve_channel_music_provider", return_value=None):
+            with pytest.raises(ElevenLabsAuthFailure):
+                generate_music_track(
+                    category="Resolution", required_duration_seconds=45.0,
+                    config=cfg, episode_id="ep_001", assets_root=tmp_path,
+                    channel_id="some_channel_without_override",
+                )

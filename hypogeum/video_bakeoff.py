@@ -556,13 +556,23 @@ def list_bakeoffs(channel_id: Optional[str] = None, limit: int = 20) -> list[dic
 
 
 def latest_model_resolution(
-    model: str, channel_id: Optional[str] = None,
+    model: str, channel_id: Optional[str] = None, aspect_ratio: Optional[str] = None,
 ) -> Optional[tuple[int, int]]:
     """Most-recent real (non-dry) bake-off (width, height) measured for
-    `model` — optionally scoped to one channel. None when there is no
-    resolution evidence for it (never ran, only ran dry, or ran before
-    resolution was recorded and was not back-filled). Callers treat None
-    as "unqualified", never as "fine".
+    `model` — optionally scoped to one channel and/or one requested
+    aspect_ratio ("16:9" / "9:16"). None when there is no resolution
+    evidence for it (never ran, only ran dry, or ran before resolution was
+    recorded and was not back-filled). Callers treat None as "unqualified",
+    never as "fine".
+
+    aspect_ratio scoping exists because a model's actual output orientation
+    follows the aspect_ratio it was asked to render, not a fixed property of
+    the model itself (confirmed 2026-09-19: wan2.7-text-to-video renders
+    genuine 1280x720 landscape when asked for "16:9", not just the 720x1280
+    portrait every prior twinkle run requested). A channel that has only
+    ever bake-off'd a model at one aspect ratio has no evidence for the
+    other — pass aspect_ratio to avoid returning a same-model measurement
+    from the wrong orientation as if it qualified for both.
 
     Manifests are scanned newest-first; `_generate_one` records width/height
     on every successful clip and `scripts/backfill_bakeoff_resolution.py`
@@ -576,6 +586,8 @@ def latest_model_resolution(
         if not m or m.get("dry_run"):
             continue
         if channel_id and m.get("channel_id") != channel_id:
+            continue
+        if aspect_ratio and m.get("aspect_ratio") != aspect_ratio:
             continue
         manifests.append(m)
     manifests.sort(key=lambda m: m.get("created_at") or "", reverse=True)

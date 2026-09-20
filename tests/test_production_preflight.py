@@ -119,6 +119,68 @@ class TestVideoModelGate:
         ok, why, _ = evaluate_candidate_video_model("ch_cand", "no-evidence-model", db_path=db_path)
         assert ok is False
 
+    def test_same_model_qualifies_long_form_via_aspect_scoped_evidence(self, db_path, tmp_path, monkeypatch):
+        """A channel adopted a model while shorts-only (cached native
+        resolution is portrait, from a "9:16" bake-off). Switching the
+        channel to long-form needs landscape — the cached value now
+        mismatches orientation, but a separate bake-off of the SAME model at
+        "16:9" exists with qualifying evidence. This must pass: one adopted
+        model can serve both formats once each aspect ratio has its own
+        bake-off evidence (2026-09-19, wan2.7-text-to-video case)."""
+        import json
+        from hypogeum import video_bakeoff as bo
+        from hypogeum.channel_config import update_channel_operations_profile, update_model_profile
+
+        monkeypatch.setattr(bo, "_BAKEOFF_ROOT", tmp_path / "bakeoffs")
+
+        mp_id = _channel(db_path, "ch_dual", shorts_only=True)
+        update_model_profile(mp_id, db_path=db_path, video_model="wan2.7-text-to-video",
+                             video_model_native_width=720, video_model_native_height=1280)
+
+        run_dir = tmp_path / "bakeoffs" / "20260919T000000-landscape"
+        run_dir.mkdir(parents=True)
+        (run_dir / "manifest.json").write_text(json.dumps({
+            "run_id": "20260919T000000-landscape",
+            "channel_id": "ch_dual",
+            "aspect_ratio": "16:9",
+            "created_at": "2026-09-19T00:00:00Z",
+            "dry_run": False,
+            "results": [{
+                "model": "wan2.7-text-to-video", "ok": True,
+                "width": 1280, "height": 720,
+            }],
+        }))
+
+        # Still shorts-only: cached portrait value matches, passes as before.
+        assert_video_model_qualified("ch_dual", db_path=db_path)
+
+        # Switch to long-form: cached value is now the wrong orientation,
+        # but the 16:9-scoped bake-off evidence for the same model qualifies.
+        update_channel_operations_profile(
+            "ch_dual", db_path=db_path,
+            production_cadence={"videos_per_week": 1},
+        )
+        assert_video_model_qualified("ch_dual", db_path=db_path)  # no raise
+
+    def test_same_model_long_form_denied_without_aspect_evidence(self, db_path, tmp_path, monkeypatch):
+        """Same setup, but with NO 16:9 bake-off evidence at all — the
+        cached portrait value must not be trusted for a landscape
+        deliverable just because the model is already adopted."""
+        from hypogeum import video_bakeoff as bo
+        from hypogeum.channel_config import update_channel_operations_profile, update_model_profile
+
+        monkeypatch.setattr(bo, "_BAKEOFF_ROOT", tmp_path / "bakeoffs_empty")
+
+        mp_id = _channel(db_path, "ch_dual_noev", shorts_only=True)
+        update_model_profile(mp_id, db_path=db_path, video_model="wan2.7-text-to-video",
+                             video_model_native_width=720, video_model_native_height=1280)
+        update_channel_operations_profile(
+            "ch_dual_noev", db_path=db_path,
+            production_cadence={"videos_per_week": 1},
+        )
+        with pytest.raises(VideoModelNotQualifiedError):
+            assert_video_model_qualified("ch_dual_noev", db_path=db_path)
+
 
 # --- gate 2: duplicate topic ---------------------------------------------
 

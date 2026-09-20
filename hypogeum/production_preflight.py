@@ -156,20 +156,34 @@ def evaluate_channel_video_model(
         return True, "", {"adopted_model": None}
 
     req_w, req_h = channel_deliverable_resolution(channel_id, db_path=db_path)
+    required_aspect = "9:16" if req_h > req_w else "16:9"
 
-    # Prefer the resolution captured on the model profile at adoption time;
-    # fall back to a live scan of this channel's bake-off manifests.
+    # Prefer the resolution captured on the model profile at adoption time —
+    # but ONLY when its orientation actually matches what THIS run needs.
+    # A model is adopted once, at whatever aspect ratio the channel's mode
+    # was at adoption time (e.g. twinkle adopted wan2.7 while shorts-only,
+    # caching its 720x1280 portrait clip). That cached value says nothing
+    # about the model's landscape output — the same model can render a
+    # different real orientation for a different requested aspect_ratio
+    # (confirmed 2026-09-19: wan2.7-text-to-video is genuinely 1280x720 at
+    # "16:9", not just upscaled/cropped portrait). So an orientation
+    # mismatch against the cached value falls through to a fresh,
+    # aspect-scoped bake-off scan rather than failing immediately — this is
+    # what lets one adopted model serve a channel that runs both shorts and
+    # long-form, as long as each aspect ratio has its own bake-off evidence.
     native: Optional[Tuple[int, int]] = None
     try:
         from hypogeum.channel_config import get_channel_profile, get_model_profile
         ch = get_channel_profile(channel_id, db_path=db_path)
         mp = get_model_profile(ch.model_profile_id, db_path=db_path) if ch and ch.model_profile_id else None
         if mp and mp.video_model_native_width and mp.video_model_native_height:
-            native = (mp.video_model_native_width, mp.video_model_native_height)
+            cached_portrait = mp.video_model_native_height > mp.video_model_native_width
+            if cached_portrait == (required_aspect == "9:16"):
+                native = (mp.video_model_native_width, mp.video_model_native_height)
     except Exception:  # noqa: BLE001
         native = None
     if native is None:
-        native = latest_model_resolution(model, channel_id)
+        native = latest_model_resolution(model, channel_id, aspect_ratio=required_aspect)
 
     detail = {
         "adopted_model": model,

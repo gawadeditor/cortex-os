@@ -32,9 +32,11 @@ from hypogeum.agents.finance_agent import (
     _compute_thumbnail_cost,
     _count_generated_clips,
     _estimate_beat_count,
+    _estimate_clip_count,
     _estimate_narration_chars,
     _estimate_section_count,
     _read_narration_chars_billed,
+    _resolve_clip_duration_seconds,
     _resolve_clip_price,
     run_budget_authorization,
     run_cost_ledger,
@@ -73,6 +75,25 @@ def make_script_package(section_count: int = 3, chars_per_beat: int = 200) -> di
     return {
         "episode_metadata": {"episode_id": "ep_test"},
         "sections": sections,
+        "shorts_scripts": [],
+        "traceability_manifest": {},
+        "script_integrity": {},
+    }
+
+
+def make_worded_script_package(beat_word_counts: list[int]) -> dict:
+    """A script_package with one section whose beats have REAL space-
+    separated word counts (unlike make_script_package's "AAAA..." beats,
+    which .split() treats as a single one-word token regardless of char
+    count) — needed to exercise _estimate_clip_count's word-based duration
+    estimate."""
+    beats = [
+        {"beat_id": f"b_{i}", "text": " ".join(["word"] * n)}
+        for i, n in enumerate(beat_word_counts)
+    ]
+    return {
+        "episode_metadata": {"episode_id": "ep_test"},
+        "sections": [{"section_id": "sec_0", "title": "Section 0", "narration_beats": beats}],
         "shorts_scripts": [],
         "traceability_manifest": {},
         "script_integrity": {},
@@ -459,6 +480,44 @@ class TestBudgetAuthorizationCostEstimation:
     def test_estimate_section_count_empty(self):
         assert _estimate_section_count({}) == 0
 
+    def test_estimate_clip_count_short_beat_needs_one_clip(self):
+        # 5 words at 1.8 wps ~= 2.8s -- well under an 8s clip.
+        sp = make_worded_script_package([5])
+        assert _estimate_clip_count(sp, clip_duration_seconds=8.0) == 1
+
+    def test_estimate_clip_count_long_beat_needs_multiple_clips(self):
+        """2026-09-20 regression: the real long-form finding — a beat with
+        real narration well over one clip's length needs several clips,
+        not one. At 1.8 wps, 30 words ~= 16.7s; at a 5.4s clip,
+        ceil(16.7/5.4) = 4."""
+        sp = make_worded_script_package([30])
+        assert _estimate_clip_count(sp, clip_duration_seconds=5.4) == 4
+
+    def test_estimate_clip_count_sums_across_beats(self):
+        sp = make_worded_script_package([5, 30])  # 1 clip + 4 clips
+        assert _estimate_clip_count(sp, clip_duration_seconds=5.4) == 5
+
+    def test_estimate_clip_count_empty_beat_contributes_nothing(self):
+        sp = make_worded_script_package([0, 5])
+        assert _estimate_clip_count(sp, clip_duration_seconds=8.0) == 1
+
+    def test_estimate_clip_count_uses_beat_count_style_text_shape(self):
+        """make_script_package's beats are one unbroken 'AAA...' token —
+        .split() sees exactly one word regardless of char count, so this
+        must never be mistaken for a long, multi-clip beat."""
+        sp = make_script_package(section_count=1, chars_per_beat=500)
+        assert _estimate_clip_count(sp, clip_duration_seconds=8.0) == 2  # 2 beats, 1 clip each
+
+    def test_estimate_clip_count_zero_or_negative_duration_falls_back(self):
+        sp = make_worded_script_package([5])
+        assert _estimate_clip_count(sp, clip_duration_seconds=0.0) == 1
+        assert _estimate_clip_count(sp, clip_duration_seconds=-1.0) == 1
+
+    def test_resolve_clip_duration_seconds_never_raises_on_mock_config(self):
+        # MagicMock config (no real MUAPI tier attrs) must fall back cleanly.
+        duration = _resolve_clip_duration_seconds(None, make_config())
+        assert duration > 0
+
     def test_cost_breakdown_narration_component(self):
         sp = make_script_package(section_count=1, chars_per_beat=1000)
         with tempfile.TemporaryDirectory() as tmp:
@@ -483,8 +542,29 @@ class TestBudgetAuthorizationCostEstimation:
                 output_dir=Path(tmp),
             )
         expected_price = _resolve_clip_price(None, cfg, None)
-        expected_muapi = _estimate_beat_count(sp) * expected_price
+        expected_duration = _resolve_clip_duration_seconds(None, cfg)
+        expected_muapi = _estimate_clip_count(sp, expected_duration) * expected_price
         assert abs(rec["cost_breakdown"]["estimated_muapi_usd"] - expected_muapi) < 0.001
+
+    def test_muapi_cost_scales_with_clip_count_not_beat_count(self):
+        """2026-09-20 regression: a long-form episode's real finding — a
+        single beat with narration well over one clip's length needs
+        several clips, not 1. Pricing by beat_count would undercount this
+        exactly the way section_count undercounted a multi-beat episode
+        the day before."""
+        short_beat_episode = make_worded_script_package([5])       # 1 clip
+        long_beat_episode = make_worded_script_package([90])       # several clips, SAME beat count (1)
+        cfg = make_config()
+        with tempfile.TemporaryDirectory() as tmp:
+            rec_short = run_budget_authorization(
+                script_package=short_beat_episode, episode_id="ep_short", config=cfg, output_dir=Path(tmp))
+        with tempfile.TemporaryDirectory() as tmp:
+            rec_long = run_budget_authorization(
+                script_package=long_beat_episode, episode_id="ep_long", config=cfg, output_dir=Path(tmp))
+        assert rec_short["cost_breakdown"]["beat_count"] == rec_long["cost_breakdown"]["beat_count"] == 1
+        assert rec_long["cost_breakdown"]["clip_count"] > 1
+        assert rec_long["cost_breakdown"]["estimated_muapi_usd"] > \
+            rec_short["cost_breakdown"]["estimated_muapi_usd"] * 3
 
     def test_muapi_cost_scales_with_beat_count_not_just_section_count(self):
         """2026-09-19 regression: a long-form episode with many beats per

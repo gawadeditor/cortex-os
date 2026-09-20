@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -95,7 +96,7 @@ _ELEVENLABS_MUSIC_COST_PER_TRACK: float = 0.20   # USD per generated music track
 # the same script_package/ceiling -- part of the checkpoint binding key below,
 # so a pricing change explicitly invalidates any existing checkpointed
 # authorization rather than being silently masked by checkpoint reuse.
-_FINANCE_AUTHORIZATION_BINDING_VERSION: str = "1.1"  # 2026-09-19: beat/real-price muapi+music fix
+_FINANCE_AUTHORIZATION_BINDING_VERSION: str = "1.2"  # 2026-09-20: clip-count (not beat-count) muapi pricing fix
 
 
 # ---------------------------------------------------------------------------
@@ -142,19 +143,85 @@ def _estimate_section_count(script_package: dict) -> int:
 
 
 def _estimate_beat_count(script_package: dict) -> int:
-    """Total main-episode narration beats across every section — one beat
-    becomes one scene becomes one paid video clip (see hypogeum.muapi and
-    hypogeum.agents.audio_agent._collect_main_beats for the same convention
-    elsewhere in the pipeline). Section COUNT alone says nothing about how
-    many beats a section holds — a 6-section long-form episode can have
-    31+ beats total where a 6-"section" short has 6-8, so section_count was
-    silently treating both as the same clip budget (2026-09-19 fix, found
-    while testing the twinkle long-form workflow: a real 31-beat episode
-    priced out at a 6-clip short's cost)."""
+    """Total main-episode narration beats across every section (informational
+    only — see cost_breakdown's own "section_count"/"beat_count" fields).
+    Section COUNT alone says nothing about how many beats a section holds —
+    a 6-section long-form episode can have 31+ beats total where a
+    6-"section" short has 6-8 (2026-09-19 fix: a real 31-beat episode was
+    priced out at a 6-clip short's cost). Superseded as the VIDEO cost
+    driver by _estimate_clip_count() below (2026-09-20) — one beat is not
+    one clip; see that function's own docstring."""
     return sum(
         len(section.get("narration_beats", []))
         for section in script_package.get("sections", [])
     )
+
+
+# Conservative narration speaking rate for a PRE-SPEND estimate. Matches
+# script_engine.py's own _SLOW_VOICE_WPS_FLOOR (the slowest sustained
+# cadence measured across ElevenLabs voices — twinkle's bedtime narrator
+# read at ~1.8 wps live), not the faster ~2.9 wps documentary-narrator
+# rate script_engine also uses: a pre-spend estimate that under-times a
+# channel's real narration understates how many clips a beat needs, and
+# understating cost is worse than overstating it for a budget gate.
+_CONSERVATIVE_NARRATION_WPS = 1.8
+
+
+def _estimate_clip_count(script_package: dict, clip_duration_seconds: float) -> int:
+    """
+    Total video clips this episode's MAIN narrative actually needs.
+
+    One beat is NOT one clip: a beat's narration can run far longer than a
+    single clip covers. 2026-09-20 finding, real twinkle long-form test
+    episode: a beat with 21.5s of narration needed 4 clips at ~5.4s each
+    just to have video for the full audio — not "optional B-roll
+    contingency", structurally required coverage. The prior beat-count
+    estimate (_estimate_beat_count) priced this episode's video at
+    ~$30 (46 beats); the real cinematic_coverage_plan needed 111 clips,
+    ~$72 at the same unit price — see memory:
+    project_twinkle_longform_opportunity_20260908's 2026-09-20 section.
+
+    Each beat's clip need is estimated independently
+    (ceil(estimated_beat_seconds / clip_duration_seconds), minimum 1 for
+    any non-empty beat) and summed — matching how the real
+    cinematic_coverage_plan allocates shots per beat by duration, not a
+    flat one-clip-per-beat count. estimated_beat_seconds comes from word
+    count at _CONSERVATIVE_NARRATION_WPS, since no real (ffprobe-measured)
+    narration duration exists yet at this pre-spend point in the pipeline.
+
+    Shorts beats are excluded: shorts are extracted from the main
+    episode's own generated footage, not separately video-generated.
+    """
+    if clip_duration_seconds <= 0:
+        clip_duration_seconds = 8.0  # matches muapi's own conservative fallback
+    total_clips = 0
+    for section in script_package.get("sections", []):
+        for beat in section.get("narration_beats", []):
+            if isinstance(beat, dict):
+                text = beat.get("text", "")
+            elif isinstance(beat, str):
+                text = beat
+            else:
+                continue
+            word_count = len(text.split())
+            if word_count == 0:
+                continue
+            estimated_beat_seconds = word_count / _CONSERVATIVE_NARRATION_WPS
+            total_clips += max(1, math.ceil(estimated_beat_seconds / clip_duration_seconds))
+    return total_clips
+
+
+def _resolve_clip_duration_seconds(channel_id: Optional[str], config: Config) -> float:
+    """This channel's real per-clip duration (measured at Video Model
+    bake-off adoption when available), else the tier-default assumption —
+    the same authoritative source hypogeum.muapi's own shot-budget
+    arithmetic uses, so the pre-spend estimate and the real planner agree
+    on how many clips one beat needs."""
+    try:
+        from hypogeum.muapi import get_requested_clip_duration_seconds
+        return float(get_requested_clip_duration_seconds(config, channel_id))
+    except Exception:  # noqa: BLE001
+        return 8.0
 
 
 def _resolve_clip_price(channel_id: Optional[str], config: Config, db_path: Optional[Path]) -> float:
@@ -432,15 +499,17 @@ def run_budget_authorization(
     # ----------------------------------------------------------------
     section_count = _estimate_section_count(script_package)
     beat_count = _estimate_beat_count(script_package)
+    clip_duration = _resolve_clip_duration_seconds(channel_id, config)
+    clip_count = _estimate_clip_count(script_package, clip_duration)
     narration_chars = _estimate_narration_chars(script_package)
     clip_price = _resolve_clip_price(channel_id, config, db_path)
 
     if section_count > 0:
         _add_check(checks, failures, warnings,
                    "c_estimate_basis", "pass",
-                   f"Estimate basis: {section_count} sections, {beat_count} beats "
-                   f"(= planned clips), {narration_chars:,} narration characters, "
-                   f"${clip_price:.2f}/clip")
+                   f"Estimate basis: {section_count} sections, {beat_count} beats, "
+                   f"{clip_count} estimated clips (at {clip_duration:.1f}s/clip), "
+                   f"{narration_chars:,} narration characters, ${clip_price:.2f}/clip")
     else:
         _add_check(checks, failures, warnings,
                    "c_estimate_basis", "warn",
@@ -452,11 +521,19 @@ def run_budget_authorization(
     # 2026-09-19: estimated_muapi_usd used to be section_count * a fixed
     # "3 clips/section" guess at a flat $0.15 "Runway rate" — a short's clip
     # budget applied unchanged to every episode regardless of actual length,
-    # and ignoring the channel's real adopted model price. One beat is one
-    # planned video clip (see _estimate_beat_count's docstring); price it at
-    # what this channel's clips actually cost.
+    # and ignoring the channel's real adopted model price. Fixed to price by
+    # beat_count instead, at this channel's own clip price.
+    #
+    # 2026-09-20: beat_count itself was still wrong as a CLIP count — one
+    # beat is not one clip. A beat's narration can run far longer than a
+    # single clip covers (real long-form test: a 21.5s beat needed 4
+    # clips), so pricing by beat_count undercounted the same way
+    # section_count did, just less severely. estimated_muapi_usd is now
+    # priced by clip_count (_estimate_clip_count — beat duration divided by
+    # this channel's real clip duration, one beat can need several clips),
+    # not beat_count. See that function's own docstring for the numbers.
     estimated_narration_usd = (narration_chars / 1000.0) * _ELEVENLABS_COST_PER_1K_CHARS
-    estimated_muapi_usd = beat_count * clip_price
+    estimated_muapi_usd = clip_count * clip_price
     estimated_openrouter_usd = _OPENROUTER_PLANNING_FLAT
     estimated_music_usd = _MUSIC_TRACKS_ASSUMED * _ELEVENLABS_MUSIC_COST_PER_TRACK
     total_estimated = (
@@ -474,6 +551,8 @@ def run_budget_authorization(
         "total_estimated_usd": round(total_estimated, 4),
         "section_count": section_count,
         "beat_count": beat_count,
+        "clip_count": clip_count,
+        "clip_duration_seconds": round(clip_duration, 2),
         "clip_price_usd": round(clip_price, 4),
         "narration_chars": narration_chars,
     }

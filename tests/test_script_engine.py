@@ -651,6 +651,24 @@ class TestInputPackage:
             run_script_engine(NP, cfg, EPISODE_ID, output_dir=p)
         assert mock_ra.call_args.kwargs["output_dir"] == p
 
+    def test_operator_notes_absent_when_not_given(self):
+        inp = self._captured_input()
+        assert "operator_notes" not in inp
+
+    def test_operator_notes_included_when_given(self):
+        with patch("hypogeum.agents.script_engine.run_agent",
+                   return_value=_make_script_package()) as mock_ra:
+            run_script_engine(NP, cfg, EPISODE_ID, operator_notes="Keep the storm scarier.")
+        inp = mock_ra.call_args.kwargs["input_package"]
+        assert "Keep the storm scarier." in inp["operator_notes"]
+
+    def test_empty_operator_notes_is_not_included(self):
+        with patch("hypogeum.agents.script_engine.run_agent",
+                   return_value=_make_script_package()) as mock_ra:
+            run_script_engine(NP, cfg, EPISODE_ID, operator_notes="")
+        inp = mock_ra.call_args.kwargs["input_package"]
+        assert "operator_notes" not in inp
+
 
 # ---------------------------------------------------------------------------
 # TestExceptionPropagation

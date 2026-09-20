@@ -75,6 +75,7 @@ def run_narrative_architect(
     episode_id: str,
     output_dir: Optional[Path] = None,
     channel_id: Optional[str] = None,
+    operator_notes: Optional[str] = None,
 ) -> dict:
     """
     Execute the Narrative Architect agent end-to-end.
@@ -84,6 +85,14 @@ def run_narrative_architect(
         config:           Loaded Config instance. Passed through to run_agent().
         episode_id:       Episode identifier for log correlation and file naming.
         output_dir:       Optional output directory override (passed to run_agent()).
+        operator_notes:   Free-text operator direction for this specific episode
+                          (e.g. topic_brief.warn_concerns) — a one-off steer that
+                          is NOT part of channel_brief (which is the same for
+                          every episode). None/empty = no note (default, unchanged
+                          behavior). 2026-09-19: added after an operator's
+                          contradiction-resolution direction written into
+                          topic_brief had no effect — NA never received
+                          topic_brief at all, only research_package + channel_brief.
 
     Returns:
         narrative_package — validated dict from run_agent(). Contains episode
@@ -112,6 +121,13 @@ def run_narrative_architect(
         "research_package": research_package,
         "channel_brief": channel_brief_for(channel_id),
     }
+    if operator_notes:
+        _input_package["operator_notes"] = (
+            "OPERATOR DIRECTION for this episode — apply explicitly, taking "
+            "precedence over your own default judgment where it conflicts "
+            "(including how you resolve any contradiction listed in "
+            "research_package): " + operator_notes
+        )
     if (getattr(config, "SHORT_NATIVE_MODE", False) is True):
         _input_package["production_mode"] = "short_native"
         _mbw = int(float(getattr(config, "SHORT_NATIVE_MAX_BEAT_SECONDS", 8.5) or 8.5)

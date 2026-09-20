@@ -166,6 +166,7 @@ def run_script_engine(
     episode_id: str,
     output_dir: Optional[Path] = None,
     channel_id: Optional[str] = None,
+    operator_notes: Optional[str] = None,
 ) -> dict:
     """
     Execute the Script Engine agent end-to-end.
@@ -175,6 +176,10 @@ def run_script_engine(
         config:            Loaded Config instance. Passed through to run_agent().
         episode_id:        Episode identifier for log correlation and file naming.
         output_dir:        Optional output directory override (passed to run_agent()).
+        operator_notes:    Free-text operator direction for this specific episode
+                           (e.g. topic_brief.warn_concerns). See
+                           narrative_architect.run_narrative_architect's own
+                           docstring for why this parameter exists (2026-09-19).
 
     Returns:
         script_package — validated dict from run_agent(). Contains narration beats
@@ -208,6 +213,12 @@ def run_script_engine(
         "narrative_package": narrative_package,
         "channel_brief": channel_brief_for(channel_id),
     }
+    if operator_notes:
+        _input_package["operator_notes"] = (
+            "OPERATOR DIRECTION for this episode — apply explicitly, taking "
+            "precedence over your own default judgment where it conflicts: "
+            + operator_notes
+        )
     if (getattr(config, "SHORT_NATIVE_MODE", False) is True):
         _max_words = int(getattr(config, "SHORT_NATIVE_MAX_NARRATION_WORDS", 150) or 150)
         # Model-aware + slow-voice-safe per-beat budget: the default 8.5s ceiling

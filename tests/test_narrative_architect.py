@@ -638,6 +638,37 @@ class TestInputPackage:
         pkg, _ = self._capture_input(research_package=rp)
         assert pkg["research_package"] is rp
 
+    def test_operator_notes_absent_when_not_given(self):
+        pkg, _ = self._capture_input()
+        assert "operator_notes" not in pkg
+
+    def test_operator_notes_included_when_given(self):
+        cfg = make_config()
+        captured = []
+
+        def cap(**kwargs):
+            captured.append(kwargs.get("input_package", {}))
+            return _make_narrative_package()
+
+        with patch("hypogeum.agents.narrative_architect.run_agent", side_effect=cap):
+            run_narrative_architect(
+                _make_research_package(), cfg, EPISODE_ID,
+                operator_notes="Fern should get MORE lost, not less.",
+            )
+        assert "Fern should get MORE lost, not less." in captured[0]["operator_notes"]
+
+    def test_empty_operator_notes_is_not_included(self):
+        cfg = make_config()
+        captured = []
+
+        def cap(**kwargs):
+            captured.append(kwargs.get("input_package", {}))
+            return _make_narrative_package()
+
+        with patch("hypogeum.agents.narrative_architect.run_agent", side_effect=cap):
+            run_narrative_architect(_make_research_package(), cfg, EPISODE_ID, operator_notes="")
+        assert "operator_notes" not in captured[0]
+
     def test_output_dir_none_propagated(self):
         cfg = make_config()
         captured = []

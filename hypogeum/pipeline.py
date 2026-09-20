@@ -1207,6 +1207,7 @@ def run_pipeline(
             episode_id=episode_id,
             output_dir=output_dir,
             channel_id=channel_id,
+            topic_brief=topic_brief,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
         if run_id is not None:
@@ -1237,6 +1238,7 @@ def run_pipeline(
             episode_id=episode_id,
             output_dir=output_dir,
             channel_id=channel_id,
+            topic_brief=topic_brief,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
         if run_id is not None:
@@ -1267,6 +1269,7 @@ def run_pipeline(
             episode_id=episode_id,
             output_dir=output_dir,
             db_path=db_path,
+            channel_id=channel_id,
         )
         _record_stage_complete(_current_stage_id, _current_stage_t0, log, db_path=db_path)
         if run_id is not None:
@@ -2301,6 +2304,7 @@ def _run_narrative_architect(
     episode_id: str,
     output_dir: Optional[Path],
     channel_id: Optional[str] = None,
+    topic_brief: Optional[dict] = None,
 ) -> dict:
     """
     Narrative Architect (M1.4 — implemented).
@@ -2313,6 +2317,9 @@ def _run_narrative_architect(
     Output schema: narrative_package
 
     Checkpoint: loads existing narrative_package from disk if present.
+
+    topic_brief: only its warn_concerns field is used, forwarded as
+    operator_notes (2026-09-19) — NA otherwise never sees topic_brief at all.
     """
     pkg = _load_package(episode_id, "narrative_package", output_dir)
     if pkg is not None:
@@ -2325,6 +2332,7 @@ def _run_narrative_architect(
         episode_id=episode_id,
         output_dir=output_dir,
         channel_id=channel_id,
+        operator_notes=(topic_brief or {}).get("warn_concerns") or None,
     )
 
 
@@ -2334,6 +2342,7 @@ def _run_script_engine(
     episode_id: str,
     output_dir: Optional[Path],
     channel_id: Optional[str] = None,
+    topic_brief: Optional[dict] = None,
 ) -> dict:
     """
     Script Engine (M1.5 — implemented).
@@ -2348,6 +2357,9 @@ def _run_script_engine(
     Output schema: script_package
 
     Checkpoint: loads existing script_package from disk if present.
+
+    topic_brief: only its warn_concerns field is used, forwarded as
+    operator_notes (2026-09-19) — see _run_narrative_architect's own docstring.
     """
     pkg = _load_package(episode_id, "script_package", output_dir)
     if pkg is not None:
@@ -2360,6 +2372,7 @@ def _run_script_engine(
         episode_id=episode_id,
         output_dir=output_dir,
         channel_id=channel_id,
+        operator_notes=(topic_brief or {}).get("warn_concerns") or None,
     )
 
 
@@ -2878,6 +2891,7 @@ def _run_budget_authorization(
     episode_id: str,
     output_dir: Optional[Path],
     db_path: Optional[Path] = None,
+    channel_id: Optional[str] = None,
 ) -> dict:
     """
     Finance Agent — budget authorization gate (R50 — implemented).
@@ -2897,6 +2911,7 @@ def _run_budget_authorization(
         config=config,
         output_dir=output_dir,
         db_path=db_path,
+        channel_id=channel_id,
     )
 
 

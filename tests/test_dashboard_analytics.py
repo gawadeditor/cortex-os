@@ -420,12 +420,50 @@ class TestFlaskImportRoutes:
         assert r.status_code == 302
         assert "/learning" in r.headers["Location"]
 
+    def test_apply_action_unresolvable_channel_surfaces_error_in_flash(self, flask_client, db_path):
+        """Regression: this route used to discard apply_action()'s result
+        entirely, so a failed apply (e.g. an action whose source_episode
+        can't be attributed to any channel) redirected exactly like a
+        success -- the operator saw nothing but a page refresh with no
+        indication anything went wrong, and the action silently stayed
+        pending forever. The redirect's flash query param must now carry
+        the real outcome."""
+        aid = store_action({"source_episode": "ep_alpha", "dimension": "thumbnail",
+                            "action_type": "test", "rationale": "test"}, db_path=db_path)
+        r = flask_client.post(f"/learning/action/{aid}/apply",
+                              follow_redirects=False)
+        assert r.status_code == 302
+        location = r.headers["Location"]
+        assert "flash=" in location
+        assert "flash=applied" not in location
+        assert "does%20not%20resolve%20to%20one" in location
+        # the action must still be pending -- apply_action did not silently
+        # mark it applied when it couldn't actually write a directive
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                "SELECT status FROM learning_actions WHERE action_id = ?", (aid,)
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row["status"] == "pending"
+
+    def test_apply_action_success_flash(self, flask_client, db_path):
+        aid = store_action({"source_episode": "ep_alpha", "dimension": "title",
+                            "action_type": "test", "rationale": "test",
+                            "evidence_json": '{"channel_id": "hypogeum"}'}, db_path=db_path)
+        r = flask_client.post(f"/learning/action/{aid}/apply",
+                              follow_redirects=False)
+        assert r.status_code == 302
+        assert "flash=applied" in r.headers["Location"]
+
     def test_dismiss_action_redirects_to_learning(self, flask_client, db_path):
         aid = store_action({"source_episode": "ep_alpha", "dimension": "hook",
                             "action_type": "change", "rationale": "test"}, db_path=db_path)
         r = flask_client.post(f"/learning/action/{aid}/dismiss",
                               follow_redirects=False)
         assert r.status_code == 302
+        assert "flash=dismissed" in r.headers["Location"]
 
 
 # ===========================================================================

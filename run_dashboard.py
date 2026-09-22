@@ -8363,7 +8363,8 @@ def intelligence_learning_page():
         changelog.sort(key=lambda d: d.get("created_at") or "", reverse=True)
     except Exception:  # noqa: BLE001
         changelog = []
-    return render_template("learning.html", state=state, changelog=changelog)
+    return render_template("learning.html", state=state, changelog=changelog,
+                           flash=request.args.get("flash"))
 
 
 @app.route("/intelligence/monetization")
@@ -9218,14 +9219,18 @@ def learning_page():
 
 @app.route("/learning/action/<action_id>/apply", methods=["POST"])
 def learning_action_apply(action_id):
-    apply_action(action_id, db_path=_db_path())
-    return redirect(url_for("intelligence_learning_page"))
+    from urllib.parse import quote as _quote
+    result = apply_action(action_id, db_path=_db_path())
+    flash = "applied" if result.get("ok") else (result.get("error") or "error")
+    return redirect(url_for("intelligence_learning_page") + f"?flash={_quote(flash)}")
 
 
 @app.route("/learning/action/<action_id>/dismiss", methods=["POST"])
 def learning_action_dismiss(action_id):
-    dismiss_action(action_id, db_path=_db_path())
-    return redirect(url_for("intelligence_learning_page"))
+    from urllib.parse import quote as _quote
+    result = dismiss_action(action_id, db_path=_db_path())
+    flash = "dismissed" if result.get("ok") else (result.get("error") or "error")
+    return redirect(url_for("intelligence_learning_page") + f"?flash={_quote(flash)}")
 
 
 # ===========================================================================

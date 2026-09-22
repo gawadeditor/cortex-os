@@ -33,6 +33,14 @@
   {% endif %}
 {% endcall %}
 
+{% if flash == 'applied' %}
+  <div class="flash flash-ok">Applied — the next episode will pick this up.</div>
+{% elif flash == 'dismissed' %}
+  <div class="flash flash-ok">Dismissed.</div>
+{% elif flash %}
+  <div class="flash flash-err">Could not apply that: {{ flash }}</div>
+{% endif %}
+
 {# ── Review queue ─────────────────────────────────────────────────────── #}
 <div class="sec-head">
   <h2>Waiting for your review</h2>

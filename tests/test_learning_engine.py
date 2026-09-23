@@ -669,6 +669,47 @@ class TestContentVolumeRecommendation:
         assert "content_volume" in recs
         assert get_channel_recommendations("some_other_channel", db_path=db_path) == {}
 
+    def test_does_not_regenerate_after_operator_decided_same_snapshot_count(self, db_path):
+        """Regression: this function's dedup check only looked at PENDING
+        content_volume actions for the channel, so once the operator
+        applied or dismissed one (e.g. because the channel was already at
+        its cadence bound), the very next call regenerated an identical
+        action from the same retention trend -- confirmed live: a
+        "decrease" recommendation for twinkle_mini_tales was dismissed as
+        already-at-minimum, then came back unchanged on the next worker
+        cycle. Nothing should be created while the channel's snapshot
+        count hasn't grown past what the last decision already saw."""
+        _cv_channel(db_path, {"shorts_per_week": 7})
+        for i, p in enumerate((22, 18, 25)):
+            _cv_episode_with_api_retention(db_path, f"cv_dup{i}", p)
+        rec = generate_cadence_recommendation(_CV_CH, db_path=db_path)
+        assert rec is not None
+        dismiss_action(rec["action_id"], db_path=db_path)
+
+        again = generate_cadence_recommendation(_CV_CH, db_path=db_path)
+        assert again is None
+
+        all_cv = [a for a in list_actions(db_path=db_path)
+                  if a["dimension"] == "content_volume"
+                  and (a.get("evidence") or {}).get("channel_id") == _CV_CH]
+        assert len(all_cv) == 1
+
+    def test_regenerates_when_a_new_snapshot_arrives(self, db_path):
+        """A channel CAN get a fresh content_volume action after a
+        decision -- just not from the same retention snapshots. One more
+        real episode's analytics (n_snapshots grows) must still surface a
+        new recommendation."""
+        _cv_channel(db_path, {"shorts_per_week": 7})
+        for i, p in enumerate((22, 18, 25)):
+            _cv_episode_with_api_retention(db_path, f"cv_new{i}", p)
+        rec = generate_cadence_recommendation(_CV_CH, db_path=db_path)
+        dismiss_action(rec["action_id"], db_path=db_path)
+
+        _cv_episode_with_api_retention(db_path, "cv_new_extra", 15)
+        again = generate_cadence_recommendation(_CV_CH, db_path=db_path)
+        assert again is not None
+        assert again["evidence"]["n_snapshots"] == 4
+
 
 class TestScheduleRecommendation:
     def _seed_best_time(self, db_path, slots):

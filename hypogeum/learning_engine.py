@@ -716,6 +716,23 @@ def generate_cadence_recommendation(
     else:
         return None
 
+    # Same fix as generate_actions()'s _already_decided_on_this_evidence:
+    # the pending-only check above stops re-blocking once the operator
+    # applies/dismisses a content_volume action, but the retention trend
+    # itself doesn't change between calls unless a new episode's analytics
+    # landed -- so this used to regenerate an identical action every time
+    # the worker/sync loop called this function again. Skip unless the
+    # channel has picked up MORE snapshots than the most recent decision
+    # already saw.
+    prior_for_channel = [
+        a for a in list_actions(db_path=db_path, dimension="content_volume", limit=200)
+        if (a.get("evidence") or {}).get("channel_id") == channel_id
+    ]
+    if prior_for_channel:
+        prior_n = (prior_for_channel[0].get("evidence") or {}).get("n_snapshots") or 0
+        if len(retentions) <= prior_n:
+            return None
+
     action_type, base = _ACTION_TEMPLATES["content_volume"][key]
     store_action({
         "source_episode": latest_ep,

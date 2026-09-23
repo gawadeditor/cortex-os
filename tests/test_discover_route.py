@@ -79,6 +79,30 @@ class TestPageLoadIdle:
         page = client.get("/discover").data.decode()
         assert "spinner" in page
 
+    def test_inline_script_has_no_unterminated_js_string(self, client):
+        """Regression: `icon()` used to render its <svg ...> opening tag
+        across two lines (a raw newline before the closing '>' when a
+        label was involved). discover.html inlines `{{ icon('warning') }}`
+        straight into a single-quoted JS string inside <script> --
+        _setStatus('error', '{{ icon('warning') }} ' + ...) -- so that
+        embedded newline broke the string literal, which is a JS
+        SyntaxError at parse time. That doesn't just break the one call:
+        it silently aborts the whole inline <script> block, so every
+        function declared after the break point (resetDiscovery(), at
+        minimum) was never defined, on every single page load. Confirmed
+        live via the browser console before the fix. The exact class of
+        symptom this repo has hit before: a broken control silently does
+        nothing instead of showing an error."""
+        page = client.get("/discover").data.decode()
+        script_start = page.index("<script>")
+        script_end = page.index("</script>", script_start)
+        script = page[script_start:script_end]
+        for match in re.finditer(r"_setStatus\('error',\s*'([^']*)'", script):
+            assert "\n" not in match.group(1), (
+                "a raw newline inside a single-quoted JS string will throw "
+                "'Invalid or unexpected token' and abort the whole script block"
+            )
+
 
 # ---------------------------------------------------------------------------
 # POST /api/discover/run — async dispatch

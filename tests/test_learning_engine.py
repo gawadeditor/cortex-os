@@ -331,6 +331,60 @@ class TestGenerateActions:
         for a in list_actions(status="pending", db_path=db_path):
             assert a["action_type"] in VALID_ACTION_TYPES
 
+    def test_does_not_regenerate_after_operator_applied_same_evidence(
+        self, db_path, youtube_low_ctr,
+    ):
+        """Regression: once a dimension's pending action leaves 'pending'
+        (applied/dismissed), the underlying insights are never cleared, so
+        a later generate_actions() call for the same episode used to
+        recreate an identical action from the exact same insight_ids --
+        confirmed live: one "hook" recommendation was applied twice and
+        regenerated a third time within about two hours. Nothing new
+        should be created when no new insight has appeared."""
+        extract_insights(youtube_low_ctr, db_path=db_path)
+        generate_actions(youtube_low_ctr, db_path=db_path)
+        pending = list_actions(status="pending", db_path=db_path)
+        thumb = next(a for a in pending if a["dimension"] == "thumbnail")
+        apply_action(thumb["action_id"], db_path=db_path)
+
+        # Same insights still on disk (extract_insights is idempotent and
+        # never consumes/clears them) -- a later sync cycle re-runs both.
+        extract_insights(youtube_low_ctr, db_path=db_path)
+        generate_actions(youtube_low_ctr, db_path=db_path)
+
+        thumbnail_actions = [
+            a for a in list_actions(db_path=db_path)
+            if a["dimension"] == "thumbnail" and a["source_episode"] == youtube_low_ctr
+        ]
+        assert len(thumbnail_actions) == 1, (
+            "a resolved action was regenerated from identical evidence"
+        )
+
+    def test_regenerates_when_genuinely_new_insight_appears(self, db_path, youtube_low_ctr):
+        """A dimension CAN get a fresh action after resolution -- just not
+        from the same evidence. Adding a genuinely new insight (not in the
+        prior action's insight_ids) must still surface a new action."""
+        extract_insights(youtube_low_ctr, db_path=db_path)
+        generate_actions(youtube_low_ctr, db_path=db_path)
+        pending = list_actions(status="pending", db_path=db_path)
+        thumb = next(a for a in pending if a["dimension"] == "thumbnail")
+        dismiss_action(thumb["action_id"], db_path=db_path)
+
+        store_insight({
+            "episode_id": youtube_low_ctr, "platform": "youtube",
+            "created_at": "2026-09-23T00:00:00+00:00",
+            "insight_type": "weak_thumbnail_repeat", "affected_dim": "thumbnail",
+            "signal_strength": -0.8, "threshold_used": "ctr<0.02",
+            "detail": "still low next cycle",
+        }, db_path=db_path)
+
+        generate_actions(youtube_low_ctr, db_path=db_path)
+        thumbnail_actions = [
+            a for a in list_actions(db_path=db_path)
+            if a["dimension"] == "thumbnail" and a["source_episode"] == youtube_low_ctr
+        ]
+        assert len(thumbnail_actions) == 2
+
 
 # ===========================================================================
 # TestApplyDismissActions

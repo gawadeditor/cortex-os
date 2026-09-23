@@ -463,6 +463,40 @@ def _has_existing_pending_action(dimension: str, db_path: Optional[Path]) -> boo
         return False
 
 
+def _already_decided_on_this_evidence(
+    episode_id: str, dimension: str, insight_ids: set,
+    db_path: Optional[Path],
+) -> bool:
+    """True when the operator already applied or dismissed an action for
+    this exact (episode, dimension) covering every one of insight_ids --
+    i.e. nothing has changed since their decision, so it shouldn't be
+    re-surfaced.
+
+    Without this, generate_actions() re-created an identical action every
+    time it ran (every analytics sync, every worker tick) once the
+    operator's prior action for the same dimension left the 'pending'
+    state: the underlying insights are never cleared/consumed, so the
+    exact same evidence kept re-qualifying under `_has_existing_pending_
+    action`'s pending-only check. Confirmed live 2026-09-22/23: a single
+    "hook" recommendation for ep_0e01db91, built from the same 3
+    insight_ids, was applied twice and regenerated a third time within
+    about two hours, forcing the operator to re-approve the same
+    suggestion repeatedly. A genuinely new insight (one not in any prior
+    action's evidence) still creates a fresh action."""
+    if not insight_ids:
+        return False
+    try:
+        prior = list_actions(
+            db_path=db_path, source_episode=episode_id, dimension=dimension, limit=1,
+        )
+    except Exception:
+        return False
+    if not prior:
+        return False
+    prior_ids = set((prior[0].get("evidence") or {}).get("insight_ids") or [])
+    return insight_ids <= prior_ids
+
+
 # ===========================================================================
 # Public API
 # ===========================================================================
@@ -530,7 +564,10 @@ def generate_actions(
 ) -> list[dict]:
     """
     Group episode insights by affected_dim, generate one learning_action
-    per dimension. Skips dimensions that already have a pending action.
+    per dimension. Skips dimensions that already have a pending action,
+    and skips re-creating an action the operator already applied or
+    dismissed for this exact (episode, dimension) evidence -- see
+    `_already_decided_on_this_evidence`.
 
     Returns the full list of pending + new actions created.
     """
@@ -548,6 +585,10 @@ def generate_actions(
 
     for dim, dim_insights in by_dim.items():
         if _has_existing_pending_action(dim, db_path=db_path):
+            continue
+
+        current_insight_ids = {i.get("insight_id", "") for i in dim_insights}
+        if _already_decided_on_this_evidence(episode_id, dim, current_insight_ids, db_path):
             continue
 
         template = _ACTION_TEMPLATES.get(dim, {})

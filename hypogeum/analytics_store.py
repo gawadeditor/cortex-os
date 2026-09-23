@@ -820,15 +820,24 @@ def get_action(
 
 
 def list_actions(
-    status:  Optional[str] = None,
-    db_path: Optional[Path] = None,
-    limit:   int            = 200,
+    status:         Optional[str] = None,
+    db_path:        Optional[Path] = None,
+    limit:          int            = 200,
+    *,
+    source_episode: Optional[str] = None,
+    dimension:      Optional[str] = None,
 ) -> list[dict]:
     try:
         clauses, params = [], []
         if status:
             clauses.append("status=?")
             params.append(status)
+        if source_episode:
+            clauses.append("source_episode=?")
+            params.append(source_episode)
+        if dimension:
+            clauses.append("dimension=?")
+            params.append(dimension)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         params.append(limit)
         conn = get_connection(_db(db_path))

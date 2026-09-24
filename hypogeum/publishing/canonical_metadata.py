@@ -527,18 +527,38 @@ def build_zernio_platform_specific_data(metadata: CanonicalPlatformMetadata, pla
     CONFIRMED live via docs.zernio.com/platforms/youtube. madeForKids/
     playlistId/visibility -- also confirmed documented fields -- are
     read from metadata.platform_policy_fields when the caller has set
-    them there (never defaulted). Facebook's documented title field
-    (platformSpecificData.title) is populated when metadata.title is
-    set. TikTok/Instagram fields are NOT built here -- TikTok's
-    tikTokSettings is a ROOT-level object (build_platform_settings()'s
-    existing, already-wired mechanism), and Instagram's exact AI-label
-    field name remains UNVERIFIED (see this module's own docstring and
-    the audit doc's item 7) -- never guessed at.
+    them there (never defaulted). Both YouTube's and Facebook's
+    documented title field (platformSpecificData.title) are populated
+    when metadata.title is set.
+
+    2026-09-24 fix: YouTube's title was missing from this mapping ever
+    since this function was written -- every OTHER YouTube field got
+    mapped (categoryId, containsSyntheticMedia, firstComment, the
+    passthrough fields) but title itself never did, even though it is
+    one of the documented per-platform-entry fields
+    (zernio_platform_contracts._YOUTUBE_PLATFORM_SPECIFIC_DATA_FIELDS
+    already listed it) and Zernio's own post editor marks it *required*
+    for YouTube specifically -- confirmed live: the operator opened a
+    scheduled twinkle post in Zernio's editor and found the YouTube
+    "title" field genuinely empty despite the post's top-level `content`
+    being correct, and every recently-published video on both channels
+    was live on YouTube under an AI-sounding title Cortex never wrote
+    (YouTube/Zernio auto-filling the required-but-blank field). The
+    root-level `title`/`content` this codebase sends (see
+    _build_multi_platform_publish_body()) evidently does not feed
+    YouTube's own per-platform title field at all. TikTok/Instagram
+    title-equivalent fields are NOT built here -- TikTok's tikTokSettings
+    is a ROOT-level object (build_platform_settings()'s existing,
+    already-wired mechanism), and Instagram's exact AI-label field name
+    remains UNVERIFIED (see this module's own docstring and the audit
+    doc's item 7) -- never guessed at.
     """
     if metadata is None:
         return None
     data: dict = {}
     if platform == "youtube":
+        if metadata.title:
+            data["title"] = metadata.title
         if metadata.category_id:
             data["categoryId"] = metadata.category_id
         if metadata.ai_disclosure is not None:

@@ -352,8 +352,14 @@ class TestCanonicalMetadataReachesTheRealSerializedRequestBody:
 
         # Per-platform platformSpecificData -- the actual field mapping fix
         # reaching the real request body, not just accepted by the provider.
+        # title included (2026-09-24 fix): this field was missing here for
+        # as long as this mapping existed, so Zernio's own required
+        # per-platform YouTube title field went out empty on every real
+        # publish, and YouTube filled it with an auto-generated title --
+        # confirmed live on both channels before the fix.
         youtube_entry = next(p for p in body["platforms"] if p["platform"] == "youtube")
         assert youtube_entry["platformSpecificData"] == {
+            "title": "A Real Title",
             "categoryId": "27", "containsSyntheticMedia": True, "firstComment": "A real first comment.",
         }
 

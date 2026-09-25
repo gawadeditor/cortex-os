@@ -1,76 +1,127 @@
 """
 scripts/check_youtube_thumbnail_staleness.py --
 
-Detects a real, confirmed YouTube/Zernio platform gap (found 2026-09-25):
-when Zernio sets a Shorts custom thumbnail, YouTube's vertical cover slot
-(oar1/oar2/oar3) updates correctly, but the legacy 16:9 derivative slots
-(hqdefault, hq1/hq2/hq3, mqdefault, sddefault, maxresdefault) do NOT get
-regenerated -- they keep serving whatever image was there before (often a
-completely different design, sometimes from an earlier revision). Those
-legacy slots are what oEmbed, link-preview unfurls (WhatsApp/Telegram/
-Slack/Discord/Twitter cards), and some third-party embeds read, so a
-video can look "wrong" or "missing its thumbnail" everywhere except
-YouTube's own Shorts surfaces (Studio, the Shorts shelf, the watch page).
+Reference/lookup helper for the YouTube thumbnail incident of 2026-09-25.
+Superseded a first (wrong) theory -- see history below -- with the
+confirmed real root cause and the three real sources of truth for a
+video's correct thumbnail.
 
-Confirmed fix: manually re-uploading the SAME current thumbnail through
-YouTube Studio's own upload control forces YouTube to regenerate every
-legacy derivative too. Zernio's own repair_existing_post() PUT does not
-do this (and is refused outright for already-published posts). There is
-currently no known API-only fix -- this script only DETECTS the gap; the
-fix still requires a Studio re-upload (by a human, or by an agent with
-browser access).
+## What actually happened
 
-Usage:
-    python3 scripts/check_youtube_thumbnail_staleness.py VIDEO_ID [VIDEO_ID ...]
+Every hypogeum/twinkle_mini_tales Shorts thumbnail looked "wrong" when
+checked from outside YouTube's own Shorts surfaces (Studio, the Shorts
+shelf, the watch page all looked fine -- oEmbed, link-preview unfurls,
+and this operator's own eyes on the public channel grid did not).
 
-Exits non-zero if any checked video is stale (oar cover fetched fine but
-no legacy slot came back with the same byte size across repeated tries --
-this is a coarse heuristic; a genuine mismatch is usually obvious at a
-glance, so treat a flagged video as "go look at it," not as certain proof).
+First (WRONG) theory: that YouTube's legacy 16:9 CDN derivatives
+(hqdefault, hq1/2/3, mqdefault, sddefault, maxresdefault) go stale
+relative to the newer vertical "oar" Shorts-cover slot, and that oar2 or
+oar3 (whichever is numerically last) is "the" correct cover. This is
+false. oar1/oar2/oar3 are just YouTube's own auto-generated candidate
+video-frame grabs (different narration moments, sometimes with burned
+dialogue captions) -- NONE of them are the real designed thumbnail. Two
+full remediation passes were done against this wrong theory before the
+mistake was caught (overwriting some videos' real covers with plain
+video frames, twice).
+
+## Confirmed real root cause
+
+Zernio's own Content Grid (`/channel/<id>/grid` in this dashboard) shows
+the REAL image on file for a post via `media.zernio.com/media/..._main_
+episode.jpg` (or `_short_00N.jpg` / `_short_00N.recomposed_v1.jpg` for
+individual Shorts deliverables) -- these are the actual Thumbnail
+Director-designed covers, produced by the pipeline and uploaded to
+Zernio at publish time. What's live on YouTube itself can drift from
+this for two reasons:
+  1. A prior *manual* Studio upload the grid can't see (flagged inline
+     as "Cover confirmed uploaded by hand -- Zernio's own record can't
+     reflect a native platform edit"), in which case the dashboard's own
+     `/manual-cover/<episode_id>[_<short_id>].jpg` endpoint holds the
+     real one instead of the grid's `main_episode.jpg`.
+  2. The manual-cover mapping itself pointing at the wrong file (found
+     once, live: `ep_af078f34`'s manual-cover was for its OWN short_001,
+     but had been associated with a different, wrong episode in this
+     dashboard's own data). When a manual-cover image's content visibly
+     doesn't match the video's own title/description, don't trust the
+     mapping -- go straight to that episode's own thumbnail_package.json
+     and its `thumbnails/<short_id>.jpg` file in the archive instead.
+
+A handful of the oldest hypogeum Shorts (published before this factory
+existed) have NO Zernio grid entry and NO archive folder at all -- they
+were produced by an earlier, separate project (`~/faceless-channel/`).
+Their real designed covers, if recovered, live wherever the operator
+manually saved them (found once at `~/Desktop/hypogeum_legacy_covers/`).
+
+## The only real fix, once you have the right file
+
+Re-upload it through YouTube Studio's own thumbnail control and Save.
+This forces YouTube to regenerate every CDN derivative (oEmbed, link
+previews, everything) to match. Zernio's own repair_existing_post() PUT
+does NOT do this, and is refused outright for already-published posts
+anyway -- there is no API-only fix, and no code change in this repo can
+fix it either: canonical_metadata.py's request body is already correct,
+this is entirely downstream of it (Zernio's own YouTube integration, or
+a stale local mapping in this dashboard's own manual-cover store).
+
+## Usage
+
+Not an automated checker -- there is no reliable heuristic for "is this
+video's live thumbnail wrong" (file-size/derivative-slot diffing was the
+wrong theory above). This is a lookup helper: given a video ID, prints
+where to go look for the real thumbnail, in the order to check them.
+
+    python3 scripts/check_youtube_thumbnail_staleness.py VIDEO_ID
 """
 
 from __future__ import annotations
 
 import sys
-import urllib.request
 
 
-def _fetch(url: str) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    return urllib.request.urlopen(req, timeout=15).read()
+def print_lookup_guide(video_id: str) -> None:
+    print(f"""
+For {video_id}, check these in order -- do not trust file-size or oar-slot
+diffing, it produced two wrong "fixes" on 2026-09-25:
 
+1. Open the dashboard's own Content Grid for the channel
+   (http://127.0.0.1:5001/channel/<channel_id>/grid) and find this
+   video's card by title. If it has NO "Cover confirmed uploaded by
+   hand" note, the grid's own poster image IS the real cover -- inspect
+   the page (each .cg-card's <img src> is a media.zernio.com/... URL
+   ending in _main_episode.jpg or _short_00N[.recomposed_v1].jpg).
 
-def check_video(video_id: str) -> bool:
-    """Returns True if the video's legacy thumbnail slot looks stale/suspect."""
-    oar = _fetch(f"https://i.ytimg.com/vi/{video_id}/oar2.jpg")
-    legacy = _fetch(f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg")
+2. If the card DOES say "Cover confirmed uploaded by hand", fetch
+   http://127.0.0.1:5001/manual-cover/<episode_id>[_<short_id>].jpg
+   instead -- but eyeball it against the video's own title/description
+   first. If the image content doesn't match, the mapping itself is
+   wrong (happened once, for ep_af078f34) -- go to step 3 instead.
 
-    if len(oar) <= 1200:
-        # No vertical custom-cover slot for this video (long-form, or a
-        # short whose thumbnail was never set through the newer Shorts
-        # cover flow) -- nothing for this check to compare, skip it.
-        print(f"{video_id}: no oar cover slot found, skipping (not a Shorts custom cover)")
-        return False
+3. Find the episode_id (search archive topic_briefs / research_package
+   for a distinctive phrase from the video's own description, or grep
+   for a unique number/fact it mentions), then look directly at
+   /Volumes/Archive/Cortex/<channel>/<episode_id>*/thumbnails/ for
+   main_episode.jpg or short_00N.jpg -- these are the pipeline's own
+   designed-cover files, ground truth regardless of what any dashboard
+   mapping says.
 
-    # Heuristic only: a real mismatch is a totally different image (different
-    # size band). This will not catch every case and can false-positive on
-    # a video whose legacy slot happens to coincidentally match in size --
-    # always eyeball the two files before concluding anything is wrong.
-    suspect = len(legacy) < 5000  # legacy default-frame grabs tend to be tiny
-    status = "SUSPECT -- go look at it" if suspect else "looks populated"
-    print(f"{video_id}: oar={len(oar)}B legacy_hqdefault={len(legacy)}B -> {status}")
-    return suspect
+4. If none of the above exist for this video at all, it may predate
+   this factory. Check ~/Desktop/hypogeum_legacy_covers/ and
+   ~/faceless-channel/output/ for a same-titled file from the earlier,
+   separate pre-Cortex project.
+
+Once you have the right file: upload it through YouTube Studio's own
+Thumbnail control on the video's edit page and Save. That is the only
+step that actually fixes what's live -- nothing else does.
+""")
 
 
 def main() -> int:
     if len(sys.argv) < 2:
         print(__doc__)
         return 2
-    any_suspect = False
     for video_id in sys.argv[1:]:
-        if check_video(video_id):
-            any_suspect = True
-    return 1 if any_suspect else 0
+        print_lookup_guide(video_id)
+    return 0
 
 
 if __name__ == "__main__":

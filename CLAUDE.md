@@ -180,6 +180,20 @@ Dashboard route tests use `server.app.config["DB_PATH"] = str(db)` and restore i
 - All schema validation → `hypogeum.schemas.validate()`
 - All DB access → `hypogeum.db.get_connection(db_path)` with explicit `db_path` in tests
 
+## Verifying Published Assets (thumbnails, titles, anything "live")
+
+**Never diagnose or fix a live YouTube/social asset by pattern-matching a plausible-sounding heuristic** (file-size, CDN slot number/naming like `oar1`/`oar2`/`oar3`, "the last one", "the biggest one"). On 2026-09-25 this caused two full wrong remediation passes across ~30 videos before the real cause was found — see `memory/project_youtube_legacy_thumbnail_gap_20260925.md` (or the equivalent memory in whatever memory store is active) for the full incident.
+
+The real source of truth for a video's designed thumbnail, in the order to check:
+1. The dashboard's Content Grid (`/channel/<id>/grid`) — each card's own poster image (`media.zernio.com/.../_main_episode.jpg` or `_short_00N.jpg`), unless flagged "Cover confirmed uploaded by hand".
+2. If hand-flagged: `/manual-cover/<episode_id>[_<short_id>].jpg` on the dashboard — but **visually confirm it against the video's own title/description before trusting it**; this mapping has been wrong at least once.
+3. The episode's own archive folder — `/Volumes/Archive/Cortex/<channel>/<episode_id>*/thumbnails/` — ground truth regardless of any dashboard mapping. Find the episode_id by matching a distinctive phrase from the video's real description against archived `topic_brief_*.json` / caption `.srt` files.
+4. A handful of the oldest hypogeum Shorts predate this factory (produced by an earlier separate project). Check `~/Desktop/hypogeum_legacy_covers/` and `~/faceless-channel/output/` if nothing above exists.
+
+Before applying any fix across more than one file, verify it on a single example and confirm the match is real (visually, against the actual title/description) — never generalize a pattern from one or two samples to a whole batch without checking each one.
+
+The only real fix once you have the right file: re-upload it through YouTube Studio's own Thumbnail control on the video's edit page, then Save. No code path in this repo can fix a wrong live thumbnail — this is entirely downstream of Zernio/YouTube's own systems.
+
 ## graphify
 
 This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.

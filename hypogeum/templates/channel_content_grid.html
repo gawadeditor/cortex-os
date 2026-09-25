@@ -12,6 +12,13 @@
                overflow: hidden; display: flex; flex-direction: column; }
     .cg-card.no-cover { border-color: var(--warn); }
     .cg-card.has-manual-cover { border-color: var(--accent-line); }
+    .cg-card.needs-attention { border-color: var(--critical); border-width: 2px; }
+    .cg-attention-badge { position: absolute; top: 8px; left: 8px; background: var(--critical-bg, var(--warn-bg));
+                            color: var(--critical); border: 1px solid var(--critical); font-size: 10px; font-weight: 700;
+                            letter-spacing: .04em; text-transform: uppercase; padding: 3px 7px; border-radius: 999px;
+                            display: flex; align-items: center; gap: 4px; }
+    .cg-attention-badge svg { width: 11px; height: 11px; }
+    .cg-attention-note { font-size: 10.5px; color: var(--critical); line-height: 1.4; }
     .cg-poster { aspect-ratio: 9/16; background: var(--bg); position: relative; overflow: hidden;
                  display: flex; align-items: center; }
     .cg-poster img { width: 100%; height: 100%; object-fit: contain; display: block; }
@@ -69,7 +76,8 @@
      title='Content grid',
      lede='Every post this channel has staged or published on Zernio — poster, status, and date, the way Zernio itself shows it.',
      meta=[{'label': 'posts', 'value': items|length},
-           {'label': 'missing a cover', 'value': missing_cover_count}]) %}
+           {'label': 'missing a cover', 'value': missing_cover_count},
+           {'label': 'needs attention', 'value': needs_attention_count}]) %}
     <a href="?refresh=1&scope={{ channel_id }}" class="btn">{{ icon('refresh') }} Refresh from Zernio</a>
   {% endcall %}
 
@@ -88,12 +96,12 @@
   {% else %}
 
   <div class="cg-toolbar">
-    <span class="cg-count">{{ items|length }} post{{ 's' if items|length != 1 }}{% if missing_cover_count %} · <span style="color:var(--warn);">{{ missing_cover_count }} missing a cover</span>{% endif %}</span>
+    <span class="cg-count">{{ items|length }} post{{ 's' if items|length != 1 }}{% if missing_cover_count %} · <span style="color:var(--warn);">{{ missing_cover_count }} missing a cover</span>{% endif %}{% if needs_attention_count %} · <span style="color:var(--critical);font-weight:700;">{{ needs_attention_count }} needs attention</span>{% endif %}</span>
   </div>
 
   <div class="cg-grid">
     {% for it in items %}
-    <div class="cg-card {{ 'has-manual-cover' if (not it.has_cover and it.manual_cover_url) else ('no-cover' if not it.has_cover) }}">
+    <div class="cg-card {{ 'needs-attention' if it.needs_attention else ('has-manual-cover' if (not it.has_cover and it.manual_cover_url) else ('no-cover' if not it.has_cover)) }}">
       <div class="cg-poster {{ 'is-landscape' if it.is_landscape }}">
         {% if it.thumbnail_url %}
           <img src="{{ it.thumbnail_url }}" alt="" loading="lazy">
@@ -105,7 +113,9 @@
         {% if it.is_landscape %}
         <span class="cg-format-badge">16:9 original</span>
         {% endif %}
-        {% if not it.has_cover and it.manual_cover_url %}
+        {% if it.needs_attention %}
+        <span class="cg-attention-badge">{{ icon('warning') }} Needs attention</span>
+        {% elif not it.has_cover and it.manual_cover_url %}
         <span class="cg-manual-badge">{{ icon('download') }} Manual upload</span>
         {% elif not it.has_cover %}
         <span class="cg-warn-badge">{{ icon('warning') }} No cover</span>
@@ -120,6 +130,12 @@
         {% endif %}
         {% if it.status %}
         <span class="cg-status-pill {{ 'published' if it.status == 'published' else ('scheduled' if it.status == 'scheduled' else 'other') }}">{{ it.status }}</span>
+        {% endif %}
+        {% if it.needs_attention %}
+        <div class="cg-attention-note">
+          Zernio status is "{{ it.status }}", not published — check it live and re-verify the thumbnail once it settles.
+          {% if it.not_yet_live_platforms %}Not yet live on: {{ it.not_yet_live_platforms|join(', ') }}.{% endif %}
+        </div>
         {% endif %}
         {% if it.fetch_error %}
         <div class="cg-error-note">{{ it.fetch_error }}</div>

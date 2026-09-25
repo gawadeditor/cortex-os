@@ -170,6 +170,64 @@ def test_manually_resolved_cover_suppresses_warning_but_keeps_poster(tmp_path, m
     assert "confirmed" in item["manual_cover_note"].lower()
 
 
+def test_partial_status_flagged_needs_attention(tmp_path, monkeypatch):
+    """Regression for the 2026-09-26 incident: a real post ("Pip the Tiny
+    Star", twinkle_mini_tales) sat in Zernio's own 'partial' status with a
+    wrong live YouTube thumbnail for hours before the operator caught it by
+    chance -- Zernio's response already carried this signal the whole time,
+    nothing on this page surfaced it. Any status other than a normal
+    published/scheduled must come back flagged."""
+    db_path = tmp_path / "test.db"
+    _seed_post(db_path, channel_id="twinkle_mini_tales", episode_id="ep_1", post_id="post_partial")
+
+    class _PartialProvider:
+        def get_post(self, post_id, *, db_path=None, timeout=None):
+            return {
+                "status_code": 200,
+                "post": {
+                    "title": "Pip the Tiny Star",
+                    "status": "partial",
+                    "scheduledFor": None,
+                    "mediaItems": [{"thumbnail": "https://example.com/real-cover.jpg"}],
+                    "platforms": [
+                        {"platform": "instagram", "status": "published",
+                         "platformPostUrl": "https://instagram.com/x", "publishedAt": "2026-09-25T16:05:00+00:00"},
+                        {"platform": "tiktok", "status": "published",
+                         "platformPostUrl": "https://tiktok.com/x", "publishedAt": "2026-09-25T16:05:00+00:00"},
+                        {"platform": "youtube", "status": "failed", "platformPostUrl": None, "publishedAt": None},
+                        {"platform": "facebook", "status": "failed", "platformPostUrl": None, "publishedAt": None},
+                    ],
+                },
+                "error": None,
+            }
+
+    monkeypatch.setattr("hypogeum.publishing.zernio.ZernioProvider", lambda: _PartialProvider())
+
+    items = cg.get_content_grid("twinkle_mini_tales", db_path=db_path)
+
+    assert len(items) == 1
+    item = items[0]
+    assert item["status"] == "partial"
+    assert item["needs_attention"] is True
+    assert set(item["not_yet_live_platforms"]) == {"youtube", "facebook"}
+
+
+def test_published_status_not_flagged_needs_attention(tmp_path, monkeypatch):
+    """A normal, fully-published post must never be flagged -- otherwise the
+    signal is noise and gets ignored exactly like the thing it's meant to
+    prevent."""
+    db_path = tmp_path / "test.db"
+    _seed_post(db_path, channel_id="hypogeum", episode_id="ep_1", post_id="post_1")
+    _seed_cache_row(db_path, post_id="post_1", channel_id="hypogeum", episode_id="ep_1")
+
+    items = cg.get_content_grid("hypogeum", db_path=db_path)
+
+    assert len(items) == 1
+    assert items[0]["status"] == "published"
+    assert items[0]["needs_attention"] is False
+    assert items[0]["not_yet_live_platforms"] == []
+
+
 def test_manual_cover_pending_still_warns_until_resolved(tmp_path, monkeypatch):
     """The same post, before the operator confirms it's resolved, must
     still show the cover-ready-to-upload prompt and no_cover=False only

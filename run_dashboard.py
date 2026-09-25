@@ -7737,10 +7737,12 @@ def channel_content_grid_page(channel_id):
         load_error = str(exc)
 
     missing_cover_count = sum(1 for i in items if not i["has_cover"])
+    needs_attention_count = sum(1 for i in items if i.get("needs_attention"))
 
     return render_template("channel_content_grid.html",
                            channel=channel, channel_id=channel_id, items=items, load_error=load_error,
                            missing_cover_count=missing_cover_count,
+                           needs_attention_count=needs_attention_count,
                            refreshed=force_refresh)
 
 

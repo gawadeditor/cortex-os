@@ -29,6 +29,15 @@ log = get_logger(agent="dashboard_content_grid")
 _CACHE_TTL_SECONDS = 900  # 15 min — matches the dashboard's other soft-refresh windows
 _LIVE_FETCH_TIMEOUT_SECONDS = 12  # short: one slow post must not stall the whole page load
 
+# Statuses that mean "this post is in the state it's supposed to be in" --
+# anything else (partial, failed, or a status this module hasn't seen yet)
+# needs a human to look at it. Added 2026-09-26 after a real post
+# ("Pip the Tiny Star", twinkle_mini_tales) sat in Zernio's own `partial`
+# status with a wrong live YouTube thumbnail for hours before the operator
+# caught it by chance -- the signal was already in Zernio's response the
+# whole time, nothing was surfacing it. See project memory for the incident.
+_OK_STATUSES = {"published", "scheduled"}
+
 # Manually-generated covers for posts Zernio itself has no thumbnail for and
 # will never accept one on via its own API (repair_existing_post is rejected
 # outright on a published post -- confirmed live 2026-09-11/12 on all 4
@@ -219,8 +228,12 @@ def _cache_put(conn, *, post_id, channel_id, episode_id, deliverable_id, live: d
 def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = False) -> list[dict]:
     """Every post this channel has on Zernio, newest scheduled/published
     first. Each item: {post_id, episode_id, deliverable_id, display_title,
-    status, scheduled_for, published_at, thumbnail_url, has_cover,
-    platforms: [...], stale, fetch_error}.
+    status, needs_attention, not_yet_live_platforms, scheduled_for,
+    published_at, thumbnail_url, has_cover, platforms: [...], stale,
+    fetch_error}. `needs_attention` is true whenever Zernio's own status
+    is anything other than a normal 'published'/'scheduled' (e.g. 'partial',
+    'failed') -- surface this prominently, it is a real, already-available
+    signal that a post did not go out the way it was supposed to.
 
     Deliberately three short DB sessions around one un-connected stretch of
     slow network I/O, not one connection held open end to end: a stale post
@@ -342,12 +355,20 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
             # (no more "no cover" warning) while still showing that same
             # file as the poster image, since it's the accurate one now.
             has_cover = zernio_has_cover or resolved_manually
+            status = row.get("status")
+            not_yet_live_platforms = [
+                p.get("platform") for p in platforms
+                if p.get("platform") and p.get("status") not in ("published", None)
+            ]
+            needs_attention = bool(status) and status not in _OK_STATUSES
             out.append({
                 "post_id": p["post_id"],
                 "episode_id": p["episode_id"],
                 "deliverable_id": p["deliverable_id"],
                 "display_title": display_title,
-                "status": row.get("status"),
+                "status": status,
+                "needs_attention": needs_attention,
+                "not_yet_live_platforms": not_yet_live_platforms if needs_attention else [],
                 "scheduled_for": row.get("scheduled_for"),
                 "published_at": row.get("published_at"),
                 "thumbnail_url": row.get("thumbnail_url"),

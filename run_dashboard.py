@@ -11128,6 +11128,11 @@ def main():
     except Exception as _startup_exc:
         print(f"  [startup reconcile skipped: {_startup_exc}]")
 
+    # Keep real analytics fresh even when the worker isn't running (it used
+    # to be the only thing syncing, and it doesn't come back after a reboot).
+    from hypogeum.analytics_autosync import start_analytics_autosync
+    start_analytics_autosync(_db_path())
+
     app.run(host=args.host, port=args.port, debug=False)
 
 

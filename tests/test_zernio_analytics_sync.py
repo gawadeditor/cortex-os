@@ -194,3 +194,41 @@ def test_no_data_from_provider(db_path):
     out = zas.sync_zernio_analytics(provider=_Empty(), db_path=db_path)
     assert out["ok"] is False
     assert out["rows_written"] == 0
+
+
+def test_multiple_posts_of_one_episode_are_aggregated_not_overwritten(db_path):
+    """An episode's main video + shorts are separate posts on one platform.
+    They used to overwrite each other (last listed post won); the row must
+    now hold the episode's totals, view-weighted rates and the lead post."""
+    conn = get_connection(db_path)
+    try:
+        _ledger_row(conn, platform="instagram", late_post_id="LATE_A", suffix="_a")
+        _ledger_row(conn, platform="instagram", late_post_id="LATE_B", suffix="_b")
+        conn.commit()
+    finally:
+        conn.close()
+    provider = _FakeProvider([
+        _post("LATE_A", "instagram", "ig_main", views=300, impressions=300, likes=9,
+              comments=2, ig_avg_ms=12000, ig_total_ms=3_600_000, duration=40,
+              reach=250, engagement_rate=3.0, skip_rate=40),
+        _post("LATE_B", "instagram", "ig_short", views=100, impressions=100, likes=1,
+              comments=0, ig_avg_ms=4000, ig_total_ms=400_000, duration=40,
+              reach=80, engagement_rate=1.0, skip_rate=80),
+    ])
+    out = zas.sync_zernio_analytics(provider=provider, db_path=db_path)
+    assert out["matched"] == 2
+    assert out["rows_written"] == 1
+
+    ig = get_episode_analytics("ep_abc", db_path=db_path)["instagram"]
+    assert ig["views"] == 400
+    assert ig["likes"] == 10
+    assert ig["comments"] == 2
+    assert ig["reach"] == 330
+    assert ig["total_watch_time_s"] == 4000.0
+    # view-weighted: (12*300 + 4*100) / 400 = 10s ; skip (40*300 + 80*100)/400 = 50
+    assert ig["avg_watch_time_s"] == 10.0
+    assert ig["skip_rate"] == 50.0
+    assert ig["engagement_rate"] == 2.5
+    # clicks 3 + 3 over 400 impressions
+    assert abs(ig["ctr"] - 0.015) < 1e-6
+    assert ig["platform_video_id"] == "ig_main"

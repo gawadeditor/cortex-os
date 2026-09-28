@@ -195,6 +195,55 @@ def _translate_metrics(raw: dict, *, platform_post_id: Optional[str],
     }
 
 
+_SUM_KEYS = ("views", "impressions", "likes", "comments", "shares", "saves",
+             "reach", "follows", "reposts", "total_watch_time_s")
+_RATE_KEYS = ("avg_view_pct", "avg_watch_time_s", "engagement_rate", "skip_rate")
+
+
+def _aggregate_episode_platform(posts: list[dict]) -> dict:
+    """Fold every post of one (episode, platform) into one metrics row.
+
+    An episode publishes several posts per platform (main video + each
+    short), but platform_analytics holds ONE row per (episode, platform,
+    snapshot_date) and all its readers assume that. Storing posts one by
+    one made each overwrite the last, so the row reflected whichever post
+    Zernio listed last — not the episode. Counts are summed; rates are
+    view-weighted (plain mean when no post has views); ctr is recomputed
+    from the implied clicks. platform_video_id is the most-viewed post, so
+    per-video enrichment (YouTube retention) lands on the episode's main
+    video. raw_json keeps every post's own metrics.
+    """
+    if len(posts) == 1:
+        return posts[0]
+
+    def _sum(key):
+        vals = [p[key] for p in posts if p.get(key) is not None]
+        return sum(vals) if vals else None
+
+    def _weighted(key):
+        pairs = [(p[key], p.get("views") or 0) for p in posts if p.get(key) is not None]
+        if not pairs:
+            return None
+        weight = sum(w for _, w in pairs)
+        if weight:
+            return round(sum(v * w for v, w in pairs) / weight, 4)
+        return round(sum(v for v, _ in pairs) / len(pairs), 4)
+
+    out = {k: _sum(k) for k in _SUM_KEYS}
+    out.update({k: _weighted(k) for k in _RATE_KEYS})
+    clicks = [p["ctr"] * p["impressions"] for p in posts
+              if p.get("ctr") is not None and p.get("impressions")]
+    out["ctr"] = (round(sum(clicks) / out["impressions"], 4)
+                  if clicks and out["impressions"] else None)
+    lead = max(posts, key=lambda p: p.get("views") or 0)
+    out["platform_video_id"] = lead.get("platform_video_id")
+    out["raw_json"] = {"posts": [
+        {"platform_post_id": p.get("platform_video_id"), "metrics": p.get("raw_json")}
+        for p in posts
+    ]}
+    return out
+
+
 def sync_zernio_analytics(*, provider=None, db_path: Optional[Path] = None,
                           window_days: int = 7) -> dict:
     """
@@ -221,6 +270,7 @@ def sync_zernio_analytics(*, provider=None, db_path: Optional[Path] = None,
     by_channel: dict = {}
     platforms: dict = {}
 
+    grouped: dict = {}
     for r in rows:
         platform = r["platform"]
         if platform not in VALID_PLATFORMS:
@@ -233,7 +283,6 @@ def sync_zernio_analytics(*, provider=None, db_path: Optional[Path] = None,
                     f"{platform}: {(r['content'] or '')[:50]!r} ({r['published_at']})"
                 )
             continue
-        episode_id, channel_id = ep
         matched += 1
         metrics = _translate_metrics(
             r["metrics"], platform_post_id=r["platform_post_id"], platform=platform,
@@ -246,6 +295,10 @@ def sync_zernio_analytics(*, provider=None, db_path: Optional[Path] = None,
                     "avg_watch_time_s", "total_watch_time_s",
                     "reach", "follows", "engagement_rate")):
             continue
+        grouped.setdefault((ep, platform), []).append(metrics)
+
+    for ((episode_id, channel_id), platform), posts in grouped.items():
+        metrics = _aggregate_episode_platform(posts)
         try:
             store_platform_metrics(
                 episode_id, platform, metrics, source="api",

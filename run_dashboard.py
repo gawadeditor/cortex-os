@@ -7738,12 +7738,25 @@ def channel_content_grid_page(channel_id):
 
     missing_cover_count = sum(1 for i in items if not i["has_cover"])
     needs_attention_count = sum(1 for i in items if i.get("needs_attention"))
+    youtube_cover_pending_count = sum(1 for i in items if i.get("youtube_cover_pending"))
 
     return render_template("channel_content_grid.html",
                            channel=channel, channel_id=channel_id, items=items, load_error=load_error,
                            missing_cover_count=missing_cover_count,
                            needs_attention_count=needs_attention_count,
+                           youtube_cover_pending_count=youtube_cover_pending_count,
                            refreshed=force_refresh)
+
+
+@app.route("/channel/<channel_id>/grid/youtube-cover-done", methods=["POST"])
+def channel_content_grid_youtube_cover_done(channel_id):
+    """Operator confirms they uploaded this post's cover in YouTube Studio
+    (the only path YouTube accepts for a Shorts thumbnail)."""
+    post_id = (request.form.get("post_id") or "").strip()
+    if post_id:
+        from hypogeum.dashboard_content_grid import mark_youtube_cover_done
+        mark_youtube_cover_done(post_id, channel_id, db_path=_db_path())
+    return redirect(f"/channel/{channel_id}/grid?scope={channel_id}", 303)
 
 
 @app.route("/channel/<channel_id>/settings")

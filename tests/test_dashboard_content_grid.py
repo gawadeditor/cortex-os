@@ -247,3 +247,58 @@ def test_manual_cover_pending_still_warns_until_resolved(tmp_path, monkeypatch):
     assert item["has_cover"] is False
     assert item["manual_cover_url"] == "/manual-cover/ep_1.jpg"
     assert "confirmed" not in item["manual_cover_note"].lower()
+
+
+def _seed_live_youtube_short(db_path, *, post_id, published_at="2026-09-26T15:00:00.000Z",
+                              thumb_is_landscape=0, yt_status="published"):
+    _seed_post(db_path, channel_id="hypogeum", episode_id=f"ep_{post_id}", post_id=post_id)
+    platforms = [{"platform": "youtube", "status": yt_status,
+                  "url": "https://www.youtube.com/watch?v=tmG9h_Q_7H0", "published_at": published_at},
+                 {"platform": "instagram", "status": "published", "url": None, "published_at": published_at}]
+    conn = get_connection(db_path)
+    conn.execute(
+        """INSERT INTO content_grid_cache
+           (post_id, channel_id, episode_id, deliverable_id, title, status, scheduled_for,
+            published_at, thumbnail_url, thumb_is_landscape, platforms_json, fetch_error, cached_at)
+           VALUES (?, 'hypogeum', ?, 'main_episode', 'T', 'published', NULL, ?,
+                   'https://media.zernio.com/cover.jpg', ?, ?, NULL, ?)""",
+        (post_id, f"ep_{post_id}", published_at, thumb_is_landscape, json.dumps(platforms),
+         datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_live_youtube_short_flags_manual_studio_cover_until_marked_done(tmp_path):
+    """Zernio's cover never reaches YouTube Shorts surfaces -- YouTube only
+    accepts a Short's cover uploaded by hand in Studio -- so every live Short
+    is flagged, with a direct Studio link, until the operator presses Done."""
+    db_path = tmp_path / "test.db"
+    _seed_live_youtube_short(db_path, post_id="post_new")
+
+    item = cg.get_content_grid("hypogeum", db_path=db_path)[0]
+    assert item["youtube_cover_pending"] is True
+    assert item["youtube_studio_url"] == "https://studio.youtube.com/video/tmG9h_Q_7H0/edit"
+
+    cg.mark_youtube_cover_done("post_new", "hypogeum", db_path=db_path)
+    assert cg.get_content_grid("hypogeum", db_path=db_path)[0]["youtube_cover_pending"] is False
+
+
+def test_posts_fixed_in_the_2026_09_25_remediation_are_not_flagged(tmp_path):
+    db_path = tmp_path / "test.db"
+    _seed_live_youtube_short(db_path, post_id="post_old", published_at="2026-09-20T10:00:00.000Z")
+    assert cg.get_content_grid("hypogeum", db_path=db_path)[0]["youtube_cover_pending"] is False
+
+
+def test_landscape_long_form_and_not_yet_live_posts_are_not_flagged(tmp_path):
+    db_path = tmp_path / "test.db"
+    _seed_live_youtube_short(db_path, post_id="post_16x9", thumb_is_landscape=1)
+    _seed_live_youtube_short(db_path, post_id="post_sched", yt_status="scheduled")
+    items = cg.get_content_grid("hypogeum", db_path=db_path)
+    assert [i["youtube_cover_pending"] for i in items] == [False, False]
+
+
+def test_youtube_video_id_parses_watch_and_shorts_urls():
+    assert cg._youtube_video_id([{"platform": "youtube", "url": "https://youtube.com/watch?v=abc&t=1"}]) == "abc"
+    assert cg._youtube_video_id([{"platform": "youtube", "url": "https://youtube.com/shorts/xyz?feature=s"}]) == "xyz"
+    assert cg._youtube_video_id([{"platform": "tiktok", "url": "https://tiktok.com/v/1"}]) is None

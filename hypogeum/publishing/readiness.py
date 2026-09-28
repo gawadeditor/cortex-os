@@ -966,8 +966,10 @@ def _check_main_episode_thumbnail(episode_id: str, episode_dir: Path, platforms:
         )
 
     # Short-native episodes: the single deliverable IS a 9:16 vertical Short.
-    # YouTube Shorts have no custom-thumbnail slot — the platform covers from a
-    # video frame — so the pipeline records the sentinel
+    # YouTube accepts a custom Shorts thumbnail only from Studio on a computer
+    # (no API path — Zernio's cover never reaches Shorts surfaces; the Content
+    # Grid flags each live Short for a manual Studio upload instead), so it
+    # can't be a publish gate here. The pipeline may record the sentinel
     # main_thumbnail.asset_id == "short_native_autocover" instead of a designed
     # candidate. That is a complete, correct state for a Short; the long-form
     # custom-thumbnail QA lineage below must not be applied to it.

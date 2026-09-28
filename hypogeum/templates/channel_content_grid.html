@@ -19,6 +19,8 @@
                             display: flex; align-items: center; gap: 4px; }
     .cg-attention-badge svg { width: 11px; height: 11px; }
     .cg-attention-note { font-size: 10.5px; color: var(--critical); line-height: 1.4; }
+    .cg-attention-note a { color: var(--critical); text-decoration: underline; }
+    .cg-done-form .btn { width: 100%; min-height: 44px; justify-content: center; font-size: 12px; }
     .cg-poster { aspect-ratio: 9/16; background: var(--bg); position: relative; overflow: hidden;
                  display: flex; align-items: center; }
     .cg-poster img { width: 100%; height: 100%; object-fit: contain; display: block; }
@@ -77,7 +79,8 @@
      lede='Every post this channel has staged or published on Zernio — poster, status, and date, the way Zernio itself shows it.',
      meta=[{'label': 'posts', 'value': items|length},
            {'label': 'missing a cover', 'value': missing_cover_count},
-           {'label': 'needs attention', 'value': needs_attention_count}]) %}
+           {'label': 'needs attention', 'value': needs_attention_count},
+           {'label': 'YouTube cover to upload', 'value': youtube_cover_pending_count}]) %}
     <a href="?refresh=1&scope={{ channel_id }}" class="btn">{{ icon('refresh') }} Refresh from Zernio</a>
   {% endcall %}
 
@@ -96,12 +99,12 @@
   {% else %}
 
   <div class="cg-toolbar">
-    <span class="cg-count">{{ items|length }} post{{ 's' if items|length != 1 }}{% if missing_cover_count %} · <span style="color:var(--warn);">{{ missing_cover_count }} missing a cover</span>{% endif %}{% if needs_attention_count %} · <span style="color:var(--critical);font-weight:700;">{{ needs_attention_count }} needs attention</span>{% endif %}</span>
+    <span class="cg-count">{{ items|length }} post{{ 's' if items|length != 1 }}{% if missing_cover_count %} · <span style="color:var(--warn);">{{ missing_cover_count }} missing a cover</span>{% endif %}{% if needs_attention_count %} · <span style="color:var(--critical);font-weight:700;">{{ needs_attention_count }} needs attention</span>{% endif %}{% if youtube_cover_pending_count %} · <span style="color:var(--critical);font-weight:700;">{{ youtube_cover_pending_count }} YouTube cover{{ 's' if youtube_cover_pending_count != 1 }} to upload</span>{% endif %}</span>
   </div>
 
   <div class="cg-grid">
     {% for it in items %}
-    <div class="cg-card {{ 'needs-attention' if it.needs_attention else ('has-manual-cover' if (not it.has_cover and it.manual_cover_url) else ('no-cover' if not it.has_cover)) }}">
+    <div class="cg-card {{ 'needs-attention' if (it.needs_attention or it.youtube_cover_pending) else ('has-manual-cover' if (not it.has_cover and it.manual_cover_url) else ('no-cover' if not it.has_cover)) }}">
       <div class="cg-poster {{ 'is-landscape' if it.is_landscape }}">
         {% if it.thumbnail_url %}
           <img src="{{ it.thumbnail_url }}" alt="" loading="lazy">
@@ -115,6 +118,8 @@
         {% endif %}
         {% if it.needs_attention %}
         <span class="cg-attention-badge">{{ icon('warning') }} Needs attention</span>
+        {% elif it.youtube_cover_pending %}
+        <span class="cg-attention-badge">{{ icon('warning') }} YouTube cover</span>
         {% elif not it.has_cover and it.manual_cover_url %}
         <span class="cg-manual-badge">{{ icon('download') }} Manual upload</span>
         {% elif not it.has_cover %}
@@ -136,6 +141,18 @@
           Zernio status is "{{ it.status }}", not published — check it live and re-verify the thumbnail once it settles.
           {% if it.not_yet_live_platforms %}Not yet live on: {{ it.not_yet_live_platforms|join(', ') }}.{% endif %}
         </div>
+        {% endif %}
+        {% if it.youtube_cover_pending %}
+        <div class="cg-attention-note">
+          YouTube shows an auto-picked frame on Shorts — it only accepts a Short's cover uploaded
+          by hand in Studio. <a href="{{ it.thumbnail_url }}" target="_blank" rel="noopener" download>Open cover</a>{% if it.youtube_studio_url %},
+          upload it in <a href="{{ it.youtube_studio_url }}" target="_blank" rel="noopener">YouTube Studio</a>{% endif %},
+          Save, then mark it done.
+        </div>
+        <form method="post" action="/channel/{{ channel_id }}/grid/youtube-cover-done" class="cg-done-form">
+          <input type="hidden" name="post_id" value="{{ it.post_id }}">
+          <button type="submit" class="btn">{{ icon('check') }} Done — uploaded in Studio</button>
+        </form>
         {% endif %}
         {% if it.fetch_error %}
         <div class="cg-error-note">{{ it.fetch_error }}</div>

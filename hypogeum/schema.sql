@@ -2489,3 +2489,19 @@ CREATE TABLE IF NOT EXISTS content_grid_cache (
     cached_at      TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_content_grid_cache_ch ON content_grid_cache(channel_id, scheduled_for);
+
+-- ---------------------------------------------------------------------------
+-- youtube_cover_confirmations (2026-09-29)
+-- YouTube only accepts a custom Shorts thumbnail from Studio on a computer --
+-- Zernio's API cover never reaches the Shorts surfaces ("Custom thumbnails
+-- work on videos only, not Shorts", docs.zernio.com/platforms/youtube). Every
+-- published YouTube Short therefore needs a human to upload its designed cover
+-- in Studio; the Content Grid flags each one until the operator presses "Done"
+-- on its card, which writes a row here. Zernio's own record can never reflect
+-- that native edit, so this operator acknowledgement is the only signal.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS youtube_cover_confirmations (
+    post_id       TEXT NOT NULL PRIMARY KEY,  -- Zernio post id
+    channel_id    TEXT NOT NULL,
+    confirmed_at  TEXT NOT NULL
+);

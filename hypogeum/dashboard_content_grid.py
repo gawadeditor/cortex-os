@@ -84,6 +84,50 @@ _MANUALLY_COVER_RESOLVED = {
 }
 
 
+# YouTube Shorts ignore the cover Zernio sends: YouTube only takes a custom
+# Shorts thumbnail from Studio on a computer (no API path; Zernio's docs:
+# "Custom thumbnails work on videos only, not Shorts"). Confirmed live
+# 2026-09-29 on 3 posts whose Zernio record carried the right cover while
+# Studio/Shorts shelf showed an auto-picked frame. So every published YouTube
+# Short is flagged until the operator uploads its cover in Studio and presses
+# "Done" (-> youtube_cover_confirmations). Everything published before this
+# cutoff was re-uploaded and checked by eye in the 2026-09-25 remediation
+# (all 33 videos on both channels) and is treated as already done.
+_YT_COVER_REMEDIATED_BEFORE = "2026-09-25T14:00"
+
+
+def _youtube_video_id(platforms: list[dict]) -> Optional[str]:
+    """The YouTube video id from the post's youtube platform URL
+    (watch?v=<id> or /shorts/<id>), or None."""
+    for p in platforms:
+        if p.get("platform") != "youtube" or not p.get("url"):
+            continue
+        url = p["url"]
+        if "v=" in url:
+            return url.split("v=", 1)[1].split("&", 1)[0] or None
+        if "/shorts/" in url:
+            return url.split("/shorts/", 1)[1].split("?", 1)[0] or None
+    return None
+
+
+def _confirmed_youtube_covers(conn) -> set:
+    return {r["post_id"] for r in conn.execute("SELECT post_id FROM youtube_cover_confirmations")}
+
+
+def mark_youtube_cover_done(post_id: str, channel_id: str, db_path=None) -> None:
+    """Record that the operator uploaded this post's cover in YouTube Studio."""
+    initialize_schema(db_path)
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO youtube_cover_confirmations (post_id, channel_id, confirmed_at) "
+            "VALUES (?, ?, ?)", (post_id, channel_id, _now_iso()))
+        conn.commit()
+    finally:
+        conn.close()
+    log.info("youtube_cover_marked_done", post_id=post_id, channel_id=channel_id)
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -336,6 +380,7 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
 
     conn = get_connection(db_path)
     try:
+        yt_confirmed = _confirmed_youtube_covers(conn)
         out = []
         for p in posts:
             row = rows_for_display[p["post_id"]]
@@ -361,6 +406,17 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
                 if p.get("platform") and p.get("status") not in ("published", None)
             ]
             needs_attention = bool(status) and status not in _OK_STATUSES
+            # A vertical (or not-yet-probed) cover on a live YouTube post is a
+            # Short; a 16:9 long-form video takes Zernio's API cover fine.
+            yt_live = any(pl.get("platform") == "youtube" and pl.get("status") == "published"
+                          for pl in platforms)
+            youtube_video_id = _youtube_video_id(platforms)
+            youtube_cover_pending = (
+                yt_live and zernio_has_cover and not row.get("thumb_is_landscape")
+                and p["post_id"] not in yt_confirmed
+                and p["post_id"] not in _MANUALLY_COVER_RESOLVED
+                and (row.get("published_at") or "") >= _YT_COVER_REMEDIATED_BEFORE
+            )
             out.append({
                 "post_id": p["post_id"],
                 "episode_id": p["episode_id"],
@@ -386,6 +442,9 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
                 ),
                 "platforms": platforms,
                 "fetch_error": row.get("fetch_error"),
+                "youtube_cover_pending": youtube_cover_pending,
+                "youtube_studio_url": (f"https://studio.youtube.com/video/{youtube_video_id}/edit"
+                                       if youtube_video_id else None),
             })
     finally:
         conn.close()

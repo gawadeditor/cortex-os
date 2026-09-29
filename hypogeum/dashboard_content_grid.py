@@ -23,6 +23,7 @@ from typing import Optional
 
 from hypogeum.db import get_connection, initialize_schema
 from hypogeum.logger import get_logger
+from hypogeum.publishing.zernio_schedule_sync import post_release_time
 
 log = get_logger(agent="dashboard_content_grid")
 
@@ -223,7 +224,7 @@ def _fetch_live(provider, post_id: str, *, known_thumbnail_url: Optional[str] = 
     return {
         "title": post.get("title"),
         "status": post.get("status"),
-        "scheduled_for": post.get("scheduledFor"),
+        "scheduled_for": post_release_time(post) or None,
         "published_at": next((p["published_at"] for p in platforms if p.get("published_at")), None),
         "thumbnail_url": thumbnail_url,
         "thumb_is_landscape": (1 if is_landscape else (0 if is_landscape is False else None)),
@@ -381,6 +382,7 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
     conn = get_connection(db_path)
     try:
         yt_confirmed = _confirmed_youtube_covers(conn)
+        yt_holds = {r["post_id"]: dict(r) for r in conn.execute("SELECT * FROM youtube_cover_holds")}
         out = []
         for p in posts:
             row = rows_for_display[p["post_id"]]
@@ -406,6 +408,12 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
                 if p.get("platform") and p.get("status") not in ("published", None)
             ]
             needs_attention = bool(status) and status not in _OK_STATUSES
+            # A YouTube cover hold uploads YouTube ~24h before the other
+            # platforms, so Zernio may report the post mid-way (e.g. partial)
+            # while nothing is wrong -- only flag it if a platform actually failed.
+            if needs_attention and p["post_id"] in yt_holds and not any(
+                    pl.get("status") not in ("published", "pending", "scheduled", None) for pl in platforms):
+                needs_attention = False
             # A vertical (or not-yet-probed) cover on a live YouTube post is a
             # Short; a 16:9 long-form video takes Zernio's API cover fine.
             yt_live = any(pl.get("platform") == "youtube" and pl.get("status") == "published"
@@ -445,6 +453,10 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
                 "youtube_cover_pending": youtube_cover_pending,
                 "youtube_studio_url": (f"https://studio.youtube.com/video/{youtube_video_id}/edit"
                                        if youtube_video_id else None),
+                # youtube_cover_hold state: held | late | released | release_failed | None
+                "youtube_hold_status": (yt_holds.get(p["post_id"]) or {}).get("status"),
+                "youtube_hold_release_at": (yt_holds.get(p["post_id"]) or {}).get("release_at"),
+                "youtube_hold_upload_at": (yt_holds.get(p["post_id"]) or {}).get("upload_at"),
             })
     finally:
         conn.close()

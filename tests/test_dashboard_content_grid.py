@@ -302,3 +302,46 @@ def test_youtube_video_id_parses_watch_and_shorts_urls():
     assert cg._youtube_video_id([{"platform": "youtube", "url": "https://youtube.com/watch?v=abc&t=1"}]) == "abc"
     assert cg._youtube_video_id([{"platform": "youtube", "url": "https://youtube.com/shorts/xyz?feature=s"}]) == "xyz"
     assert cg._youtube_video_id([{"platform": "tiktok", "url": "https://tiktok.com/v/1"}]) is None
+
+
+def _hold(db_path, post_id, status="held"):
+    conn = get_connection(db_path)
+    conn.execute("INSERT INTO youtube_cover_holds VALUES (?, 'hypogeum', 'ep', '2026-09-30T18:00:00.000Z', "
+                 "'2026-09-29T18:00:00.000Z', ?, 'x', NULL, NULL)", (post_id, status))
+    conn.commit()
+    conn.close()
+
+
+def test_held_post_mid_upload_is_not_flagged_needs_attention_but_cover_still_pending(tmp_path):
+    """YouTube uploads private ~24h before the other platforms, so Zernio can
+    report the post as partial while nothing failed -- that must not look
+    like a broken post; the cover to-do still shows, with its hold state."""
+    db_path = tmp_path / "test.db"
+    _seed_live_youtube_short(db_path, post_id="post_held")
+    conn = get_connection(db_path)
+    conn.execute("UPDATE content_grid_cache SET status='partial', platforms_json=? WHERE post_id='post_held'",
+                 (json.dumps([{"platform": "youtube", "status": "published",
+                               "url": "https://www.youtube.com/watch?v=abc"},
+                              {"platform": "instagram", "status": "pending"}]),))
+    conn.commit()
+    conn.close()
+    _hold(db_path, "post_held")
+
+    item = cg.get_content_grid("hypogeum", db_path=db_path)[0]
+    assert item["needs_attention"] is False
+    assert item["youtube_cover_pending"] is True
+    assert item["youtube_hold_status"] == "held"
+    assert item["youtube_hold_release_at"] == "2026-09-30T18:00:00.000Z"
+
+
+def test_held_post_with_a_genuinely_failed_platform_still_needs_attention(tmp_path):
+    db_path = tmp_path / "test.db"
+    _seed_live_youtube_short(db_path, post_id="post_fail")
+    conn = get_connection(db_path)
+    conn.execute("UPDATE content_grid_cache SET status='partial', platforms_json=? WHERE post_id='post_fail'",
+                 (json.dumps([{"platform": "youtube", "status": "published"},
+                              {"platform": "facebook", "status": "failed"}]),))
+    conn.commit()
+    conn.close()
+    _hold(db_path, "post_fail")
+    assert cg.get_content_grid("hypogeum", db_path=db_path)[0]["needs_attention"] is True

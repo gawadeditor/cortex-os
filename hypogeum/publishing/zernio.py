@@ -707,6 +707,97 @@ class ZernioProvider:
             return {"status_code": response.status_code, "post": None, "error": response.json_body}
         return {"status_code": response.status_code, "post": response.json_body.get("post", response.json_body), "error": None}
 
+    def update_platform_entry(self, provider_post_id: str, platform: str, *,
+                              scheduled_for: Optional[str] = None,
+                              platform_specific_data: Optional[dict] = None,
+                              db_path: Optional[Path] = None) -> dict:
+        """
+        PUT /v1/posts/{id} changing ONE platform's own entry on a scheduled
+        post -- its per-platform `scheduledFor` and/or a shallow merge into
+        its `platformSpecificData` -- and nothing else. Every other field is
+        read back via get_post() and echoed: the post's title/content/tags/
+        timezone (top-level scheduledFor is omitted, see below), its mediaItems (reduced to url/type/thumbnail/
+        title), and every other platforms[] entry via the same
+        _whitelist_platform_entry_for_put() repair_existing_post() uses
+        (Zernio validates PUT bodies strictly). Callers must re-GET and
+        verify the result; this returns {status_code, error, before} where
+        `before` is the pre-PUT post, for that comparison or a restore.
+        Raises ZernioTransportError on a network failure.
+        """
+        current = self.get_post(provider_post_id, db_path=db_path)
+        before = current.get("post")
+        if current.get("status_code") != 200 or not before:
+            return {"status_code": current.get("status_code"), "error": current.get("error"), "before": None}
+
+        entries = []
+        found = False
+        for raw in before.get("platforms") or []:
+            entry = _whitelist_platform_entry_for_put(raw)
+            if entry.get("platform") == platform:
+                found = True
+                if scheduled_for is not None:
+                    entry["scheduledFor"] = scheduled_for
+                if platform_specific_data:
+                    psd = dict(entry.get("platformSpecificData") or {})
+                    psd.update(platform_specific_data)
+                    entry["platformSpecificData"] = psd
+            entries.append(entry)
+        if not found:
+            return {"status_code": None, "error": f"post has no {platform} entry", "before": before}
+
+        body: Dict[str, object] = {
+            "platforms": entries,
+            "mediaItems": [
+                {k: m[k] for k in ("url", "type", "thumbnail", "title") if m.get(k) is not None}
+                for m in before.get("mediaItems") or []
+            ],
+        }
+        # Top-level scheduledFor is deliberately NOT echoed: sending it re-applies
+        # the post-wide time to every platform, overwriting the per-platform one
+        # this call exists to set (confirmed live 2026-09-29), while Zernio's
+        # update-post docs state "Omitting scheduledFor preserves the post's
+        # current scheduling state."
+        for key in ("title", "content", "tags", "timezone"):
+            if before.get(key) is not None:
+                body[key] = before[key]
+
+        credential = _resolve_zernio_credential(db_path)
+        if credential is None:
+            raise ZernioCredentialNotFoundError(
+                "no active provider='zernio' secret profile found in Credential Manager"
+            )
+        headers = {"Authorization": f"Bearer {credential}", "Content-Type": "application/json"}
+        del credential
+        response = self._transport.put(url=f"{_ZERNIO_POSTS_URL}/{provider_post_id}",
+                                       headers=headers, json_body=body,
+                                       timeout=_DEFAULT_TIMEOUT_SECONDS)
+        ok = response.status_code in (200, 201)
+        return {"status_code": response.status_code,
+                "error": None if ok else response.json_body, "before": before}
+
+    def set_youtube_privacy(self, provider_post_id: str, privacy_status: str, *,
+                            db_path: Optional[Path] = None) -> dict:
+        """POST /v1/posts/{id}/update-metadata {platform: youtube, privacyStatus} --
+        Zernio's "Update post metadata" (YouTube-only), used to release a
+        video uploaded private once its Shorts cover is confirmed in Studio.
+        Returns {status_code, error}. Raises ZernioTransportError on a
+        network failure."""
+        if privacy_status not in ("public", "private", "unlisted"):
+            raise ValueError(f"invalid privacy_status {privacy_status!r}")
+        credential = _resolve_zernio_credential(db_path)
+        if credential is None:
+            raise ZernioCredentialNotFoundError(
+                "no active provider='zernio' secret profile found in Credential Manager"
+            )
+        headers = {"Authorization": f"Bearer {credential}", "Content-Type": "application/json"}
+        del credential
+        response = self._transport.post(
+            url=f"{_ZERNIO_POSTS_URL}/{provider_post_id}/update-metadata", headers=headers,
+            json_body={"platform": "youtube", "privacyStatus": privacy_status},
+            timeout=_DEFAULT_TIMEOUT_SECONDS)
+        ok = response.status_code in (200, 201)
+        return {"status_code": response.status_code, "error": None if ok else response.json_body}
+
     def get_analytics(self, *, page: int = 1, limit: int = 100,
                       source: Optional[str] = None,
                       post_id: Optional[str] = None,

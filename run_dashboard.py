@@ -7755,7 +7755,10 @@ def channel_content_grid_youtube_cover_done(channel_id):
     post_id = (request.form.get("post_id") or "").strip()
     if post_id:
         from hypogeum.dashboard_content_grid import mark_youtube_cover_done
+        from hypogeum.publishing.youtube_cover_hold import release_due
         mark_youtube_cover_done(post_id, channel_id, db_path=_db_path())
+        # A held post already past its slot ('late') goes public right away.
+        release_due(db_path=_db_path())
     return redirect(f"/channel/{channel_id}/grid?scope={channel_id}", 303)
 
 
@@ -11145,6 +11148,12 @@ def main():
     # to be the only thing syncing, and it doesn't come back after a reboot).
     from hypogeum.analytics_autosync import start_analytics_autosync
     start_analytics_autosync(_db_path())
+
+    # No YouTube Short goes public without its Studio-uploaded cover: hold each
+    # scheduled post's YouTube upload private ~24h early, release at its slot
+    # only once the cover is confirmed (see youtube_cover_hold's docstring).
+    from hypogeum.publishing.youtube_cover_hold import start_youtube_cover_hold_loop
+    start_youtube_cover_hold_loop(_db_path())
 
     app.run(host=args.host, port=args.port, debug=False)
 

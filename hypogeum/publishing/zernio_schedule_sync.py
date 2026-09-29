@@ -44,6 +44,21 @@ _LOCAL_SLOT_GRACE_SECONDS = 2 * 3600
 _EP_ID_IN_URL = re.compile(r"(ep_[0-9a-fA-F]{8})")
 
 
+def post_release_time(post: dict) -> str:
+    """The post's public release time: the LATEST per-platform scheduledFor,
+    else the post-level one. Zernio sets the post-level scheduledFor to the
+    EARLIEST platform time, and a YouTube cover hold
+    (hypogeum.publishing.youtube_cover_hold) moves YouTube's private upload
+    ~24h ahead of the real slot — so the post-level value would put the post
+    on the wrong calendar day. Without a hold every platform shares one time
+    and this equals the post-level value."""
+    times = [str(pl.get("scheduledFor")).strip() for pl in post.get("platforms") or []
+             if isinstance(pl, dict) and pl.get("scheduledFor")]
+    if times:
+        return max(times, key=lambda s: datetime.fromisoformat(s.replace("Z", "+00:00")))
+    return (post.get("scheduledFor") or "").strip()
+
+
 def _episode_id_from_media(post: dict) -> Optional[str]:
     """Parse ``ep_<id>`` out of any media URL on the post, or None."""
     media = post.get("mediaItems") or post.get("media") or []
@@ -149,7 +164,7 @@ def sync_zernio_schedule(
             pass
         try:
             for p in posts:
-                sf = (p.get("scheduledFor") or "").strip()
+                sf = post_release_time(p)
                 if not sf:
                     continue
                 try:

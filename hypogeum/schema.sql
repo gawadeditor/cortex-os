@@ -2505,3 +2505,25 @@ CREATE TABLE IF NOT EXISTS youtube_cover_confirmations (
     channel_id    TEXT NOT NULL,
     confirmed_at  TEXT NOT NULL
 );
+
+-- ---------------------------------------------------------------------------
+-- youtube_cover_holds (2026-09-29)
+-- Operator rule: no YouTube Short goes public without its designed cover.
+-- Since that cover can only be set in Studio on an already-uploaded video,
+-- hypogeum.publishing.youtube_cover_hold moves each scheduled post's YouTube
+-- entry to upload PRIVATE ~24h before `release_at` (the original slot; the
+-- other platforms keep it), and flips it public at release_at only once the
+-- cover is confirmed (youtube_cover_confirmations). Unconfirmed at release_at
+-- -> status 'late', stays private.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS youtube_cover_holds (
+    post_id        TEXT NOT NULL PRIMARY KEY,  -- Zernio post id
+    channel_id     TEXT NOT NULL,
+    episode_id     TEXT,
+    release_at     TEXT NOT NULL,              -- original YouTube slot (UTC ISO)
+    upload_at      TEXT NOT NULL,              -- moved YouTube scheduledFor (private upload)
+    status         TEXT NOT NULL,              -- held | late | released | release_failed
+    held_at        TEXT NOT NULL,
+    released_at    TEXT,
+    last_error     TEXT
+);

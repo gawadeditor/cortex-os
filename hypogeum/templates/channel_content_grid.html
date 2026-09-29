@@ -119,7 +119,7 @@
         {% if it.needs_attention %}
         <span class="cg-attention-badge">{{ icon('warning') }} Needs attention</span>
         {% elif it.youtube_cover_pending %}
-        <span class="cg-attention-badge">{{ icon('warning') }} YouTube cover</span>
+        <span class="cg-attention-badge">{{ icon('warning') }} {{ 'YouTube late' if it.youtube_hold_status == 'late' else 'YouTube cover' }}</span>
         {% elif not it.has_cover and it.manual_cover_url %}
         <span class="cg-manual-badge">{{ icon('download') }} Manual upload</span>
         {% elif not it.has_cover %}
@@ -142,10 +142,24 @@
           {% if it.not_yet_live_platforms %}Not yet live on: {{ it.not_yet_live_platforms|join(', ') }}.{% endif %}
         </div>
         {% endif %}
+        {% if it.youtube_hold_status == 'held' and not it.youtube_cover_pending %}
+        <div class="cg-manual-note">
+          YouTube uploads <strong>private</strong> at {{ it.youtube_hold_upload_at[:16] | replace('T', ' ') }} UTC so its cover
+          can be set in Studio first; it goes public at {{ it.youtube_hold_release_at[:16] | replace('T', ' ') }} UTC only once marked done.
+        </div>
+        {% elif it.youtube_hold_status == 'release_failed' %}
+        <div class="cg-attention-note">Cover confirmed, but making the YouTube video public failed — it is still private. Retrying every 5 minutes.</div>
+        {% endif %}
         {% if it.youtube_cover_pending %}
         <div class="cg-attention-note">
-          YouTube shows an auto-picked frame on Shorts — it only accepts a Short's cover uploaded
-          by hand in Studio. <a href="{{ it.thumbnail_url }}" target="_blank" rel="noopener" download>Open cover</a>{% if it.youtube_studio_url %},
+          {% if it.youtube_hold_status == 'late' %}
+          <strong>Release time passed — still private on YouTube</strong>, waiting for its cover. It goes public as soon as you mark it done.
+          {% elif it.youtube_hold_status == 'held' %}
+          Uploaded <strong>private</strong> on YouTube. Goes public at {{ it.youtube_hold_release_at[:16] | replace('T', ' ') }} UTC only once its cover is done.
+          {% else %}
+          YouTube shows an auto-picked frame on Shorts — it only accepts a Short's cover uploaded by hand in Studio.
+          {% endif %}
+          <a href="{{ it.thumbnail_url }}" target="_blank" rel="noopener" download>Open cover</a>{% if it.youtube_studio_url %},
           upload it in <a href="{{ it.youtube_studio_url }}" target="_blank" rel="noopener">YouTube Studio</a>{% endif %},
           Save, then mark it done.
         </div>

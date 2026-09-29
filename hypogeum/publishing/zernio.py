@@ -1701,6 +1701,17 @@ class ZernioProvider:
                 merged_psd = dict(entry.get("platformSpecificData") or {})
                 merged_psd.update(new_data)
                 entry["platformSpecificData"] = merged_psd
+            # TikTok keeps its own copy of tiktokSettings on its entry, which
+            # wins over the root-level tiktokSettings sent below -- a cover
+            # change sent only at the root silently never applied (found
+            # 2026-09-29: the 09-11 cover regeneration left every scheduled
+            # post's TikTok cover on the old design). Merge it into the entry.
+            if p == "tiktok" and (platform_settings or {}).get("tiktok"):
+                entry = dict(entry)
+                merged_psd = dict(entry.get("platformSpecificData") or {})
+                merged_psd["tiktokSettings"] = {**(merged_psd.get("tiktokSettings") or {}),
+                                                **platform_settings["tiktok"]}
+                entry["platformSpecificData"] = merged_psd
             # A caller-supplied `scheduled_for` is a real reschedule, not a
             # content fix -- carry it onto every retained platform entry too.
             # Zernio honours `platforms[].scheduledFor` over the top-level

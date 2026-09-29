@@ -1075,3 +1075,33 @@ class TestRepairFacebookPlatformSpecificData:
         assert put_body["tiktokSettings"] == {"privacy_level": "PUBLIC_TO_EVERYONE"}
         tiktok_entry = next(p for p in put_body["platforms"] if p["platform"] == "tiktok")
         assert "platformSpecificData" not in tiktok_entry
+
+
+class TestRepairTikTokCoverReachesTheEntry:
+    def test_tiktok_cover_is_merged_into_the_tiktok_entry_not_only_the_root(self, db_path):
+        """TikTok's own entry copy of tiktokSettings wins over the root one --
+        a cover sent only at the root never applied (2026-09-29: every
+        scheduled post kept its pre-regeneration TikTok cover)."""
+        _bind_all(db_path)
+        transport = FakeRepairTransport(
+            get_response=_existing_post_get_response(
+                platforms=ALL_PLATFORMS,
+                platform_specific_data={"tiktok": {"tiktokSettings": {
+                    "privacy_level": "PUBLIC_TO_EVERYONE",
+                    "video_cover_image_url": "https://media.zernio.com/old_cover.jpg"}}}),
+            put_response=_successful_put_response(),
+        )
+        provider = ZernioProvider(transport=transport)
+        provider.repair_existing_post(
+            "post_short_001", channel_id=CHANNEL_ID, deliverable_id="short_001", episode_id=EPISODE_ID,
+            deliverable_type="short", platforms=list(ALL_PLATFORMS),
+            media=[MediaReference(url="https://media.zernio.com/repaired.mp4", media_type="video", title="T")],
+            title="T", content="C", db_path=db_path,
+            platform_settings={"tiktok": {"video_cover_image_url": "https://media.zernio.com/new_cover.jpg"}},
+        )
+        body = transport.put_calls[0]
+        tt = next(e for e in body["platforms"] if e["platform"] == "tiktok")
+        assert tt["platformSpecificData"]["tiktokSettings"] == {
+            "privacy_level": "PUBLIC_TO_EVERYONE",
+            "video_cover_image_url": "https://media.zernio.com/new_cover.jpg",
+        }

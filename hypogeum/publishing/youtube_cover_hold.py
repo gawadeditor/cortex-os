@@ -278,8 +278,12 @@ def start_youtube_cover_hold_loop(db_path=None, *, check_every_s: int = 300) -> 
 
     def _loop():
         while not stop.is_set():
-            sweep(db_path=db_path)
-            stop.wait(check_every_s)
+            res = sweep(db_path=db_path)
+            # A failed sweep retries in 30s, not a full interval: on wake from
+            # sleep every dashboard thread hits SQLite at once and one of them
+            # gets "database is locked" (2026-09-30 19:05Z, right when two
+            # held videos were already past their release time).
+            stop.wait(30 if res.get("error") else check_every_s)
 
     t = threading.Thread(target=_loop, name="youtube-cover-hold", daemon=True)
     t.stop_event = stop  # type: ignore[attr-defined]

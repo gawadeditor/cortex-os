@@ -761,7 +761,7 @@ def generate_cadence_recommendation(
 
 
 _DOW_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-_SCHEDULE_MIN_SLOT_POSTS = 2  # ignore a "best" slot backed by a single post
+_SCHEDULE_MIN_SLOT_POSTS = 8  # == zernio_aggregate_sync.BEST_TIME_MIN_POSTS; fewer posts behind a slot is noise
 
 
 def generate_schedule_recommendation(
@@ -794,13 +794,11 @@ def generate_schedule_recommendation(
     if not roll or not roll.get("payload"):
         return None
 
-    slots = [s for s in roll["payload"]
-             if isinstance(s.get("avg_engagement"), (int, float))
-             and (s.get("post_count") or 0) >= _SCHEDULE_MIN_SLOT_POSTS
-             and s.get("day_of_week") is not None and s.get("hour") is not None]
+    from hypogeum.publishing.zernio_aggregate_sync import reliable_best_time_slots
+    slots = reliable_best_time_slots(roll["payload"], min_posts=_SCHEDULE_MIN_SLOT_POSTS)
     if not slots:
         return None
-    top = max(slots, key=lambda s: s["avg_engagement"])
+    top = slots[0]
     dow = int(top["day_of_week"])
     hour = int(top["hour"])
     day_label = _DOW_NAMES[dow] if 0 <= dow < 7 else f"day{dow}"

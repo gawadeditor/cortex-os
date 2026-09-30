@@ -132,9 +132,8 @@ def get_client_overview(client_id: str, db_path: Optional[Path] = None) -> dict:
     try:
         from hypogeum.publishing.zernio_aggregate_sync import get_rollup
         bt = get_rollup("best_time", scope=f"client:{client_id}", db_path=db_path)
-        slots = sorted([s for s in (bt or {}).get("payload", [])
-                        if (s.get("post_count") or 0) >= 2],
-                       key=lambda s: -(s.get("avg_engagement") or 0))[:5] if bt else []
+        from hypogeum.publishing.zernio_aggregate_sync import reliable_best_time_slots
+        slots = reliable_best_time_slots((bt or {}).get("payload"))[:5] if bt else []
         out["best_time"] = [
             {"day": _DOW[int(s["day_of_week"])] if 0 <= int(s["day_of_week"]) < 7 else "?",
              "hour": int(s["hour"]), "engagement": round(s.get("avg_engagement") or 0, 1),

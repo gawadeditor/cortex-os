@@ -724,15 +724,26 @@ class TestScheduleRecommendation:
     def test_emits_publishing_time_action_from_best_slot(self, db_path):
         from hypogeum.learning_engine import generate_schedule_recommendation
         self._seed_best_time(db_path, [
-            {"day_of_week": 0, "hour": 10, "avg_engagement": 21, "post_count": 4},
-            {"day_of_week": 2, "hour": 18, "avg_engagement": 9.25, "post_count": 4},
+            {"day_of_week": 0, "hour": 10, "avg_engagement": 21, "post_count": 8},
+            {"day_of_week": 2, "hour": 18, "avg_engagement": 9.25, "post_count": 12},
             {"day_of_week": 6, "hour": 14, "avg_engagement": 99, "post_count": 1},
+            {"day_of_week": 2, "hour": 21, "avg_engagement": 50, "post_count": 7},
         ])
         rec = generate_schedule_recommendation("hypogeum", db_path=db_path)
         assert rec is not None and rec["dimension"] == "publishing_time"
         assert rec["evidence"]["best_slot"]["label"] == "Mon 10:00"
-        # single-post slot with the highest engagement must be ignored
+        # slots backed by fewer than 8 posts (noise) must be ignored, however high
         assert rec["evidence"]["best_slot"]["day_of_week"] == 0
+
+    def test_only_thin_slots_emits_nothing(self, db_path):
+        """2026-09-30: twinkle's 'best' slot sat at #1 for weeks on ONE post."""
+        from hypogeum.learning_engine import generate_schedule_recommendation
+        self._seed_best_time(db_path, [
+            {"day_of_week": 2, "hour": 21, "avg_engagement": 3.0, "post_count": 1},
+            {"day_of_week": 0, "hour": 10, "avg_engagement": 21, "post_count": 2},
+            {"day_of_week": 4, "hour": 16, "avg_engagement": 2.1, "post_count": 4},
+        ])
+        assert generate_schedule_recommendation("hypogeum", db_path=db_path) is None
 
     def test_no_rollup_returns_none(self, db_path):
         from hypogeum.learning_engine import generate_schedule_recommendation
@@ -741,7 +752,7 @@ class TestScheduleRecommendation:
     def test_dedup_per_channel(self, db_path):
         from hypogeum.learning_engine import generate_schedule_recommendation
         self._seed_best_time(db_path, [
-            {"day_of_week": 3, "hour": 15, "avg_engagement": 5, "post_count": 4}])
+            {"day_of_week": 3, "hour": 15, "avg_engagement": 5, "post_count": 8}])
         a = generate_schedule_recommendation("hypogeum", db_path=db_path)
         b = generate_schedule_recommendation("hypogeum", db_path=db_path)
         assert a["action_id"] == b["action_id"]

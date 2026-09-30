@@ -509,10 +509,8 @@ def get_growth_dashboard(channel_id: Optional[str] = None,
                     pass
         try:
             bt = get_rollup("best_time", scope=cid, db_path=db_path) if get_rollup else None
-            slots = sorted(
-                [s for s in (bt or {}).get("payload", []) if (s.get("post_count") or 0) >= 2],
-                key=lambda s: -(s.get("avg_engagement") or 0),
-            )[:5] if bt else []
+            from hypogeum.publishing.zernio_aggregate_sync import reliable_best_time_slots
+            slots = reliable_best_time_slots((bt or {}).get("payload"))[:5] if bt else []
             row["best_time"] = [
                 {"day": _DOW[int(s["day_of_week"])] if 0 <= int(s["day_of_week"]) < 7 else "?",
                  "hour": int(s["hour"]), "engagement": round(s.get("avg_engagement") or 0, 1),

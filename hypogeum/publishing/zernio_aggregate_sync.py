@@ -87,6 +87,27 @@ def _normalise_best_time(data: dict) -> Optional[list]:
     return out
 
 
+# Zernio's best-time slots are ranked from OUR OWN past posts' engagement at
+# the times we happened to publish -- not from when the audience is online --
+# so a slot backed by one or two posts is noise, not a finding (2026-09-30:
+# twinkle's "best" slot, Wed 21:00, sat at #1 for three weeks on n=1;
+# hypogeum Mon 10:00 read 21.0 on n=2 and settled at 4.6 by n=14). Zernio
+# counts each platform as a post, so 8 ~= two episodes across 4 platforms.
+BEST_TIME_MIN_POSTS = 8
+
+
+def reliable_best_time_slots(payload, *, min_posts: int = BEST_TIME_MIN_POSTS) -> list:
+    """The best-time rollup's slots with at least `min_posts` posts behind
+    them, highest avg_engagement first. The single place every consumer
+    (dashboard pages, client advisory, learning engine) filters slots."""
+    slots = [s for s in (payload or [])
+             if isinstance(s, dict)
+             and isinstance(s.get("avg_engagement"), (int, float))
+             and (s.get("post_count") or 0) >= min_posts
+             and s.get("day_of_week") is not None and s.get("hour") is not None]
+    return sorted(slots, key=lambda s: -s["avg_engagement"])
+
+
 def _normalise_posting_frequency(data: dict) -> Optional[list]:
     freq = (data or {}).get("frequency")
     if not isinstance(freq, list) or not freq:

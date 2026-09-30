@@ -166,3 +166,18 @@ def test_no_data_returns_not_ok(db_path):
     out = zas.sync_zernio_aggregates(provider=_FakeProvider(), db_path=db_path)
     assert out["ok"] is False
     assert out["kinds_written"] == []
+
+
+def test_reliable_best_time_slots_drops_thin_slots_and_sorts():
+    from hypogeum.publishing.zernio_aggregate_sync import reliable_best_time_slots, BEST_TIME_MIN_POSTS
+    assert BEST_TIME_MIN_POSTS == 8
+    payload = [
+        {"day_of_week": 2, "hour": 21, "avg_engagement": 3.0, "post_count": 1},   # n=1 noise
+        {"day_of_week": 0, "hour": 10, "avg_engagement": 4.6, "post_count": 14},
+        {"day_of_week": 2, "hour": 18, "avg_engagement": 4.9, "post_count": 15},
+        {"day_of_week": 5, "hour": 14, "avg_engagement": 3.0, "post_count": 4},   # below 8
+        {"day_of_week": None, "hour": 9, "avg_engagement": 9, "post_count": 20},  # malformed
+    ]
+    out = reliable_best_time_slots(payload)
+    assert [(s["day_of_week"], s["hour"]) for s in out] == [(2, 18), (0, 10)]
+    assert reliable_best_time_slots(None) == []

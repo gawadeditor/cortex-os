@@ -23,9 +23,9 @@
 - [x] تشغيل Postiz بـ Docker في `~/postiz-trial`، على `http://localhost:4007`، ومفتوح على الماك بس.
   - Docker على الماك ده لازم يتشغل بـ: `env -u DOCKER_HOST docker --context desktop-linux compose ...`
     (المتغير `DOCKER_HOST` اللي على الجهاز بيوصّل لـ socket مبيشتغلش، وكل `pull` بيرجع "Not Found").
-- [ ] **أنت:** تعمل حساب الأدمن في `http://localhost:4007` (بالإيميل وكلمة سر بتختارها أنت).
+- [x] حساب الأدمن اتعمل (2026-10-01).
 - [ ] بعدها نقفل التسجيل (`DISABLE_REGISTRATION: 'true'`).
-- [ ] نربط **YouTube بتاع Twinkle** في وضع التجربة (Google OAuth، Testing mode، وإيميلك كـ test user).
+- [x] **YouTube بتاع Twinkle اتربط** (2026-10-01). Google Cloud project `cortex-postiz` على **gawadeditor@gmail.com** (الحساب اللي القنوات عليه)، والـ YouTube Data وAnalytics وReporting APIs متفعلين، والـ OAuth app اسمه "Cortex Publisher" (External، Testing)، وgawadeditor test user، والـ Web client redirect هو `http://localhost:4007/integrations/social/youtube`. الـ credentials في `~/postiz-trial/docker-compose.yaml` (chmod 600).
 - [ ] نربط **Facebook وInstagram بتوع Twinkle** في وضع التطوير (Meta Development mode، وحسابك ليه role في الأبلكيشن).
 - [ ] تيك توك محتاج HTTPS حتى على الجهاز المحلي، فهيتأجل لحد ما يبقى عندنا دومين، أو نعمل شهادة محلية.
 - [ ] **اختبارات الـ API** (على فيديو private):
@@ -33,7 +33,9 @@
   - [ ] YouTube: عنوان، و`type` (public/private/unlisted)، و`selfDeclaredMadeForKids`، و`tags`.
   - [ ] ميعاد مختلف لكل منصة، يعني post منفصل لكل integration.
   - [ ] حالة البوست بعد النشر، والـ webhooks.
-  - [ ] **التحليلات:** هل الـ API بيرجع المشاهدات واللايكات لكل بوست؟
+  - [x] الـ API شغال على `http://localhost:4007/api/public/v1` (الـ header: `Authorization: <key>`، والمفتاح في `~/postiz-trial/.api_key`). `GET /integrations` شغال.
+  - [~] **التحليلات:** `GET /analytics/{integration-id}?date=30` شغال لـ YouTube (minutes watched، وavg view duration و%، وsubs gained/lost، وlikes)، **بس مفيهوش عدد المشاهدات**. الـ per-post (`GET /analytics/post/{postId}`) بيشتغل بس على البوستات اللي اتنشرت من Postiz نفسه. **لسه:** نتأكد إن فيه views per post.
+  - ملحوظة: حد الـ API الافتراضي **30 طلب في الساعة** (`API_LIMIT` في الـ compose، وينفع نزوده).
 - [ ] **نقطة قرار:** لو كل ده اشتغل، نكمل للمرحلة 2. ولو التحليلات ناقصة، نحدد بديلها الأول.
 
 ## المرحلة 1: موافقات المنصات (نبدأها دلوقتي بالتوازي، وبتاخد من 2 لـ 6 أسابيع)

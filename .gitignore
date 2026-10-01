@@ -60,7 +60,7 @@ grant_spec_ep_af078f34.json
 operating_grant_spec_*.json
 
 # Local environment backups / scratch PR bodies — never commit
-.env.bak.*
+.env.bak*
 PR_BODY.md
 
 # VODER (2026-09-20) — vendored external tool, own git history/model
@@ -72,3 +72,9 @@ vendor/voder/VODER/
 # source-level review only (SEO/metadata generation patterns). Own git
 # history; never tracked inside this repo.
 experiments/moneyprinterturbo_review/MoneyPrinterTurbo/
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+!.env.example

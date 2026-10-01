@@ -30,7 +30,7 @@
 - [x] **YouTube بتاع Hypogeum اتربط** (2026-10-01).
 - [x] **Facebook Pages الاتنين اتربطوا** (The Hypogeum وtwinkleminitales)، و**Instagram بتاع Hypogeum** (2026-10-01)، بأبلكيشن Meta "Cortex Publisher" (`1406469254364317`، Business، Development mode، Facebook Login for Business).
 - [ ] **Instagram بتاع Twinkle:** مش مربوط بصفحة twinkleminitales على فيسبوك (اتأكدنا من الـ Graph API)، فمش بيظهر. لازم يتربط بالصفحة (Accounts Center أو Page settings → Linked accounts).
-- [~] **TikTok (sandbox):** **Twinkle اتربط** (2026-10-01). Direct Post حتى بـ "Only me" بيترفض (`unaudited_client_can_only_post_to_private_accounts`): لحد الـ audit **الحساب كله** لازم يبقى private، ومعملناش كده. وضع **Upload** (draft في inbox التطبيق) اشتغل واتأكدنا منه. Hypogeum لسه: محتاج نسجل دخول tiktok.com بـ thehypogeum1.
+- [~] **TikTok (sandbox):** **Twinkle اتربط** (2026-10-01). Direct Post حتى بـ "Only me" بيترفض (`unaudited_client_can_only_post_to_private_accounts`): لحد الـ audit **الحساب كله** لازم يبقى private، ومعملناش كده. وضع **Upload** (draft في inbox التطبيق) اشتغل واتأكدنا منه. **Hypogeum اتربط كمان** (thehypogeum1).
 - [ ] **اختبارات الـ API** (على فيديو private):
   - [ ] رفع ميديا (`/upload`) ونشر مجدول (`type: schedule`, `date`).
   - [ ] YouTube: عنوان، و`type` (public/private/unlisted)، و`selfDeclaredMadeForKids`، و`tags`.

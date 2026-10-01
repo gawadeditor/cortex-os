@@ -24,10 +24,13 @@
   - Docker على الماك ده لازم يتشغل بـ: `env -u DOCKER_HOST docker --context desktop-linux compose ...`
     (المتغير `DOCKER_HOST` اللي على الجهاز بيوصّل لـ socket مبيشتغلش، وكل `pull` بيرجع "Not Found").
 - [x] حساب الأدمن اتعمل (2026-10-01).
-- [ ] بعدها نقفل التسجيل (`DISABLE_REGISTRATION: 'true'`).
+- [x] التسجيل اتقفل (`DISABLE_REGISTRATION: 'true'`، 2026-10-01).
+- [x] **Postiz بقى على `https://postiz.cortexchannels.com`** (2026-10-01) عن طريق Cloudflare Tunnel اسمه `cortex-postiz` (`~/.cloudflared/config.yml`، الـ hostname ده بس → `127.0.0.1:4007`). الحماية (SSRF) رجعت شغالة، والـ forwarder مبقاش لازم. الـ script: `~/postiz-trial/go-public.sh` (والرجوع: `docker-compose.yaml.bak-localhost`). ⚠️ التانل شغال بـ nohup، **بيقع مع أي restart** لحد ما نخليه service على السيرفر.
 - [x] **YouTube بتاع Twinkle اتربط** (2026-10-01). Google Cloud project `cortex-postiz` على **gawadeditor@gmail.com** (الحساب اللي القنوات عليه)، والـ YouTube Data وAnalytics وReporting APIs متفعلين، والـ OAuth app اسمه "Cortex Publisher" (External، Testing)، وgawadeditor test user، والـ Web client redirect هو `http://localhost:4007/integrations/social/youtube`. الـ credentials في `~/postiz-trial/docker-compose.yaml` (chmod 600).
-- [ ] نربط **Facebook وInstagram بتوع Twinkle** في وضع التطوير (Meta Development mode، وحسابك ليه role في الأبلكيشن).
-- [ ] تيك توك محتاج HTTPS حتى على الجهاز المحلي، فهيتأجل لحد ما يبقى عندنا دومين، أو نعمل شهادة محلية.
+- [x] **YouTube بتاع Hypogeum اتربط** (2026-10-01).
+- [x] **Facebook Pages الاتنين اتربطوا** (The Hypogeum وtwinkleminitales)، و**Instagram بتاع Hypogeum** (2026-10-01)، بأبلكيشن Meta "Cortex Publisher" (`1406469254364317`، Business، Development mode، Facebook Login for Business).
+- [ ] **Instagram بتاع Twinkle:** مش مربوط بصفحة twinkleminitales على فيسبوك (اتأكدنا من الـ Graph API)، فمش بيظهر. لازم يتربط بالصفحة (Accounts Center أو Page settings → Linked accounts).
+- [~] **TikTok:** الأبلكيشن جاهز (تحت). مستني الـ sandbox secret يتحط في Postiz (`~/postiz-trial/set-tiktok.sh`، بيقرا من الـ clipboard) وTwinkle يتضاف target user، وبعدها نربط الحسابين ونعمل بوست تجربة ("Only me").
 - [ ] **اختبارات الـ API** (على فيديو private):
   - [ ] رفع ميديا (`/upload`) ونشر مجدول (`type: schedule`, `date`).
   - [ ] YouTube: عنوان، و`type` (public/private/unlisted)، و`selfDeclaredMadeForKids`، و`tags`.
@@ -47,6 +50,7 @@
 - [ ] بيانات الشركة أو الشخص اللي هيتسجل كـ developer (Meta بتطلب Business Verification بمستندات رسمية).
 
 ### YouTube (Google Cloud)
+- [x] الـ redirect بتاع الدومين العام اتضاف (2026-10-01).
 - [ ] Google Cloud project، وتفعيل **YouTube Data API v3** و**YouTube Analytics API** و**YouTube Reporting API**.
 - [ ] OAuth consent screen: **External**، لأن القنوات Brand accounts، وإيميلك test user في الأول.
 - [ ] OAuth client من نوع **Web application**، والـ redirect:
@@ -58,15 +62,17 @@
 ### Instagram + Facebook (Meta)
 - [ ] Meta developer account، وأبلكيشن من نوع **Business**.
 - [ ] نضيف **Instagram** (Instagram Business Login) و**Facebook Login for Business**.
-- [ ] الـ redirect: `/integrations/social/instagram` و`/integrations/social/facebook`.
+- [x] الـ redirect: `/integrations/social/instagram` و`/integrations/social/facebook` على `postiz.cortexchannels.com` (2026-10-01).
 - [ ] **Business Verification**.
 - [ ] **App Review** للصلاحيات دي: `instagram_basic` و`pages_show_list` و`pages_read_engagement` و`business_management` و`instagram_content_publish` و`instagram_manage_comments` و`instagram_manage_insights` (وصلاحيات نشر الـ Pages لفيسبوك). وبيطلبوا فيديو بيشرح الاستخدام.
 - المدة المتوقعة: **أكتر من شهر**.
 
 ### TikTok
-- [ ] TikTok developer account، وأبلكيشن فيه **Login Kit** و**Content Posting API (Direct Post)**.
-- [ ] Scopes: `user.info.basic` و`user.info.profile` و`video.create` و`video.upload` و`video.publish`.
-- [ ] Redirect: `https://<domain>/integrations/social/tiktok` (لازم HTTPS)، وتأكيد ملكية الدومين.
+- [x] الأبلكيشن `7653339412022134791` (كان draft اسمه Hypogeum، بقى **Cortex Publisher**)، فيه **Login Kit** و**Content Posting API** و**Direct Post** شغال.
+- [x] الـ 6 scopes اللي Postiz بيطلبهم (ولو واحد ناقص بيرفض الربط): `user.info.basic` و`user.info.profile` و`user.info.stats` و`video.list` و`video.upload` و`video.publish`.
+- [x] Redirect: `https://postiz.cortexchannels.com/integrations/social/tiktok`، و**الدومين cortexchannels.com اتأكد** (DNS TXT).
+- [x] شرح الـ review مكتوب. **ناقص فيديو الديمو بس**، ولازم يتصور على الـ Sandbox.
+- [x] الـ Sandbox "Hypogeum-Dev" اتصلّح: كان بيشاور على hypogeum.com (مش بتاعنا) وredirect على webhook.site عام.
 - [ ] App review، وبعده **audit منفصل لـ Direct Post**. **لحد ما الـ audit يخلص، كل البوستات هتنزل private.**
 - ⚠️ **أكبر خطر في الخطة كلها:** تيك توك بيراجع إن الأبلكيشن بيلتزم بتعليماته في الواجهة (اختيار الـ privacy، والموافقة على المحتوى). ممكن يرفض أداة داخلية. ولو رفض، نفضل على Zernio لتيك توك بس، وده حوالي $12 في الشهر.
 

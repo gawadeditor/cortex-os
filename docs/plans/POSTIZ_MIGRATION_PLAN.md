@@ -42,8 +42,8 @@
 ## المرحلة 1: موافقات المنصات (نبدأها دلوقتي بالتوازي، وبتاخد من 2 لـ 6 أسابيع)
 
 **مطلوب قبل أي موافقة:**
-- [ ] **دومين** (حوالي $10 في السنة)، لو مش موجود.
-- [ ] **موقع HTTPS** على الدومين فيه **Privacy Policy** و**Terms of Service**. ينفع مجاناً على GitHub Pages، وأنا أكتب الصفحتين.
+- [x] **الدومين: `cortexchannels.com`** (Cloudflare Registrar، اتسجل 2026-10-01، بيخلص 2027-10-01، والـ nameservers على Cloudflare).
+- [x] **الموقع شغال:** https://cortexchannels.com/ ، و`/privacy/` و`/terms/` و`/data-deletion/`. منشور كـ Cloudflare Worker static assets (`site/`، والنشر بـ `cd site && CLOUDFLARE_ACCOUNT_ID=08de2c20cf5b5c85ea8a34d910fa2bda npx wrangler deploy`). وإيميل **privacy@cortexchannels.com** بيتحول لـ gawadeditor@gmail.com (Cloudflare Email Routing).
 - [ ] بيانات الشركة أو الشخص اللي هيتسجل كـ developer (Meta بتطلب Business Verification بمستندات رسمية).
 
 ### YouTube (Google Cloud)

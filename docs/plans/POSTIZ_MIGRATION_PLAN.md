@@ -34,8 +34,9 @@
   - [ ] ميعاد مختلف لكل منصة، يعني post منفصل لكل integration.
   - [ ] حالة البوست بعد النشر، والـ webhooks.
   - [x] الـ API شغال على `http://localhost:4007/api/public/v1` (الـ header: `Authorization: <key>`، والمفتاح في `~/postiz-trial/.api_key`). `GET /integrations` شغال.
-  - [~] **التحليلات:** `GET /analytics/{integration-id}?date=30` شغال لـ YouTube (minutes watched، وavg view duration و%، وsubs gained/lost، وlikes)، **بس مفيهوش عدد المشاهدات**. الـ per-post (`GET /analytics/post/{postId}`) بيشتغل بس على البوستات اللي اتنشرت من Postiz نفسه. **لسه:** نتأكد إن فيه views per post.
+  - [~] **التحليلات:** `GET /analytics/{integration-id}?date=30` شغال لـ YouTube (minutes watched، وavg view duration و%، وsubs gained/lost، وlikes)، **بس مفيهوش عدد المشاهدات**. الـ per-post (`GET /analytics/post/{postId}`) بيشتغل بس على البوستات اللي اتنشرت من Postiz نفسه. ✅ **اتأكدنا (2026-10-01):** `GET /analytics/post/{postId}` بيرجّع **Views** وLikes وComments وFavorites للبوست اللي اتنشر من Postiz.
   - ملحوظة: حد الـ API الافتراضي **30 طلب في الساعة** (`API_LIMIT` في الـ compose، وينفع نزوده).
+- [x] **اختبار نشر حقيقي على YouTube (2026-10-01):** رفع (`/upload`، 40MB، 1080×1920) ثم بوست `schedule` **private** على Twinkle، واتنشر خلال حوالي دقيقة من الميعاد (`YyaVpNO_4nE`، private اتأكدنا منه). المحاولة الأولى فشلت بـ "Blocked IP": Postiz بيجيب الميديا من رابطه هو (`http://localhost:4007/uploads/...`)، والحماية بتاعته (SSRF) بتمنع الوصول للعناوين المحلية، وكمان `localhost:4007` مش موجود جوه الـ container (بيسمع على 5000). **حل التجربة بس:** `DISABLE_SSRF_PROTECTION: 'true'` في الـ compose، وforwarder من 4007 لـ 5000 جوه الـ container (`docker exec -d postiz node -e ...`، **بيتشال مع أي restart**). في الإنتاج بدومين عام المشكلتين مش هيظهروا.
 - [ ] **نقطة قرار:** لو كل ده اشتغل، نكمل للمرحلة 2. ولو التحليلات ناقصة، نحدد بديلها الأول.
 
 ## المرحلة 1: موافقات المنصات (نبدأها دلوقتي بالتوازي، وبتاخد من 2 لـ 6 أسابيع)

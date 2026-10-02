@@ -335,6 +335,8 @@ class Config:
     SMOKE_TEST_MAX_NARRATION_BEATS: int  # 0 = unlimited; default: 0
 
     HYPOGEUM_ARCHIVE_ROOT: str           # fallback archive root; default: "" (built-in)
+    COVER_GUARD_SSH_TARGET: str          # "user@host" of the always-on cover release guard; "" disables
+    COVER_GUARD_SSH_KEY: str             # private key path for that SSH target; "" = ssh default
 
     # ------------------------------------------------------------------
     # Brand Guardian Agent (BGA v1A) — pre-generation brand compliance gate
@@ -623,6 +625,14 @@ class Config:
         # hypogeum.archive_storage.resolve_archive_root(). Empty => the
         # built-in default (<project>/.hypogeum-assets/archive).
         self.HYPOGEUM_ARCHIVE_ROOT = _get_optional("HYPOGEUM_ARCHIVE_ROOT", default="")
+        # COVER_GUARD_SSH_TARGET / COVER_GUARD_SSH_KEY: the server that releases
+        # held YouTube Shorts at their slot even while this machine sleeps
+        # (scripts/server/cover_release_guard.py). The dashboard pushes the
+        # hold/confirmation state there over SSH and pulls back what it
+        # released -- see hypogeum.publishing.cover_guard_sync. Empty => the
+        # in-dashboard loop is the only releaser (previous behaviour).
+        self.COVER_GUARD_SSH_TARGET = _get_optional("COVER_GUARD_SSH_TARGET", default="")
+        self.COVER_GUARD_SSH_KEY = _get_optional("COVER_GUARD_SSH_KEY", default="")
         # REQUIRE_SHORT_BURNED_CAPTIONS: fail closed (raise, never silently
         # render without them) when a Short's caption asset cannot be
         # resolved to its own canonical short_id. Default True -- burned-in

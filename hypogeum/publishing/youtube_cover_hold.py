@@ -264,8 +264,14 @@ def sweep(*, provider=None, db_path=None, now: Optional[datetime] = None) -> dic
                 continue
             r = apply_hold(post_id, ch, ep, provider=provider, db_path=db_path, now=now)
             applied.append({"post_id": post_id, **r})
+        # The always-on server may already have released some of these while
+        # this machine slept -- learn that first so we don't redo it, then
+        # hand it the current holds/confirmations (no-op when not configured).
+        from hypogeum.publishing.cover_guard_sync import pull_released, push_state
+        synced = pull_released(db_path)
         released = release_due(provider=provider, db_path=db_path, now=now)
-        return {"applied": applied, "released": released}
+        push_state(db_path)
+        return {"applied": applied, "released": released, "synced_from_guard": synced}
     except Exception as exc:  # noqa: BLE001
         log.error("youtube_cover_hold_sweep_failed", error=str(exc)[:300])
         return {"error": str(exc)[:300]}

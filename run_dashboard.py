@@ -7759,6 +7759,9 @@ def channel_content_grid_youtube_cover_done(channel_id):
         mark_youtube_cover_done(post_id, channel_id, db_path=_db_path())
         # A held post already past its slot ('late') goes public right away.
         release_due(db_path=_db_path())
+        # ...and the always-on release guard learns about the Done at once.
+        from hypogeum.publishing.cover_guard_sync import push_state
+        push_state(db_path=_db_path())
     return redirect(f"/channel/{channel_id}/grid?scope={channel_id}", 303)
 
 

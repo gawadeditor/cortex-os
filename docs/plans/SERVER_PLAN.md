@@ -69,10 +69,11 @@
 
 ## Checklist
 - [x] مفتاح SSH جاهز (`~/.ssh/cortex_server_ed25519`)
-- [ ] Hostinger KVM 2 + الدفع بـ PayPal (انت) + تبعتلي الـ IP
-- [ ] تجهيز السيرفر وتأمينه
-- [ ] نقل Postiz + تغيير باسورد Postgres
-- [ ] نقل التانل (systemd) + إيقاف الـ LaunchAgent على الماك
-- [ ] التأكد (دخول، 8 حسابات، بوست private، نشر والماك مقفول)
-- [ ] النسخ الليلي لـ R2 + تجربة restore
+- [x] Hostinger KVM 2 (فرنسا، **147.79.101.166**، `srv2028388.hstgr.cloud`، الاشتراك شهري لحد 2026-11-02)
+- [x] تجهيز السيرفر وتأمينه (2026-10-02): يوزر `cortex`، والدخول بالمفتاح بس، وroot والباسورد اتقفلوا واتأكدنا، وufw (SSH بس)، وfail2ban، وunattended-upgrades، وswap 2G، وDocker 29.8. السكريبتات: `scripts/server/bootstrap_stage{1,2}.sh`
+- [x] نقل Postiz (نفس الـ image بالـ digest، وباسورد Postgres جديد) + restore القاعدة والـ uploads. **الـ 8 حسابات شغالة.** نسخة الماك اتعملها `compose down` (الـ volumes لسه موجودة للرجوع، وكان عليها restart: always)
+- [x] التانل بقى systemd على السيرفر (`/etc/cloudflared`)، وLaunchAgent الماك اتعمله unload
+- [x] التأكد: الـ API والـ 8 حسابات، وبوست يوتيوب private اتنشر من السيرفر (`1oPTcBkMpM4`، private اتأكدنا منه)
+- [x] نسخ ليلي على السيرفر (`~/bin/postiz-backup.sh`، الساعة 02:17 UTC، بنحتفظ بـ 14 يوم) + الماك بيسحب نسخة كل يوم (`~/postiz-backups`، LaunchAgent `com.cortex.postiz-backup-pull`)
+- [ ] نسخة على R2 (محتاج R2 API token) + تجربة restore
 - [ ] المراقبة (healthchecks.io)

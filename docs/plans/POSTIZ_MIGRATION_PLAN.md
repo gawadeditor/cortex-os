@@ -71,12 +71,15 @@
 - [x] الأبلكيشن `7653339412022134791` (كان draft اسمه Hypogeum، بقى **Cortex Publisher**)، فيه **Login Kit** و**Content Posting API** و**Direct Post** شغال.
 - [x] الـ 6 scopes اللي Postiz بيطلبهم (ولو واحد ناقص بيرفض الربط): `user.info.basic` و`user.info.profile` و`user.info.stats` و`video.list` و`video.upload` و`video.publish`.
 - [x] Redirect: `https://postiz.cortexchannels.com/integrations/social/tiktok`، و**الدومين cortexchannels.com اتأكد** (DNS TXT).
-- [x] شرح الـ review مكتوب. **ناقص فيديو الديمو بس**، ولازم يتصور على الـ Sandbox.
+- [x] شرح الـ review مكتوب، وفيديو الديمو اتصور (`~/Desktop/cortex_publisher_tiktok_demo.mp4`).
+- [x] **اتبعت للمراجعة 2026-10-02** (In review). ملحوظة: نسخة الـ Production ماكانتش حافظة أي تعديل قبل كده، فاتعملت من الأول واتأكدنا منها بإعادة التحميل.
 - [x] الـ Sandbox "Hypogeum-Dev" اتصلّح: كان بيشاور على hypogeum.com (مش بتاعنا) وredirect على webhook.site عام.
 - [ ] App review، وبعده **audit منفصل لـ Direct Post**. **لحد ما الـ audit يخلص، كل البوستات هتنزل private.**
 - ⚠️ **أكبر خطر في الخطة كلها:** تيك توك بيراجع إن الأبلكيشن بيلتزم بتعليماته في الواجهة (اختيار الـ privacy، والموافقة على المحتوى). ممكن يرفض أداة داخلية. ولو رفض، نفضل على Zernio لتيك توك بس، وده حوالي $12 في الشهر.
 
 ## المرحلة 2: السيرفر (بعد الموافقات)
+
+التفاصيل في [SERVER_PLAN.md](SERVER_PLAN.md): Hetzner CX33 (8GB، حوالي €9 في الشهر) لـ Postiz بس، والمصنع يفضل على الماك. الـ Mac mini القديم (4GB) مش هينفع.
 
 - [ ] VPS: 2 vCPU و2 لـ 4 GB RAM، و Ubuntu 24.04 (حوالي $6 لـ $12 في الشهر).
 - [ ] Docker، وPostiz، وCaddy عشان الـ HTTPS، وbackup يومي لقاعدة البيانات.

@@ -79,7 +79,7 @@
 
 ## المرحلة 2: السيرفر (بعد الموافقات)
 
-التفاصيل في [SERVER_PLAN.md](SERVER_PLAN.md): Hetzner CX33 (8GB، حوالي €9 في الشهر) لـ Postiz بس، والمصنع يفضل على الماك. الـ Mac mini القديم (4GB) مش هينفع.
+التفاصيل في [SERVER_PLAN.md](SERVER_PLAN.md): Contabo Cloud VPS 10 (8GB، حوالي €5 في الشهر، والدفع بـ PayPal) لـ Postiz بس، والمصنع يفضل على الماك. الـ Mac mini القديم (4GB) مش هينفع.
 
 - [ ] VPS: 2 vCPU و2 لـ 4 GB RAM، و Ubuntu 24.04 (حوالي $6 لـ $12 في الشهر).
 - [ ] Docker، وPostiz، وCaddy عشان الـ HTTPS، وbackup يومي لقاعدة البيانات.

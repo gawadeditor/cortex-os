@@ -630,6 +630,18 @@ class TestContentVolumeRecommendation:
         rec = generate_cadence_recommendation(_CV_CH, db_path=db_path)
         assert rec["action_type"] == "decrease"
 
+    def test_low_retention_at_min_bound_skips_recommendation(self, db_path):
+        # Regression 2026-09-27: a channel already pinned at the cadence
+        # floor (shorts_per_week == 1) kept getting a fresh "decrease"
+        # recommendation every time a new low-retention API snapshot landed
+        # -- apply_action() can never satisfy it (at_bound), so the operator
+        # was stuck re-dismissing (or hitting an apply failure on) a
+        # recommendation that was dead on arrival. It must not be emitted.
+        _cv_channel(db_path, {"shorts_per_week": 1})
+        for i, p in enumerate((22, 18, 25)):
+            _cv_episode_with_api_retention(db_path, f"cv_floor{i}", p)
+        assert generate_cadence_recommendation(_CV_CH, db_path=db_path) is None
+
     def test_apply_increase_changes_cadence(self, db_path):
         _cv_channel(db_path, {"shorts_per_week": 5})
         for i, p in enumerate((62, 60, 61)):

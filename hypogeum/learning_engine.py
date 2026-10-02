@@ -716,6 +716,28 @@ def generate_cadence_recommendation(
     else:
         return None
 
+    # Bug fixed 2026-09-27: this used to store the action regardless of the
+    # channel's current cadence, so a channel already pinned at the floor
+    # (shorts_per_week == _CADENCE_MIN, e.g. twinkle_mini_tales) kept getting
+    # a fresh "decrease" recommendation every time a new API snapshot landed
+    # -- apply_action() can never satisfy it (returns "at_bound" by design,
+    # see its test_apply_at_max_bound_is_rejected), so the operator was stuck
+    # re-dismissing (or now hitting the same apply failure on) an action that
+    # was dead on arrival. Skip emitting it instead of recording a no-op.
+    try:
+        from hypogeum.channel_config import get_channel_operations_profile
+        prof = get_channel_operations_profile(channel_id, db_path=db_path)
+    except Exception:  # noqa: BLE001
+        prof = None
+    if prof is not None:
+        cadence = dict(getattr(prof, "production_cadence", None) or {})
+        field = _dominant_cadence_field(cadence)
+        if field is not None:
+            current = int(cadence.get(field) or 0)
+            if (key == "negative" and current <= _CADENCE_MIN) or \
+               (key == "positive" and current >= _CADENCE_MAX):
+                return None
+
     # Same fix as generate_actions()'s _already_decided_on_this_evidence:
     # the pending-only check above stops re-blocking once the operator
     # applies/dismisses a content_volume action, but the retention trend

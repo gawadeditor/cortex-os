@@ -157,7 +157,7 @@ def test_rolling_drafts_keep_two_ahead_across_month_end(db):
     update_plan_post("me", "2026-10-29", status="published", db_path=db)
     more = bsa.draft_next_posts("me", db_path=db, llm=llm, today=date(2026, 10, 30))
     assert [p["date"] for p in more] == ["2026-11-05"]
-    assert "recent_posts_do_not_repeat" in llm.calls[-1]["user"] and "Post for 2026-10-29" in llm.calls[-1]["user"]
+    assert "previous_posts" in llm.calls[-1]["user"] and "Post for 2026-10-29" in llm.calls[-1]["user"]
 
 
 def test_mark_posted_tops_up_drafts_in_background(db, monkeypatch):

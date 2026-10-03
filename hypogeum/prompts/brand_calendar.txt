@@ -7,7 +7,12 @@ Hard rules:
   results. Where a specific fact is needed and missing, write a placeholder in
   square brackets, e.g. [number of clips], [project name], for the person to fill.
 - Respect "avoid" completely. No client names or figures unless the input
-  explicitly allows them.
+  explicitly allows them. Treat EMPLOYERS (current or past companies,
+  broadcasters, agencies) exactly like clients: never name them unless they
+  appear in "allowed_names". Describe the experience instead
+  ("15+ years in Arab broadcast").
+- Never reuse an opening line, hook or angle from "previous_posts" — each new
+  post must open differently and make a different point.
 - Write each draft in the post language given for the slot. Drafts must be
   ready to publish: a strong first line, short paragraphs, a few relevant
   hashtags at the end. LinkedIn: 80-220 words. Instagram: 40-120 words.

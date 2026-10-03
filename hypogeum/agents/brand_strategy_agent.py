@@ -349,13 +349,14 @@ def draft_next_posts(client_id: str, *, db_path: Optional[Path] = None, llm: Opt
     slots = upcoming_slots(last, need, ppw, platforms)
     langs = ctx["profile"].get("languages") or ["en"]
     lang_default = "ar" if langs == ["ar"] else "en"
-    recent = sorted(posts, key=lambda p: p.get("date", ""))[-6:]
+    previous = sorted(posts, key=lambda p: p.get("date", ""))[-40:]
     payload = {"profile": ctx["profile"], "strategy": strategy, "platform_data": ctx.get("platform_data"),
                "post_language": {"en": "English", "ar": "Arabic"}[lang_default] if len(langs) == 1
                else "alternate English and Arabic",
-               "recent_posts_do_not_repeat": [{"date": p.get("date"), "pillar": p.get("pillar"),
-                                               "first_line": (p.get("draft") or "").split("\n", 1)[0]}
-                                              for p in recent],
+               "previous_posts": [{"date": p.get("date"), "pillar": p.get("pillar"),
+                                   "first_line": (p.get("draft") or "").split("\n", 1)[0]}
+                                  for p in previous],
+               "allowed_names": list((ctx["profile"].get("allowed_names") or [])),
                "slots": slots}
     llm = llm or _default_llm()
     cost = 0.0

@@ -529,7 +529,9 @@ def generate_platform_advice(client_id: str, *, db_path: Optional[Path] = None) 
 
         # actions
         role = ((strategy.get("platforms") or {}).get(plat) or {}).get("role")
-        cal_posts = ((client.get("brief") or {}).get("content_calendar") or {}).get("posts") or []
+        from hypogeum.dashboard_clients import calendars_of, default_month
+        _cals = calendars_of(client.get("brief") or {})
+        cal_posts = (_cals.get(default_month(_cals) or "") or {}).get("posts") or []
         planned = sum(1 for cp in cal_posts if plat in (cp.get("platforms") or []))
         if planned:
             per_week = max(1, round(planned / 4))

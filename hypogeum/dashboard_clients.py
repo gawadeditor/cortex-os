@@ -255,18 +255,43 @@ def get_client_accounts(client_id: str, db_path: Optional[Path] = None) -> dict:
 _POST_STATUSES = ("draft", "approved", "published", "skipped")
 
 
-def get_client_plan(client_id: str, db_path: Optional[Path] = None) -> dict:
+def calendars_of(brief: dict) -> dict:
+    """{'YYYY-MM': calendar} — the per-month store (brief.content_calendars),
+    with the legacy single brief.content_calendar folded in."""
+    cals = dict((brief or {}).get("content_calendars") or {})
+    legacy = (brief or {}).get("content_calendar")
+    if legacy and legacy.get("month") and legacy["month"] not in cals:
+        cals[legacy["month"]] = legacy
+    return cals
+
+
+def default_month(cals: dict, today=None) -> Optional[str]:
+    """The current month if it has a calendar, else the nearest upcoming one,
+    else the latest."""
+    from datetime import datetime, timezone
+    cur = (today or datetime.now(timezone.utc).date()).strftime("%Y-%m")
+    if cur in cals:
+        return cur
+    future = sorted(m for m in cals if m > cur)
+    return future[0] if future else (max(cals) if cals else None)
+
+
+def get_client_plan(client_id: str, db_path: Optional[Path] = None, month: Optional[str] = None) -> dict:
     from hypogeum import client_manager as cm
     client = cm.get_client(client_id, db_path=db_path)
     if not client:
         return {"client": None}
     brief = client.get("brief") or {}
-    cal = brief.get("content_calendar") or {}
+    cals = calendars_of(brief)
+    month = month if month in cals else default_month(cals)
+    cal = cals.get(month) or {}
     posts = list(cal.get("posts") or [])
     counts = {s: sum(1 for p in posts if (p.get("status") or "draft") == s) for s in _POST_STATUSES}
     return {"client": client, "profile": brief.get("brand_profile") or {},
             "strategy": brief.get("brand_strategy") or {}, "calendar": cal, "posts": posts,
-            "counts": counts}
+            "counts": counts, "months": sorted(cals), "month": month,
+            "generation": brief.get("generation_status") or {},
+            "generation_log": list(brief.get("generation_log") or [])[-5:]}
 
 
 def update_plan_post(client_id: str, date: str, *, status: Optional[str] = None,
@@ -280,7 +305,8 @@ def update_plan_post(client_id: str, date: str, *, status: Optional[str] = None,
     if not client:
         return False
     brief = dict(client.get("brief") or {})
-    cal = dict(brief.get("content_calendar") or {})
+    cals = calendars_of(brief)
+    cal = dict(cals.get((date or "")[:7]) or {})
     posts = list(cal.get("posts") or [])
     hit = False
     for p in posts:
@@ -296,7 +322,9 @@ def update_plan_post(client_id: str, date: str, *, status: Optional[str] = None,
     if not hit:
         return False
     cal["posts"] = posts
-    brief["content_calendar"] = cal
+    cals[cal.get("month") or date[:7]] = cal
+    brief["content_calendars"] = cals
+    brief.pop("content_calendar", None)
     return cm.update_client(client_id, brief=brief, db_path=db_path)
 
 

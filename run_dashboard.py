@@ -8517,11 +8517,64 @@ def client_advice_page(client_id):
 @app.route("/client/<client_id>/plan")
 def client_plan_page(client_id):
     """Personal-branding strategy + monthly calendar with editable drafts."""
+    from hypogeum.agents.brand_strategy_agent import next_month
     from hypogeum.dashboard_clients import get_client_plan
-    d = get_client_plan(client_id, db_path=_db_path())
+    d = get_client_plan(client_id, db_path=_db_path(), month=request.args.get("month"))
     if not d.get("client"):
         return render_template("not_found.html", kind="Client", id=client_id), 404
+    from datetime import datetime as _dt, timezone as _tz
+    d["this_month"] = _dt.now(_tz.utc).strftime("%Y-%m")
+    d["next_month"] = next_month()
     return render_template("client_plan.html", d=d, flash=request.args.get("flash"))
+
+
+def _set_generation_status(client_id, db, **status):
+    from hypogeum import client_manager as _cm
+    c = _cm.get_client(client_id, db_path=db)
+    if not c:
+        return
+    b = dict(c.get("brief") or {})
+    b["generation_status"] = status
+    _cm.update_client(client_id, brief=b, db_path=db)
+
+
+@app.route("/client/<client_id>/plan/generate", methods=["POST"])
+def client_plan_generate(client_id):
+    """Start strategy or calendar generation in the background (LLM, cost-gated)."""
+    import threading
+    from datetime import datetime as _dt, timezone as _tz
+    from hypogeum.client_manager import get_client
+    from hypogeum.dashboard_clients import get_client_plan
+    db = _db_path()
+    if not get_client(client_id, db_path=db):
+        return render_template("not_found.html", kind="Client", id=client_id), 404
+    what = request.form.get("what") or "strategy"
+    month = (request.form.get("month") or "").strip() or None
+    back = f"/client/{client_id}/plan?scope=client:{client_id}"
+    if (get_client_plan(client_id, db_path=db).get("generation") or {}).get("state") == "running":
+        return redirect(f"{back}&flash=Generation already running", 302)
+    _set_generation_status(client_id, db, state="running", what=what, month=month,
+                           started_at=_dt.now(_tz.utc).isoformat())
+
+    def _work():
+        from hypogeum.agents import brand_strategy_agent as bsa
+        try:
+            if what == "calendar":
+                cal = bsa.generate_calendar(client_id, month=month, db_path=db)
+                _set_generation_status(client_id, db, state="done", what=what, month=cal["month"],
+                                       message=f"{len(cal['posts'])} posts drafted for {cal['month']}",
+                                       finished_at=_dt.now(_tz.utc).isoformat())
+            else:
+                st = bsa.generate_strategy(client_id, db_path=db)
+                _set_generation_status(client_id, db, state="done", what=what,
+                                       message=f"Strategy v{st['version']} generated",
+                                       finished_at=_dt.now(_tz.utc).isoformat())
+        except Exception as exc:  # noqa: BLE001
+            _set_generation_status(client_id, db, state="error", what=what, message=str(exc)[:300],
+                                   finished_at=_dt.now(_tz.utc).isoformat())
+
+    threading.Thread(target=_work, name=f"brand-gen-{client_id}", daemon=True).start()
+    return redirect(f"{back}&flash=Generating {what} — this takes about a minute", 302)
 
 
 @app.route("/client/<client_id>/plan/questionnaire", methods=["GET", "POST"])

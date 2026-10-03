@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{{ d.client.name }} — Plan</title>
   {% include '_base_style.html' %}
+  {% if d.generation and d.generation.state == 'running' %}<meta http-equiv="refresh" content="8">{% endif %}
   <style>
     .plan { }
     .plan .flash { font-size: 12px; padding: 9px 11px; border-radius: 8px; margin-bottom: var(--space-md);
@@ -62,6 +63,38 @@
 
 <div class="plan">
 {% if flash %}<div class="flash">{{ flash }}</div>{% endif %}
+
+{% set g = d.generation %}
+<div class="card" style="margin-bottom: var(--space-md);">
+  <div class="card-title">{{ icon('sparkle') }} Generate</div>
+  {% if g and g.state == 'running' %}
+    <p class="note" style="margin:8px 0 0;">Generating {{ g.what }}{% if g.month %} for {{ g.month }}{% endif %}… this page refreshes by itself.</p>
+  {% else %}
+    {% if g and g.state == 'done' %}<p class="note" style="margin:8px 0 0;">{{ icon('check') }} {{ g.message }}</p>{% endif %}
+    {% if g and g.state == 'error' %}<p class="note" style="margin:8px 0 0;color:var(--danger, #e5484d);">{{ icon('warning') }} {{ g.message }}</p>{% endif %}
+    <div class="post-actions">
+      <form method="post" action="/client/{{ d.client.client_id }}/plan/generate" style="display:inline;">
+        <input type="hidden" name="what" value="strategy">
+        <button class="btn btn-sm {{ '' if d.strategy else 'btn-primary' }}" type="submit"
+                {{ 'disabled' if not d.profile.answered_at }}>
+          {{ icon('sparkle') }} {{ 'Regenerate strategy' if d.strategy else 'Generate strategy' }}</button>
+      </form>
+      {% if d.strategy %}
+      {% for m in [d.this_month, d.next_month] %}
+      <form method="post" action="/client/{{ d.client.client_id }}/plan/generate" style="display:inline;">
+        <input type="hidden" name="what" value="calendar"><input type="hidden" name="month" value="{{ m }}">
+        <button class="btn btn-sm {{ 'btn-primary' if m not in d.months else '' }}" type="submit">
+          {{ icon('calendar') }} {{ ('Regenerate ' if m in d.months else 'Generate ') ~ m ~ ' calendar' }}</button>
+      </form>
+      {% endfor %}
+      {% endif %}
+    </div>
+    {% if not d.profile.answered_at %}<p class="note">Answer the questionnaire first.</p>{% endif %}
+  {% endif %}
+  {% if d.generation_log %}
+  <p class="note" style="margin-top:10px;">Recent: {% for e in d.generation_log | reverse %}{{ e.what }} {{ 'ok' if e.ok else 'failed' }} ${{ '%.2f' | format(e.cost_usd or 0) }}{{ ' · ' if not loop.last }}{% endfor %}</p>
+  {% endif %}
+</div>
 
 {% set s = d.strategy %}{% set pr = d.profile %}
 {% if not s %}
@@ -122,7 +155,13 @@
 {% endif %}
 
 <div class="card" style="margin-top: var(--space-md);">
-  <div class="card-title">{{ icon('calendar') }} Monthly calendar</div>
+  <div class="card-title">{{ icon('calendar') }} Monthly calendar{% if d.month %} — {{ d.month }}{% endif %}</div>
+  {% if d.months | length > 1 %}
+  <div class="chips" style="margin-top:8px;">
+    {% for m in d.months %}<a class="chip {{ 'is-on' if m == d.month }}" style="text-decoration:none;cursor:pointer;"
+       href="/client/{{ d.client.client_id }}/plan?scope=client:{{ d.client.client_id }}&month={{ m }}">{{ m }}</a>{% endfor %}
+  </div>
+  {% endif %}
   {% if not d.posts %}<p class="empty">No calendar for this month yet.</p>{% endif %}
   {% for p in d.posts %}
   {% set st = p.status or 'draft' %}

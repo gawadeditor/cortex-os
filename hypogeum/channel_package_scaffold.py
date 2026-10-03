@@ -7,10 +7,15 @@ binding, compute its package identity, or be granted a Channel Operating
 Grant. The first channel (hypogeum) has one committed to the repo; a
 channel created from the dashboard does not.
 
-This copies the hypogeum package as the template — the workflow, the
-platform-distribution policy and the deliverable contract are
-topic-agnostic and shared — swapping only the manifest's ``channel_id``,
-then registers the workflow definition under the new channel_id.
+Only the genuinely shared, topic-agnostic artifacts are copied from the
+template (the workflow definition and the deliverable contract, with this
+channel's channel_id). The platform-distribution policy is NOT copied: it
+is written from the new channel's own runtime policy (what the dashboard
+wizard configured), so it can never start life as another channel's file.
+Fixed 2026-10-03 — copying the whole template directory left
+twinkle_mini_tales with hypogeum's policy file (channel_id 'hypogeum',
+different platforms), which the sanctioned file->DB sync would have
+applied over twinkle's real settings.
 
 Idempotent: a no-op when the directory already exists.
 
@@ -133,14 +138,7 @@ def scaffold_channel_package(channel_id: str, *, db_path: Optional[Path] = None,
                 "error": f"template package {template!r} not found"}
 
     try:
-        shutil.copytree(src, dst)
-        manifest_path = dst / "channel_package_manifest.json"
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        manifest["channel_id"] = channel_id
-        # keep artifact workflow_id / versions / sha256 — the workflow is a
-        # shared, content-identical template; run_pipeline binds by the
-        # template's workflow_id.
-        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        _copy_shared_artifacts(src, dst, channel_id, db_path=db_path, packages_root=root)
     except Exception as exc:  # noqa: BLE001
         # roll back a half-made copy
         if dst.exists():
@@ -148,6 +146,49 @@ def scaffold_channel_package(channel_id: str, *, db_path: Optional[Path] = None,
         return {"ok": False, "created": False, "error": f"copy failed: {exc}"}
 
     return _register_from_manifest(channel_id, db_path, created=True, packages_root=root)
+
+
+_SHARED_ROLES = ("workflow_definition", "deliverable_contract")
+
+
+def _copy_shared_artifacts(src: Path, dst: Path, channel_id: str, *, db_path, packages_root: Path) -> None:
+    import hashlib
+    template = json.loads((src / "channel_package_manifest.json").read_text(encoding="utf-8"))
+    manifest = {k: v for k, v in template.items() if k != "artifacts"}
+    manifest["channel_id"] = channel_id
+    manifest["artifacts"] = []
+    dst.mkdir(parents=True)
+    for art in template.get("artifacts", []):
+        if art.get("role") not in _SHARED_ROLES:
+            continue  # channel-specific (e.g. platform_distribution_policy): never copied
+        target = dst / art["path"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        raw = (src / art["path"]).read_bytes()
+        entry = dict(art)
+        if art["role"] == "deliverable_contract":
+            # shared shape, but the file names its channel: make it this one's
+            doc = json.loads(raw)
+            if "channel_id" in doc:
+                doc["channel_id"] = channel_id
+                raw = (json.dumps(doc, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+                entry["sha256"] = hashlib.sha256(raw).hexdigest()
+        # workflow_definition is byte-identical: keep its sha256/workflow_id —
+        # run_pipeline binds by the template's workflow_id.
+        target.write_bytes(raw)
+        manifest["artifacts"].append(entry)
+    (dst / "channel_package_manifest.json").write_text(
+        json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+    from hypogeum.channel_config import (
+        get_channel_operations_profile, write_platform_distribution_policy_from_runtime,
+    )
+    if get_channel_operations_profile(channel_id, db_path=db_path) is not None:
+        write_platform_distribution_policy_from_runtime(
+            channel_id, db_path=db_path, packages_root=packages_root,
+            reason="scaffolded from this channel's own runtime policy",
+        )
+    # No runtime profile yet: no policy file. load_platform_distribution_policy
+    # fails closed until one is written — never a borrowed one.
 
 
 def _register_from_manifest(channel_id: str, db_path, *, created: bool,

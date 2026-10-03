@@ -2043,8 +2043,19 @@ def load_platform_distribution_policy(
     return doc
 
 
+def _enabled_policy_slots(policy: Optional[dict]) -> set:
+    """{(platform, deliverable_class)} that a platform_deliverable_policy enables."""
+    out = set()
+    for platform, classes in (policy or {}).items():
+        for cls, entry in (classes or {}).items():
+            if isinstance(entry, dict) and entry.get("enabled"):
+                out.add((platform, cls))
+    return out
+
+
 def sync_platform_distribution_policy_to_runtime(
     channel_id: str, *, packages_root: Optional[Path] = None, db_path: Optional[Path] = None,
+    allow_disabling: bool = False,
 ) -> ChannelOperationsProfile:
     """
     The sole sanctioned path from the versioned, checksum-verified
@@ -2069,8 +2080,35 @@ def sync_platform_distribution_policy_to_runtime(
     value. Omitted from the file: left untouched at whatever the runtime
     row already has, exactly like any other field this function does not
     mention.
+
+    Guards (2026-10-03, after both channels' files were found stale and
+    twinkle_mini_tales' file to be a verbatim copy of hypogeum's): refuses
+    a file whose own channel_id names a different channel, and refuses a
+    sync that would DISABLE any (platform, deliverable_class) currently
+    enabled at runtime unless allow_disabling=True -- a stale file must
+    never silently switch publishing off.
     """
     policy_doc = load_platform_distribution_policy(channel_id, packages_root=packages_root)
+    file_channel = policy_doc.get("channel_id")
+    if file_channel and file_channel != channel_id:
+        raise ChannelPackagePolicyDriftError(
+            f"platform_distribution_policy for channel_id={channel_id!r} declares "
+            f"channel_id={file_channel!r} -- it belongs to another channel; refusing to sync"
+        )
+    if not allow_disabling:
+        current = get_channel_operations_profile(channel_id, db_path=db_path)
+        if current is not None:
+            would_disable = sorted(
+                _enabled_policy_slots(current.platform_deliverable_policy)
+                - _enabled_policy_slots(policy_doc["platform_deliverable_policy"])
+            )
+            if would_disable:
+                raise ChannelPackagePolicyDriftError(
+                    f"syncing platform_distribution_policy for channel_id={channel_id!r} would "
+                    f"disable currently-enabled publishing {would_disable} -- the file is probably "
+                    f"stale (see write_platform_distribution_policy_from_runtime); pass "
+                    f"allow_disabling=True only if this is intended"
+                )
     sync_fields = {"platform_deliverable_policy": policy_doc["platform_deliverable_policy"]}
     if "default_privacy_state" in policy_doc:
         sync_fields["default_privacy_state"] = policy_doc["default_privacy_state"]
@@ -2082,6 +2120,81 @@ def sync_platform_distribution_policy_to_runtime(
             f"found after sync for channel_id={channel_id!r}"
         )
     return profile
+
+
+def write_platform_distribution_policy_from_runtime(
+    channel_id: str, *, db_path: Optional[Path] = None, packages_root: Optional[Path] = None,
+    reason: str = "",
+) -> dict:
+    """
+    The DB -> file direction: (re)write channel_packages/{channel_id}/
+    platform_distribution_policy_v1.json from the channel's LIVE runtime
+    policy (platform_deliverable_policy + default_privacy_state), with this
+    channel's own channel_id/policy_id, and register its new sha256 in the
+    manifest (adding the artifact entry if the manifest has none). Keeps
+    every other key of an existing file (sources, notes) and bumps its
+    minor version. Used when a channel's package is scaffolded, so a new
+    channel's file can never start as another channel's copy.
+
+    Returns {"path", "sha256", "policy_version"}. Raises
+    ChannelPackagePolicyDriftError when there is no runtime profile or no
+    manifest to register the file in.
+    """
+    from hypogeum.workflow_executor import channel_package_dir  # noqa: PLC0415 -- avoid a module-load-order cycle
+
+    profile = get_channel_operations_profile(channel_id, db_path=db_path)
+    if profile is None:
+        raise ChannelPackagePolicyDriftError(
+            f"no channel_operations_profiles row for channel_id={channel_id!r} -- nothing to write"
+        )
+    pkg = channel_package_dir(channel_id, packages_root=packages_root)
+    manifest_path = pkg / "channel_package_manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ChannelPackagePolicyDriftError(
+            f"channel_package_manifest.json unreadable for channel_id={channel_id!r}: {exc}"
+        ) from exc
+
+    entry = next((a for a in manifest.setdefault("artifacts", [])
+                  if a.get("role") == "platform_distribution_policy"), None)
+    rel = (entry or {}).get("path", "platform_distribution_policy_v1.json")
+    path = pkg / rel
+    doc: dict = {}
+    if path.is_file():
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            doc = {}
+    if doc.get("channel_id") not in (None, channel_id):
+        doc = {}  # another channel's copy: keep nothing from it
+    try:
+        major, minor, *_ = str(doc.get("policy_version", "")).split(".")
+        version = f"{int(major)}.{int(minor) + 1}.0"
+    except ValueError:
+        version = "1.0.0"
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    doc.update({
+        "channel_id": channel_id,
+        "policy_id": f"{channel_id}_platform_distribution_policy_v1",
+        "policy_version": version,
+        "updated_at": today,
+        "status": "installed",
+        "default_privacy_state": profile.default_privacy_state,
+        "platform_deliverable_policy": profile.platform_deliverable_policy or {},
+    })
+    doc.setdefault("created_at", today)
+    if reason:
+        doc.setdefault("known_gaps", []).append(f"v{version} ({today}): written from the live runtime policy -- {reason}")
+    raw = (json.dumps(doc, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    path.write_bytes(raw)
+    sha = hashlib.sha256(raw).hexdigest()
+    if entry is None:
+        entry = {"path": rel, "role": "platform_distribution_policy"}
+        manifest["artifacts"].append(entry)
+    entry.update(policy_id=doc["policy_id"], policy_version=version, sha256=sha)
+    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return {"path": str(path), "sha256": sha, "policy_version": version}
 
 
 # ===========================================================================

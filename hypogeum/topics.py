@@ -595,7 +595,11 @@ def set_topic_target_publish_at(
     queued" lookup, there is no ordering/positional assumption here: the
     caller already holds the specific topic_id of a row it owns the claim
     for, so this is a single unambiguous conditional UPDATE by primary key.
-    Never overwrites an explicit/operator-set value.
+    Never overwrites an explicit/operator-set value that is still in the
+    future. A value already in the PAST is replaced (2026-10-03): it can no
+    longer be honoured, and keeping it made every claim of that topic build
+    an infeasible backward plan (ep_0b5ffefa: target 2026-09-10, claimed
+    2026-10-03 -> "available_lead_time_seconds=-1990829") and fail.
 
     Args:
         topic_id:            Topic to update (already claimed by the caller).
@@ -604,7 +608,7 @@ def set_topic_target_publish_at(
 
     Returns:
         True if the row was updated, False if the topic does not exist or
-        already had an explicit target_publish_at.
+        already had an explicit target_publish_at that is still in the future.
     """
     now = _now_iso()
     conn = get_connection(db_path)
@@ -613,9 +617,9 @@ def set_topic_target_publish_at(
             """
             UPDATE episode_topics
             SET target_publish_at = ?, updated_at = ?
-            WHERE topic_id = ? AND target_publish_at IS NULL
+            WHERE topic_id = ? AND (target_publish_at IS NULL OR target_publish_at < ?)
             """,
-            (target_publish_at, now, topic_id),
+            (target_publish_at, now, topic_id, now),
         )
         conn.commit()
         return cursor.rowcount > 0

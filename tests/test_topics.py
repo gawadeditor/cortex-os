@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import socket
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -372,23 +372,42 @@ class TestSetTopicTargetPublishAt:
         assert row["target_publish_at"] == target
 
     def test_does_not_overwrite_existing_explicit_value(self, db_path):
+        # An explicit value still in the FUTURE is never overwritten.
         tid = enqueue_topic("ch_tp2", "topic", db_path=db_path)
+        explicit = (_now() + timedelta(days=30)).isoformat()
         conn = get_connection(db_path)
         try:
             conn.execute(
                 "UPDATE episode_topics SET target_publish_at = ? WHERE topic_id = ?",
-                ("2026-01-01T00:00:00+00:00", tid),
+                (explicit, tid),
             )
             conn.commit()
         finally:
             conn.close()
 
         result = set_topic_target_publish_at(
-            tid, "2026-07-30T18:00:00+00:00", db_path=db_path,
+            tid, (_now() + timedelta(days=2)).isoformat(), db_path=db_path,
         )
         assert result is False
         row = get_topic(tid, db_path=db_path)
-        assert row["target_publish_at"] == "2026-01-01T00:00:00+00:00"
+        assert row["target_publish_at"] == explicit
+
+    def test_replaces_a_target_already_in_the_past(self, db_path):
+        # 2026-10-03: a stale past target (old experiment topic) made every
+        # claim build an infeasible backward plan; the fresh slot replaces it.
+        tid = enqueue_topic("ch_tp_stale", "topic", db_path=db_path)
+        conn = get_connection(db_path)
+        try:
+            conn.execute(
+                "UPDATE episode_topics SET target_publish_at = ? WHERE topic_id = ?",
+                ((_now() - timedelta(days=23)).isoformat(), tid),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        fresh = (_now() + timedelta(days=2)).isoformat()
+        assert set_topic_target_publish_at(tid, fresh, db_path=db_path) is True
+        assert get_topic(tid, db_path=db_path)["target_publish_at"] == fresh
 
     def test_returns_false_for_unknown_topic_id(self, db_path):
         result = set_topic_target_publish_at(

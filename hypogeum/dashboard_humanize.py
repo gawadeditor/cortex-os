@@ -740,7 +740,7 @@ def friendly_week(week_key) -> str:
 def friendly_platform(value) -> str:
     return {
         "youtube": "YouTube", "tiktok": "TikTok",
-        "instagram": "Instagram", "facebook": "Facebook",
+        "instagram": "Instagram", "facebook": "Facebook", "linkedin": "LinkedIn",
     }.get(str(value or "").strip().lower(), str(value or "").title())
 
 

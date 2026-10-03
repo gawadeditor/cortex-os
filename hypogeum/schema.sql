@@ -963,7 +963,7 @@ CREATE TABLE IF NOT EXISTS platform_analytics (
     record_id          TEXT    NOT NULL PRIMARY KEY,
     episode_id         TEXT    NOT NULL,
     platform           TEXT    NOT NULL
-                               CHECK(platform IN ('youtube','tiktok','instagram','facebook')),
+                               CHECK(platform IN ('youtube','tiktok','instagram','facebook','linkedin')),
     snapshot_date      TEXT    NOT NULL,
     window_days        INTEGER NOT NULL DEFAULT 7,
     -- Normalised metrics (NULL = not applicable or not imported for this platform)
@@ -1112,7 +1112,7 @@ CREATE TABLE IF NOT EXISTS managed_accounts (
     managed_account_id  TEXT NOT NULL PRIMARY KEY,
     client_id           TEXT NOT NULL,
     platform            TEXT NOT NULL
-                        CHECK(platform IN ('youtube','tiktok','instagram','facebook')),
+                        CHECK(platform IN ('youtube','tiktok','instagram','facebook','linkedin')),
     handle              TEXT,
     provider_id         TEXT NOT NULL DEFAULT 'zernio',
     provider_account_id TEXT,              -- provider_accounts.provider_account_id (Zernio _id)
@@ -1132,7 +1132,7 @@ CREATE TABLE IF NOT EXISTS content_items (
     client_id          TEXT NOT NULL,
     managed_account_id TEXT,
     platform           TEXT NOT NULL
-                       CHECK(platform IN ('youtube','tiktok','instagram','facebook')),
+                       CHECK(platform IN ('youtube','tiktok','instagram','facebook','linkedin')),
     platform_post_id   TEXT,
     zernio_post_id     TEXT,
     url                TEXT,
@@ -1142,7 +1142,7 @@ CREATE TABLE IF NOT EXISTS content_items (
     media_type         TEXT,                        -- video | image | carousel
     published_at       TEXT,
     source             TEXT NOT NULL DEFAULT 'zernio_external'
-                       CHECK(source IN ('zernio_external','zernio_late','manual_url','csv','public','instagram_graph')),
+                       CHECK(source IN ('zernio_external','zernio_late','manual_url','csv','public','instagram_graph','linkedin_export')),
     created_at         TEXT NOT NULL,
     updated_at         TEXT NOT NULL,
     UNIQUE(platform, platform_post_id)
@@ -2527,3 +2527,25 @@ CREATE TABLE IF NOT EXISTS youtube_cover_holds (
     released_at    TEXT,
     last_error     TEXT
 );
+
+-- Personal-branding plan (2026-10-03): LinkedIn personal profiles have no
+-- analytics API, so the account-level picture comes from LinkedIn's own
+-- creator-analytics Export (.xlsx) — see hypogeum.publishing.linkedin_export.
+-- One row per client per export period; per-post numbers go to
+-- content_items/platform_analytics like every other platform.
+CREATE TABLE IF NOT EXISTS client_linkedin_snapshots (
+    snapshot_id                 TEXT NOT NULL PRIMARY KEY,
+    client_id                   TEXT NOT NULL,
+    period_start                TEXT NOT NULL,
+    period_end                  TEXT NOT NULL,
+    impressions                 INTEGER,
+    members_reached             INTEGER,
+    followers_total             INTEGER,
+    daily_json                  TEXT NOT NULL DEFAULT '[]',
+    audience_demographics_json  TEXT NOT NULL DEFAULT '[]',
+    content_demographics_json   TEXT NOT NULL DEFAULT '[]',
+    source_file                 TEXT,
+    imported_at                 TEXT NOT NULL,
+    UNIQUE(client_id, period_end)
+);
+CREATE INDEX IF NOT EXISTS idx_cli_li_snap ON client_linkedin_snapshots(client_id, period_end DESC);

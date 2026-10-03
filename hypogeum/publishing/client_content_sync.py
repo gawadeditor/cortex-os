@@ -130,6 +130,8 @@ def sync_client_content(client_id: str, *, provider=None, analyze: bool = False,
     for acct in accounts:
         aid = acct.get("provider_account_id")
         plat = acct.get("platform")
+        if acct.get("provider_id") == "linkedin_export":
+            continue  # import-only: data arrives via hypogeum.publishing.linkedin_export
         if acct.get("provider_id") == "instagram_graph":
             # Read directly from Instagram (no Zernio account needed) — see
             # hypogeum.publishing.instagram_graph.
@@ -177,7 +179,8 @@ def sync_client_content(client_id: str, *, provider=None, analyze: bool = False,
         out["audience_rows"] += _sync_account_native(provider, client_id, aid, plat, db_path, out)
 
     _sync_account_rollups(provider, client_id,
-                          [a for a in accounts if a.get("provider_id") != "instagram_graph"],
+                          [a for a in accounts
+                           if a.get("provider_id") not in ("instagram_graph", "linkedin_export")],
                           db_path, out)
 
     if analyze and client.get("analysis_depth") != "full_video":

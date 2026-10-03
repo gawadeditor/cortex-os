@@ -8735,6 +8735,31 @@ def client_content_import(client_id):
                     f"&flash=Imported {added} rows ({failed} skipped)", 302)
 
 
+@app.route("/client/<client_id>/accounts/linkedin_import", methods=["POST"])
+def client_linkedin_import(client_id):
+    """Upload LinkedIn's creator-analytics Export (.xlsx) — the only source of a
+    personal profile's numbers (see hypogeum.publishing.linkedin_export)."""
+    import tempfile as _tf
+    from hypogeum.client_manager import get_client
+    from hypogeum.publishing.linkedin_export import LinkedInExportError, import_linkedin_export
+    if not get_client(client_id, db_path=_db_path()):
+        return render_template("not_found.html", kind="Client", id=client_id), 404
+    back = f"/client/{client_id}/accounts?scope=client:{client_id}"
+    f = request.files.get("file")
+    if not f or not (f.filename or "").lower().endswith(".xlsx"):
+        return redirect(f"{back}&flash=Choose the .xlsx file LinkedIn exported", 302)
+    with _tf.TemporaryDirectory() as tmp:
+        path = Path(tmp) / Path(f.filename).name
+        f.save(path)
+        try:
+            s = import_linkedin_export(client_id, path, db_path=_db_path())
+        except LinkedInExportError as exc:
+            return redirect(f"{back}&flash=That file isn't a LinkedIn analytics export ({exc})", 302)
+    msg = (f"LinkedIn imported: {s['posts']} posts, {s['followers_total']} followers, "
+           f"{s['impressions']} impressions ({s['period'][0]} to {s['period'][1]})")
+    return redirect(f"{back}&flash={msg}", 302)
+
+
 def _is_num(s):
     try:
         float(s)

@@ -765,6 +765,71 @@ def _migrate_content_items_source_check(conn: sqlite3.Connection) -> None:
         raise
 
 
+_PLATFORM_LIST_OLD = "('youtube','tiktok','instagram','facebook')"
+_PLATFORM_LIST_NEW = "('youtube','tiktok','instagram','facebook','linkedin')"
+_CONTENT_SOURCE_OLD = "('zernio_external','zernio_late','manual_url','csv','public','instagram_graph')"
+_CONTENT_SOURCE_NEW = "('zernio_external','zernio_late','manual_url','csv','public','instagram_graph','linkedin_export')"
+
+
+def _widen_table_checks(conn: sqlite3.Connection, table: str, replacements: list) -> None:
+    """2026-10-03 (personal-branding plan, LinkedIn): widen CHECK lists on an
+    existing table by rebuilding it from its OWN stored CREATE statement with
+    only the given literal replacements applied — every column (including
+    ones added later by ALTER TABLE), default, constraint and index is
+    preserved exactly. One explicit transaction; idempotent (a replacement
+    whose new text is already present is skipped). No-op if the table does
+    not exist yet (schema.sql then creates the new shape directly)."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    if not row or row[0] is None:
+        return
+    old_sql = row[0]
+    new_sql = old_sql
+    for old, new in replacements:
+        if new in new_sql:
+            continue
+        if old not in new_sql:
+            raise RuntimeError(f"_widen_table_checks({table}): expected CHECK list {old} not found")
+        new_sql = new_sql.replace(old, new)
+    if new_sql == old_sql:
+        return
+    tmp = f"{table}__widen"
+    head = f"CREATE TABLE {table} ("
+    if not new_sql.startswith(head):
+        raise RuntimeError(f"_widen_table_checks({table}): unexpected stored CREATE prefix")
+    new_sql = f"CREATE TABLE {tmp} (" + new_sql[len(head):]
+    extras = [r[0] for r in conn.execute(
+        "SELECT sql FROM sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') "
+        "AND sql IS NOT NULL", (table,)
+    )]
+    before = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+    conn.execute("BEGIN")
+    try:
+        conn.execute(new_sql)
+        conn.execute(f"INSERT INTO {tmp} SELECT * FROM {table}")
+        after = conn.execute(f"SELECT COUNT(*) FROM {tmp}").fetchone()[0]
+        if after != before:
+            raise RuntimeError(f"_widen_table_checks({table}): copied {after} of {before} rows")
+        conn.execute(f"DROP TABLE {table}")
+        conn.execute(f"ALTER TABLE {tmp} RENAME TO {table}")
+        for ddl in extras:
+            conn.execute(ddl)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _migrate_linkedin_platform(conn: sqlite3.Connection) -> None:
+    """Admit 'linkedin' on the tables the Clients feature writes to, and the
+    'linkedin_export' content source (hypogeum.publishing.linkedin_export)."""
+    _widen_table_checks(conn, "content_items", [(_PLATFORM_LIST_OLD, _PLATFORM_LIST_NEW),
+                                                (_CONTENT_SOURCE_OLD, _CONTENT_SOURCE_NEW)])
+    _widen_table_checks(conn, "managed_accounts", [(_PLATFORM_LIST_OLD, _PLATFORM_LIST_NEW)])
+    _widen_table_checks(conn, "platform_analytics", [(_PLATFORM_LIST_OLD, _PLATFORM_LIST_NEW)])
+
+
 def initialize_schema(db_path: Optional[Path] = None) -> None:
     """
     Create all tables and indexes defined in schema.sql, then apply v2–v4
@@ -799,6 +864,7 @@ def initialize_schema(db_path: Optional[Path] = None) -> None:
         _migrate_publishing_outcomes_status_enum(conn)
         _migrate_budget_reservations_scope_check(conn)
         _migrate_content_items_source_check(conn)
+        _migrate_linkedin_platform(conn)
         conn.executescript(schema_sql)
         conn.commit()
         _apply_v2_column_migrations(conn)

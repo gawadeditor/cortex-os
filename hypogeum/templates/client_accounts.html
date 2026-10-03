@@ -130,6 +130,15 @@
   {% endif %}
 </div>
 
+<form class="card" style="margin-top: var(--space-md);" method="post"
+      action="/client/{{ d.client.client_id }}/accounts/linkedin_import" enctype="multipart/form-data">
+  <div class="card-title">{{ icon('upload') }} LinkedIn analytics</div>
+  <p class="note" style="margin-top:4px;">LinkedIn doesn't share a personal profile's numbers with apps, so Cortex reads the file LinkedIn gives you.
+    On LinkedIn: <b>Analytics</b> → <b>Content</b> → choose <b>365 days</b> → <b>Export</b>, then upload that <code>.xlsx</code> here. Once a month is enough.</p>
+  <input type="file" name="file" accept=".xlsx" required style="margin-top:10px;">
+  <div class="btn-row"><button type="submit" class="btn btn-sm">{{ icon('upload') }} Import LinkedIn file</button></div>
+</form>
+
 <div class="card" style="margin-top: var(--space-md);">
   <div class="card-head">
     <div class="card-title">{{ icon('link') }} Zernio account pool</div>

@@ -45,8 +45,8 @@ log = get_logger(agent="client_manager")
 _STATUS = ("active", "paused", "archived")
 _ENGAGEMENT = ("observe", "manage")
 _ANALYSIS = ("metadata", "full_video")
-_PLATFORMS = ("youtube", "tiktok", "instagram", "facebook")
-_CONTENT_SOURCES = ("zernio_external", "zernio_late", "manual_url", "csv", "public",
+_PLATFORMS = ("youtube", "tiktok", "instagram", "facebook", "linkedin")
+_CONTENT_SOURCES = ("zernio_external", "zernio_late", "manual_url", "csv", "public", "linkedin_export",
                     "instagram_graph")
 
 

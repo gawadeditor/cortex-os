@@ -49,7 +49,7 @@ from hypogeum.db import get_connection, initialize_schema
 _PROJECT_ROOT    = Path(__file__).resolve().parent.parent
 _DEFAULT_DB      = _PROJECT_ROOT / ".hypogeum-assets" / "hypogeum.db"
 
-VALID_PLATFORMS  = frozenset({"youtube", "tiktok", "instagram", "facebook"})
+VALID_PLATFORMS  = frozenset({"youtube", "tiktok", "instagram", "facebook", "linkedin"})
 VALID_SOURCES    = frozenset({"manual", "api", "csv", "mock"})
 VALID_STATUSES   = frozenset({"pending", "applied", "dismissed"})
 VALID_DIMENSIONS = frozenset({
@@ -333,6 +333,17 @@ _MOCK_RANGES: dict[str, dict] = {
         likes_rate=(0.008, 0.045),
         comments_rate=(0.001, 0.006),
         shares_rate=(0.004, 0.018),
+    ),
+    # 2026-10-03: LinkedIn joined VALID_PLATFORMS (Clients feature, personal
+    # branding). Mock/demo only — source='mock' is never shown as a real KPI.
+    "linkedin": dict(
+        views=(100, 6_000),
+        impressions_mult=(1.0, 1.6),
+        avg_watch_time=(3.0, 40.0),
+        avg_video_len=90,
+        likes_rate=(0.010, 0.050),
+        comments_rate=(0.002, 0.012),
+        shares_rate=(0.001, 0.008),
     ),
 }
 

@@ -308,6 +308,37 @@ class PublishPackageResult:
 # Public API
 # ---------------------------------------------------------------------------
 
+def _route_platforms_by_binding(
+    platforms: List[str], *, channel_id: str, logical_alias: str, db_path: Optional[Path],
+) -> List[tuple]:
+    """
+    [(provider, [platforms]), ...] — each platform goes to the provider its
+    own channel_provider_bindings row names, so a channel can move to Postiz
+    one platform at a time. Anything not bound to 'postiz' (including no
+    binding at all) stays on ZernioProvider, which keeps its own fail-closed
+    binding checks — i.e. exactly the behaviour before Postiz existed.
+    Order of first appearance is preserved for deterministic calls.
+    """
+    from hypogeum.publishing.provider_repository import resolve_active_binding
+
+    groups: Dict[str, List[str]] = {}
+    for platform in platforms:
+        binding = resolve_active_binding(
+            db_path, channel_id=channel_id, capability="publishing",
+            platform=platform, logical_alias=logical_alias,
+        )
+        provider_id = "postiz" if binding and binding.get("provider_id") == "postiz" else "zernio"
+        groups.setdefault(provider_id, []).append(platform)
+    routed = []
+    for provider_id, group in groups.items():
+        if provider_id == "postiz":
+            from hypogeum.publishing.postiz import PostizProvider
+            routed.append((PostizProvider(), group))
+        else:
+            routed.append((ZernioProvider(), group))
+    return routed
+
+
 def publish_episode_package(
     package: PublishPackage,
     *,
@@ -380,6 +411,13 @@ def publish_episode_package(
     -- matches publish_multi_platform()'s own shape. Ignored by the
     single-platform .publish() fallback path (that provider contract
     never had a per-platform settings concept).
+
+    Provider routing (2026-10-03, Postiz migration): when no
+    publishing_provider is injected, each platform is routed by its own
+    binding (_route_platforms_by_binding) -- Postiz-bound platforms go to
+    PostizProvider, everything else to ZernioProvider as before. With a
+    single provider group the behaviour is exactly the previous one; with
+    two groups, one group raising marks only ITS platforms failed.
     """
     if not platforms:
         return PublishPackageResult(
@@ -405,8 +443,18 @@ def publish_episode_package(
         )
 
     staging = media_staging_provider if media_staging_provider is not None else ZernioMediaStagingProvider()
-    publisher = publishing_provider if publishing_provider is not None else ZernioProvider()
-    supports_aggregation = hasattr(publisher, "publish_multi_platform")
+    if publishing_provider is not None:
+        routed = [(publishing_provider, list(platforms))]
+    else:
+        routed = _route_platforms_by_binding(
+            platforms, channel_id=channel_id, logical_alias=logical_alias, db_path=db_path,
+        )
+    publisher = routed[0][0]
+    supports_aggregation = all(hasattr(p, "publish_multi_platform") for p, _ in routed)
+    if not supports_aggregation and len(routed) > 1:
+        raise ZernioPublishRuntimeError(
+            "mixed provider routing requires every provider to support publish_multi_platform"
+        )
 
     outcomes: List[DeliverablePublishOutcome] = []
     for deliverable in deliverables:
@@ -489,32 +537,42 @@ def publish_episode_package(
                 _eff_platform_specific["instagram"] = _ig
 
         if supports_aggregation:
-            try:
-                platform_results = publisher.publish_multi_platform(
-                    platforms=platforms,
-                    deliverable_type=deliverable_type,
-                    episode_id=package.episode_id,
-                    channel_id=channel_id,
-                    deliverable_id=deliverable.deliverable_id,
-                    db_path=db_path,
-                    logical_alias=logical_alias,
-                    media=[media_ref],
-                    title=deliverable.title,
-                    content=deliverable.description,
-                    scheduled_for=sched.scheduled_for,
-                    platform_scheduled_for=sched.platform_scheduled_for,
-                    platform_scheduled_for_by_platform=sched.platform_scheduled_for_by_platform,
-                    timezone_name=sched.timezone_name,
-                    publish_now=sched.publish_now,
-                    is_draft=sched.is_draft,
-                    platform_settings=_eff_platform_settings,
-                    platform_specific_data=_eff_platform_specific,
-                    root_fields=deliverable.root_fields,
-                )
-            except Exception as exc:
+            platform_results = {}
+            group_error = None
+            for group_publisher, group_platforms in routed:
+                try:
+                    platform_results.update(group_publisher.publish_multi_platform(
+                        platforms=group_platforms,
+                        deliverable_type=deliverable_type,
+                        episode_id=package.episode_id,
+                        channel_id=channel_id,
+                        deliverable_id=deliverable.deliverable_id,
+                        db_path=db_path,
+                        logical_alias=logical_alias,
+                        media=[media_ref],
+                        title=deliverable.title,
+                        content=deliverable.description,
+                        scheduled_for=sched.scheduled_for,
+                        platform_scheduled_for=sched.platform_scheduled_for,
+                        platform_scheduled_for_by_platform=sched.platform_scheduled_for_by_platform,
+                        timezone_name=sched.timezone_name,
+                        publish_now=sched.publish_now,
+                        is_draft=sched.is_draft,
+                        platform_settings=_eff_platform_settings,
+                        platform_specific_data=_eff_platform_specific,
+                        root_fields=deliverable.root_fields,
+                    ))
+                except Exception as exc:
+                    if len(routed) == 1:
+                        group_error = exc
+                        break
+                    for gp in group_platforms:
+                        platform_results[gp] = {"platform": gp, "deliverable_type": deliverable_type,
+                                                "status": "failed", "error": str(exc)}
+            if group_error is not None:
                 outcomes.append(DeliverablePublishOutcome(
                     deliverable_id=deliverable.deliverable_id, status="blocked",
-                    stage_result=_staged_to_dict(staged), error=str(exc),
+                    stage_result=_staged_to_dict(staged), error=str(group_error),
                 ))
                 continue
 

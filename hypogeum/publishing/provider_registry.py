@@ -240,6 +240,10 @@ def build_default_registry() -> ProviderRegistry:
     registry.register(MetaDirectProvider())
     from hypogeum.publishing.zernio import ZernioProvider
     registry.register(ZernioProvider())
+    # Postiz (self-hosted) — same activation rule as Zernio: registration
+    # alone routes nothing; a channel moves only via its own bindings.
+    from hypogeum.publishing.postiz import PostizProvider
+    registry.register(PostizProvider())
     return registry
 
 

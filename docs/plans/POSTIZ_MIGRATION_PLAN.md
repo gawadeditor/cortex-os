@@ -1,6 +1,6 @@
 # خطة النقل من Zernio لـ Postiz
 
-**بدأت:** 2026-10-01 · **الحالة:** المرحلة 0 (تجربة محلية) شغالة · **Zernio:** بنكمل عليه لحد ما النقل يخلص
+**بدأت:** 2026-10-01 · **الحالة (2026-10-03):** المرحلة 0 خلصت، والسيرفر (المرحلة 2) شغال، والـ adapter (المرحلة 3) اتبنى بس مش متوصّل بقناة. موافقات YouTube في [GOOGLE_YOUTUBE_APPROVAL.md](GOOGLE_YOUTUBE_APPROVAL.md) · **Zernio:** بنكمل عليه لحد ما النقل يخلص
 
 ## ليه
 
@@ -81,14 +81,16 @@
 
 التفاصيل في [SERVER_PLAN.md](SERVER_PLAN.md): Hostinger KVM 2 (8GB، $8.99 في الشهر بعرض الـ 24 شهر، والدفع بـ PayPal) لـ Postiz بس، والمصنع يفضل على الماك. الـ Mac mini القديم (4GB) مش هينفع.
 
-- [ ] VPS: 2 vCPU و2 لـ 4 GB RAM، و Ubuntu 24.04 (حوالي $6 لـ $12 في الشهر).
-- [ ] Docker، وPostiz، وCaddy عشان الـ HTTPS، وbackup يومي لقاعدة البيانات.
+- [x] VPS: Hostinger KVM 2 (2026-10-02)، التفاصيل في SERVER_PLAN.md.
+- [x] Docker وPostiz، والـ HTTPS عن طريق Cloudflare Tunnel (من غير Caddy)، وbackup يومي.
 - [ ] (اختياري، ومحتاجه جداً) ننقل المصنع كله على نفس السيرفر عشان يشتغل 24 ساعة. ده محتاج أولاً push الكود لـ GitHub، و**قبله لازم نغيّر مفتاح OpenRouter** لأنه موجود في تاريخ git.
 
 ## المرحلة 3: ربط المصنع
 
-- [ ] `hypogeum/publishing/postiz.py`: provider جديد بنفس واجهة `ZernioProvider` (النشر، والحالة، وتحديث الـ privacy).
-- [ ] نختار المزود لكل قناة من `channel_provider_bindings`، عشان ننقل قناة قناة.
+- [~] `hypogeum/publishing/postiz.py` (2026-10-03): `PostizProvider` شغال، فيه publish وpublish_multi_platform (post لكل منصة) وget_post وanalytics وidempotency، و28 اختبار، واتأكدنا منه live (قراية بس). **مفيهوش تحديث privacy بعد النشر**، لأن Postiz معندوش API للحكاية دي. ناقص: الربط بـ `zernio_publish_runtime`.
+- [x] نختار المزود لكل منصة من `channel_provider_bindings` (2026-10-03). الـ runtime (`publish_episode_package`) بيوجّه كل منصة للمزود اللي في الـ binding بتاعها، وأي حاجة مش postiz بتفضل على Zernio. وأي مزود يفشل، بيوقع منصاته هو بس.
+- [x] أداة النقل `scripts/postiz_cutover.py` (status / register / switch --to postiz|zernio). من غير `--apply` مش بتكتب حاجة، والرجوع لـ Zernio بأمر واحد. والـ preview اتأكد إن الـ 8 حسابات بتتطابق صح.
+- [ ] **قبل نقل أي منصة:** لازم نحط `madeForKids` في policy الـ YouTube للقناتين (Twinkle `true`، وHypogeum `false`)، لأن Postiz بيطلبه والأدابتر بيرفض من غيره. والحاجات اللي لسه بتقرا من Zernio بس: الـ Content Grid، والـ cover hold، وsync الجدول، والتحليلات. والميديا لسه بتترفع على تخزين Zernio (`ZernioMediaStagingProvider`)، وده هيفضل شغال طول ما حساب Zernio موجود.
 - [ ] نحط الـ cover كأول frame في الـ assembly، عشان تيك توك.
 - [ ] نبدّل مصدر التحليلات، حسب نتيجة المرحلة 0.
 - [ ] الـ YouTube cover hold (`youtube_cover_hold.py`) يشتغل مع Postiz كمان (`type: private`)، لو قررنا نكمل بيه.
@@ -101,5 +103,5 @@
 
 ## Zernio خلال المدة دي
 
-- لازم الكارت يتشحن ($18 مطلوبين، والحساب موقوف من 2026-10-01). من غيره **مفيش أي نشر**.
+- ✅ الفاتورة اتدفعت 2026-10-02، والنشر شغال عادي (اتأكدنا منه 2026-10-03).
 - لتقليل الفاتورة لحد النقل: ممكن نفصل YouTube وInstagram بتوع Twinkle، لأنهم الأضعف أداءً، فنوفر حوالي $12 في الشهر.

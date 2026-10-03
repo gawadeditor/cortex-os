@@ -337,6 +337,7 @@ class Config:
     HYPOGEUM_ARCHIVE_ROOT: str           # fallback archive root; default: "" (built-in)
     COVER_GUARD_SSH_TARGET: str          # "user@host" of the always-on cover release guard; "" disables
     COVER_GUARD_SSH_KEY: str             # private key path for that SSH target; "" = ssh default
+    POSTIZ_API_URL: str                  # Postiz public API base (…/api/public/v1); used by hypogeum.publishing.postiz
 
     # ------------------------------------------------------------------
     # Brand Guardian Agent (BGA v1A) — pre-generation brand compliance gate
@@ -633,6 +634,12 @@ class Config:
         # in-dashboard loop is the only releaser (previous behaviour).
         self.COVER_GUARD_SSH_TARGET = _get_optional("COVER_GUARD_SSH_TARGET", default="")
         self.COVER_GUARD_SSH_KEY = _get_optional("COVER_GUARD_SSH_KEY", default="")
+        # POSTIZ_API_URL: the self-hosted Postiz public API that
+        # hypogeum.publishing.postiz.PostizProvider talks to. The API key is
+        # never read here -- it lives in Credential Manager (provider='postiz').
+        self.POSTIZ_API_URL = _get_optional(
+            "POSTIZ_API_URL", default="https://postiz.cortexchannels.com/api/public/v1"
+        )
         # REQUIRE_SHORT_BURNED_CAPTIONS: fail closed (raise, never silently
         # render without them) when a Short's caption asset cannot be
         # resolved to its own canonical short_id. Default True -- burned-in

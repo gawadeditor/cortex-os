@@ -46,7 +46,8 @@ _STATUS = ("active", "paused", "archived")
 _ENGAGEMENT = ("observe", "manage")
 _ANALYSIS = ("metadata", "full_video")
 _PLATFORMS = ("youtube", "tiktok", "instagram", "facebook")
-_CONTENT_SOURCES = ("zernio_external", "zernio_late", "manual_url", "csv", "public")
+_CONTENT_SOURCES = ("zernio_external", "zernio_late", "manual_url", "csv", "public",
+                    "instagram_graph")
 
 
 def _now() -> str:

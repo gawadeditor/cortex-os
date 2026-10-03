@@ -700,18 +700,20 @@ def _migrate_budget_reservations_scope_check(conn: sqlite3.Connection) -> None:
 
 def _migrate_content_items_source_check(conn: sqlite3.Connection) -> None:
     """Cortex Advisory (2026-09-06): widen content_items.source's CHECK with
-    'public' (yt-dlp public-catalogue import). SQLite cannot ALTER a CHECK,
+    'public' (yt-dlp public-catalogue import); 2026-10-03: also
+    'instagram_graph' (direct Instagram API with Instagram Login — see
+    hypogeum.publishing.instagram_graph). SQLite cannot ALTER a CHECK,
     so rebuild the table inside one explicit transaction — same
     crash-atomicity as _migrate_budget_reservations_scope_check(). Idempotent:
-    gated on whether 'public' already appears in the stored CREATE statement.
+    gated on whether the newest value already appears in the stored CREATE statement.
     Every existing row is copied unchanged."""
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='content_items'"
     ).fetchone()
     if not row or row[0] is None:
         return  # no table yet (schema.sql creates the new shape directly)
-    if "'public'" in row[0]:
-        return  # already migrated
+    if "'instagram_graph'" in row[0]:
+        return  # already migrated (latest widening)
 
     conn.execute("BEGIN")
     try:
@@ -733,7 +735,7 @@ def _migrate_content_items_source_check(conn: sqlite3.Connection) -> None:
                 media_type         TEXT,
                 published_at       TEXT,
                 source             TEXT NOT NULL DEFAULT 'zernio_external'
-                                   CHECK(source IN ('zernio_external','zernio_late','manual_url','csv','public')),
+                                   CHECK(source IN ('zernio_external','zernio_late','manual_url','csv','public','instagram_graph')),
                 created_at         TEXT NOT NULL,
                 updated_at         TEXT NOT NULL,
                 UNIQUE(platform, platform_post_id)

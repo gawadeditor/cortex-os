@@ -130,6 +130,11 @@ def sync_client_content(client_id: str, *, provider=None, analyze: bool = False,
     for acct in accounts:
         aid = acct.get("provider_account_id")
         plat = acct.get("platform")
+        if acct.get("provider_id") == "instagram_graph":
+            # Read directly from Instagram (no Zernio account needed) — see
+            # hypogeum.publishing.instagram_graph.
+            _sync_instagram_graph(client_id, acct, seen_content, out, db_path)
+            continue
         if not aid:
             # Manually-added, not yet matched to a Zernio account — nothing to
             # pull until it's connected on Zernio and reconciled.
@@ -171,7 +176,9 @@ def sync_client_content(client_id: str, *, provider=None, analyze: bool = False,
         out["retention"] += _sync_account_retention(provider, client_id, aid, plat, db_path, out)
         out["audience_rows"] += _sync_account_native(provider, client_id, aid, plat, db_path, out)
 
-    _sync_account_rollups(provider, client_id, accounts, db_path, out)
+    _sync_account_rollups(provider, client_id,
+                          [a for a in accounts if a.get("provider_id") != "instagram_graph"],
+                          db_path, out)
 
     if analyze and client.get("analysis_depth") != "full_video":
         out["profiled"] = _profile_new_content(client, seen_content, analyze_fn,
@@ -183,6 +190,66 @@ def sync_client_content(client_id: str, *, provider=None, analyze: bool = False,
                                     "retention", "audience_rows", "comments")},
              errors=list(out["errors"]))
     return out
+
+
+_IG_MEDIA_LIMIT = 100        # newest posts per run (the API pages 100 at a time)
+_IG_INSIGHT_CALLS = 60       # per account per run — the rest wait for the next run
+
+
+def _sync_instagram_graph(client_id: str, acct: dict, seen_content: set, out: dict,
+                          db_path, client_factory=None) -> None:
+    """Pull one Professional Instagram account through the Instagram API with
+    Instagram Login into content_items + platform_analytics. Never raises."""
+    from hypogeum import client_manager as cm
+    from hypogeum.analytics_store import store_content_metrics
+    from hypogeum.publishing import instagram_graph as ig
+
+    ig_user_id = acct.get("native_account_id") or acct.get("provider_account_id")
+    if not ig_user_id:
+        out["pending_accounts"] += 1
+        return
+    client = (client_factory or ig.InstagramGraphClient)(ig_user_id, db_path=db_path)
+    try:
+        client.refresh_token_if_due()
+        media = client.recent_media(limit=_IG_MEDIA_LIMIT)
+    except Exception as exc:  # noqa: BLE001
+        out["errors"][f"instagram_graph:{ig_user_id}"] = str(exc)[:160]
+        return
+    calls = 0
+    insights_stop = False   # set once we reach media older than the last Professional conversion
+    for m in media:
+        content_id = cm.upsert_content_item(
+            client_id, "instagram", platform_post_id=str(m["id"]),
+            managed_account_id=acct["managed_account_id"], url=m.get("permalink"),
+            title=(m.get("caption") or "").split("\n", 1)[0][:200] or None,
+            caption=m.get("caption") or None,
+            thumbnail_url=m.get("thumbnail_url") or (m.get("media_url") if m.get("media_type") == "IMAGE" else None),
+            media_type=(m.get("media_product_type") or m.get("media_type") or "").lower() or None,
+            published_at=m.get("timestamp"), source="instagram_graph", db_path=db_path,
+        )
+        if content_id not in seen_content:
+            seen_content.add(content_id)
+            out["content_items"] += 1
+        insights: dict = {}
+        if calls < _IG_INSIGHT_CALLS and not insights_stop:
+            calls += 1
+            try:
+                insights = client.media_insights(m)
+            except ig.InstagramPreConversionMedia:
+                # Expected, not an error: media is newest-first, so every
+                # remaining post predates the conversion too.
+                insights_stop = True
+                out["ig_pre_conversion_from"] = m.get("timestamp")
+            except Exception as exc:  # noqa: BLE001
+                out["errors"][f"ig_insights:{m['id']}"] = str(exc)[:120]
+        metrics = ig.to_cortex_metrics(insights, m)
+        if any(metrics.get(k) for k in ("views", "likes", "comments", "reach", "engagement_rate")):
+            try:
+                store_content_metrics(content_id, client_id, "instagram", metrics,
+                                      source="api", db_path=db_path)
+                out["metric_rows"] += 1
+            except Exception as exc:  # noqa: BLE001
+                out["errors"][f"store:{content_id}"] = str(exc)[:120]
 
 
 def _sync_account_retention(provider, client_id, account_id, platform, db_path, out) -> int:

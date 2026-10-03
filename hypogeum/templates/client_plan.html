@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ d.client.name }} — Plan</title>
+  {% include '_base_style.html' %}
+  <style>
+    .plan { direction: rtl; text-align: right; }
+    .plan .flash { font-size: 12px; padding: 9px 11px; border-radius: 8px; margin-bottom: var(--space-md);
+                   background: var(--accent-bg); border: 1px solid var(--accent-line); color: var(--text); }
+    .pos { font-size: 15px; line-height: 1.8; color: var(--text); background: var(--overlay);
+           border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: var(--space-md); }
+    .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-top: 12px; }
+    .fact { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: var(--surface); }
+    .fact .k { font-size: 11px; color: var(--faint); }
+    .fact .v { font-size: 13px; color: var(--text); margin-top: 4px; line-height: 1.6; }
+    .pillars { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; margin-top: 12px; }
+    .pillar { border-right: 3px solid var(--accent); background: var(--surface); border-radius: 8px 0 0 8px; padding: 10px 14px; }
+    .pillar b { font-size: 13.5px; color: var(--text); }
+    .pillar p { font-size: 12.5px; color: var(--muted); margin: 6px 0 0; line-height: 1.6; }
+    .pillar .fm { font-size: 11px; color: var(--faint); margin-top: 6px; }
+    .ev { font-size: 12.5px; color: var(--muted); line-height: 1.8; margin: 8px 0 0; padding-right: 18px; }
+    .post { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); padding: 14px 16px; margin-top: 12px; }
+    .post.is-published { opacity: .72; border-style: dashed; }
+    .post-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
+    .post-when { font-size: 14px; color: var(--text); font-weight: 600; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip { font-size: 11px; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+    .chip.is-on { border-color: var(--accent-line); color: var(--accent); background: var(--accent-bg); }
+    .post-meta { font-size: 12px; color: var(--faint); margin-top: 6px; }
+    .needs { font-size: 12px; margin-top: 8px; padding: 7px 10px; border-radius: 6px; background: var(--overlay); color: var(--muted); }
+    .draft { width: 100%; min-height: 180px; margin-top: 10px; font-family: var(--font-body, inherit); font-size: 13.5px;
+             line-height: 1.7; padding: 12px; border-radius: 8px; border: 1px solid var(--border);
+             background: var(--overlay); color: var(--text); resize: vertical; box-sizing: border-box; }
+    .draft[dir="ltr"] { text-align: left; }
+    .post-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .btn { cursor: pointer; transition: background .2s, border-color .2s; }
+    .btn:focus-visible, .draft:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .empty { font-size: 13px; color: var(--muted); }
+    @media (prefers-reduced-motion: reduce) { .btn { transition: none; } }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+{% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
+
+<div class="container">
+
+{% call hero(
+     eyebrow='Client · plan',
+     title=d.client.name ~ ' — Personal branding',
+     lede='الاستراتيجية وجدول المحتوى والمسودات. انسخ البوست، انشره، وبعدين اضغط "نشرته".',
+     figure=d.counts.published ~ ' / ' ~ (d.posts | length),
+     figure_label='posts published this month',
+     pill=(d.calendar.month or '—'),
+     pill_class='is-good') %}
+  <a class="btn" href="/client/{{ d.client.client_id }}/report?scope=client:{{ d.client.client_id }}">{{ icon('review') }} Report</a>
+{% endcall %}
+
+<div class="plan">
+{% if flash %}<div class="flash">{{ flash }}</div>{% endif %}
+
+{% set s = d.strategy %}{% set pr = d.profile %}
+{% if not s %}
+  <div class="card"><p class="empty">لسه مفيش استراتيجية للعميل ده. ابدأ بالاستبيان.</p></div>
+{% else %}
+
+<div class="card">
+  <div class="card-title">{{ icon('sparkle') }} إنت مين</div>
+  <div class="pos">{{ s.positioning }}</div>
+  <div class="facts">
+    {% if pr.goal %}<div class="fact"><div class="k">الهدف</div><div class="v">{{ pr.goal }}</div></div>{% endif %}
+    {% if pr.audience %}<div class="fact"><div class="k">الجمهور</div><div class="v">{{ pr.audience }}</div></div>{% endif %}
+    {% if pr.services %}<div class="fact"><div class="k">الخدمات</div><div class="v">{{ pr.services | join('، ') }}</div></div>{% endif %}
+    {% if s.cadence %}<div class="fact"><div class="k">النشر</div><div class="v">{{ s.cadence.posts_per_week }} بوست في الأسبوع — {{ s.cadence.plan }}</div></div>{% endif %}
+    {% if s.guardrails %}<div class="fact"><div class="k">مش هنتكلم في</div><div class="v">{{ s.guardrails | join(' · ') }}</div></div>{% endif %}
+  </div>
+</div>
+
+{% if pr.awards %}
+<div class="card" style="margin-top: var(--space-md);">
+  <div class="card-title">{{ icon('check') }} الجوايز</div>
+  <div class="facts">
+    {% for a in pr.awards %}
+    <div class="fact"><div class="v" style="margin-top:0;"><b>{{ a.name }}</b></div>
+      <div class="k" style="margin-top:4px;">{{ a.year }}{% if a.category %} · {{ a.category }}{% endif %} · {{ a.project }} · {{ a.role }}</div></div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+<div class="card" style="margin-top: var(--space-md);">
+  <div class="card-title">{{ icon('grid') }} المواضيع</div>
+  <div class="pillars">
+    {% for p in s.pillars or [] %}
+    <div class="pillar"><b>{{ p.name }}</b><p>{{ p.why }}</p>
+      {% if p.formats %}<div class="fm">{{ p.formats | join(' · ') }}</div>{% endif %}</div>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="card" style="margin-top: var(--space-md);">
+  <div class="card-title">{{ icon('channels') }} دور كل منصة</div>
+  <div class="facts">
+    {% for name, pl in (s.platforms or {}).items() %}
+    <div class="fact"><div class="v" style="margin-top:0;"><b>{{ name | friendly_platform }}</b></div>
+      <div class="v">{{ pl.role }}</div><div class="k" style="margin-top:6px;">اللغة: {{ pl.language }}</div></div>
+    {% endfor %}
+  </div>
+  {% if s.evidence %}
+  <ul class="ev">{% for e in s.evidence %}<li>{{ e }}</li>{% endfor %}</ul>
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="card" style="margin-top: var(--space-md);">
+  <div class="card-title">{{ icon('calendar') }} جدول الشهر</div>
+  {% if not d.posts %}<p class="empty">لسه مفيش جدول للشهر ده.</p>{% endif %}
+  {% for p in d.posts %}
+  {% set st = p.status or 'draft' %}
+  <form class="post {{ 'is-published' if st == 'published' }}" method="post"
+        action="/client/{{ d.client.client_id }}/plan/post" id="post-{{ loop.index }}">
+    <input type="hidden" name="date" value="{{ p.date }}">
+    <div class="post-head">
+      <div class="post-when">{{ loop.index }}. {{ p.day }} {{ p.date }}</div>
+      <div class="chips">
+        {% for pl in p.platforms %}<span class="chip is-on">{{ pl | friendly_platform }}</span>{% endfor %}
+        <span class="chip">{{ 'عربي' if p.lang == 'ar' else 'إنجليزي' }}</span>
+        <span class="chip">{{ {'draft':'مسودة','approved':'موافق عليه','published':'اتنشر','skipped':'اتلغى'}[st] }}</span>
+      </div>
+    </div>
+    <div class="post-meta">{{ p.pillar }} · {{ p.format }}</div>
+    {% if p.needs %}<div class="needs">{{ icon('info') }} محتاج: {{ p.needs }}</div>{% endif %}
+    {% if p.review_note %}<div class="needs">{{ p.review_note }}</div>{% endif %}
+    <textarea class="draft" name="draft" dir="{{ 'rtl' if p.lang == 'ar' else 'ltr' }}"
+              aria-label="مسودة البوست {{ loop.index }}">{{ p.draft }}</textarea>
+    <div class="post-actions">
+      <button type="button" class="btn btn-primary btn-sm js-copy">{{ icon('check') }} نسخ</button>
+      <button type="submit" name="action" value="save" class="btn btn-sm">{{ icon('pencil') }} حفظ التعديل</button>
+      {% if st != 'published' %}
+      <button type="submit" name="action" value="published" class="btn btn-sm">{{ icon('check') }} نشرته</button>
+      {% else %}
+      <button type="submit" name="action" value="draft" class="btn btn-sm">{{ icon('refresh') }} رجّعه مسودة</button>
+      {% endif %}
+    </div>
+  </form>
+  {% endfor %}
+</div>
+</div>
+
+</div>
+<script>
+document.querySelectorAll('textarea.draft').forEach(function (ta) {
+  var fit = function () { ta.style.height = 'auto'; ta.style.height = (ta.scrollHeight + 4) + 'px'; };
+  fit(); ta.addEventListener('input', fit);
+});
+document.querySelectorAll('.js-copy').forEach(function (b) {
+  b.addEventListener('click', function () {
+    var ta = b.closest('form').querySelector('textarea');
+    var done = function () { var t = b.innerHTML; b.textContent = 'اتنسخ'; setTimeout(function(){ b.innerHTML = t; }, 1500); };
+    if (navigator.clipboard) { navigator.clipboard.writeText(ta.value).then(done); }
+    else { ta.select(); document.execCommand('copy'); done(); }
+  });
+});
+</script>
+</body>
+</html>

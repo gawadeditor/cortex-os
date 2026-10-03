@@ -244,3 +244,56 @@ def get_client_accounts(client_id: str, db_path: Optional[Path] = None) -> dict:
     except Exception:  # noqa: BLE001
         pass
     return {"client": client, "accounts": accts, "zernio_pool": pool}
+
+
+# ---------------------------------------------------------------------------
+# Personal-branding plan (docs/plans/PERSONAL_BRANDING_PLAN.md) — stored in
+# clients.brief: brand_profile / brand_strategy / content_calendar.
+# ---------------------------------------------------------------------------
+
+_POST_STATUSES = ("draft", "approved", "published", "skipped")
+
+
+def get_client_plan(client_id: str, db_path: Optional[Path] = None) -> dict:
+    from hypogeum import client_manager as cm
+    client = cm.get_client(client_id, db_path=db_path)
+    if not client:
+        return {"client": None}
+    brief = client.get("brief") or {}
+    cal = brief.get("content_calendar") or {}
+    posts = list(cal.get("posts") or [])
+    counts = {s: sum(1 for p in posts if (p.get("status") or "draft") == s) for s in _POST_STATUSES}
+    return {"client": client, "profile": brief.get("brand_profile") or {},
+            "strategy": brief.get("brand_strategy") or {}, "calendar": cal, "posts": posts,
+            "counts": counts}
+
+
+def update_plan_post(client_id: str, date: str, *, status: Optional[str] = None,
+                     draft: Optional[str] = None, db_path: Optional[Path] = None) -> bool:
+    """Edit one calendar post (matched by its date). Returns False if absent."""
+    from datetime import datetime, timezone
+    from hypogeum import client_manager as cm
+    if status is not None and status not in _POST_STATUSES:
+        raise ValueError(f"status must be one of {_POST_STATUSES}")
+    client = cm.get_client(client_id, db_path=db_path)
+    if not client:
+        return False
+    brief = dict(client.get("brief") or {})
+    cal = dict(brief.get("content_calendar") or {})
+    posts = list(cal.get("posts") or [])
+    hit = False
+    for p in posts:
+        if p.get("date") == date:
+            if status is not None:
+                p["status"] = status
+                if status == "published":
+                    p["published_marked_at"] = datetime.now(timezone.utc).isoformat()
+            if draft is not None and draft.strip():
+                p["draft"] = draft.replace("\r\n", "\n").strip()
+                p["edited_at"] = datetime.now(timezone.utc).isoformat()
+            hit = True
+    if not hit:
+        return False
+    cal["posts"] = posts
+    brief["content_calendar"] = cal
+    return cm.update_client(client_id, brief=brief, db_path=db_path)

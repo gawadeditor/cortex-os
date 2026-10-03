@@ -71,3 +71,30 @@ def test_monetization_only_for_platforms_the_client_is_on(db):
     mon = generate_client_advisory("me", db_path=db).get("monetization") or {}
     plats = set((mon.get("platforms") or {}).keys())
     assert plats <= {"instagram", "linkedin"} and "youtube" not in plats and "tiktok" not in plats
+
+
+def test_plan_page_renders_and_updates_posts(db, tmp_path):
+    import run_dashboard as rd
+    from hypogeum.dashboard_clients import get_client_plan
+    c = cm.get_client("me", db_path=db)
+    cm.update_client("me", db_path=db, brief={
+        "brand_profile": {"goal": "عملاء أكتر", "awards": [{"name": "Gold", "year": 2026, "project": "P", "role": "Editor"}]},
+        "brand_strategy": {"positioning": "محرر وثائقي", "pillars": [{"name": "قبل وبعد", "why": "دليل"}],
+                           "platforms": {"linkedin": {"role": "أساسي", "language": "عربي"}}},
+        "content_calendar": {"month": "2026-10", "posts": [
+            {"date": "2026-10-06", "day": "الثلاثاء", "platforms": ["linkedin"], "lang": "en",
+             "pillar": "x", "format": "text", "needs": None, "draft": "Hello"}]}})
+    old = rd.app.config.get("DB_PATH")
+    rd.app.config["DB_PATH"] = str(db)
+    try:
+        cl = rd.app.test_client()
+        page = cl.get("/client/me/plan?scope=client:me").get_data(as_text=True)
+        assert "محرر وثائقي" in page and "Hello" in page and "Gold" in page
+        r = cl.post("/client/me/plan/post", data={"date": "2026-10-06", "draft": "Hello edited", "action": "published"})
+        assert r.status_code == 302
+        p = get_client_plan("me", db_path=db)["posts"][0]
+        assert p["draft"] == "Hello edited" and p["status"] == "published"
+        assert get_client_plan("me", db_path=db)["counts"]["published"] == 1
+        assert cl.get("/client/nope/plan").status_code == 404
+    finally:
+        rd.app.config["DB_PATH"] = old

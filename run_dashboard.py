@@ -8508,6 +8508,29 @@ def client_advice_page(client_id):
     return render_template("client_advice.html", d=d)
 
 
+@app.route("/client/<client_id>/plan")
+def client_plan_page(client_id):
+    """Personal-branding strategy + monthly calendar with editable drafts."""
+    from hypogeum.dashboard_clients import get_client_plan
+    d = get_client_plan(client_id, db_path=_db_path())
+    if not d.get("client"):
+        return render_template("not_found.html", kind="Client", id=client_id), 404
+    return render_template("client_plan.html", d=d, flash=request.args.get("flash"))
+
+
+@app.route("/client/<client_id>/plan/post", methods=["POST"])
+def client_plan_post_update(client_id):
+    from hypogeum.dashboard_clients import update_plan_post
+    date = request.form.get("date") or ""
+    action = request.form.get("action") or "save"
+    status = action if action in ("published", "draft") else None
+    ok = update_plan_post(client_id, date, status=status, draft=request.form.get("draft"),
+                          db_path=_db_path())
+    msg = ("اتسجّل إنه اتنشر" if action == "published" else
+           "رجع مسودة" if action == "draft" else "اتحفظ التعديل") if ok else "مالقيتش البوست ده"
+    return redirect(f"/client/{client_id}/plan?scope=client:{client_id}&flash={msg}", 302)
+
+
 @app.route("/client/<client_id>/report")
 def client_report_page(client_id):
     from datetime import datetime, timezone

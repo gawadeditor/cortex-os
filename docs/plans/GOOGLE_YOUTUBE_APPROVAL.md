@@ -15,7 +15,7 @@
 
 ## المرحلة A: وقف وقوع التوكن ✅ (اتنقل لـ In production يوم 2026-10-03)
 
-> اتعمل 2026-10-03: كمّلنا صفحة Branding (الصفحة الرئيسية، والخصوصية، والشروط على cortexchannels.com)، وبعدين **Publish app**، والحالة بقت **In production**. **فاضل:** إعادة ربط القناتين في Postiz (Add Channel ثم YouTube، لنفس القناة). ده upsert على `organizationId_internalId`، يعني نفس الـ integration id. التوكنات القديمة اتعملت وإحنا في وضع Testing، فهتقع حوالي 8 أكتوبر لو مارجعناش ربطناها.
+> اتعمل 2026-10-03: كمّلنا صفحة Branding (الصفحة الرئيسية، والخصوصية، والشروط على cortexchannels.com)، وبعدين **Publish app**، والحالة بقت **In production**. **✅ اتعملت إعادة الربط للقناتين (2026-10-03).** فيه bug في Postiz: لما بتعمل Add Channel لقناة موجودة أصلاً، الـ refresh token الجديد بيتحط في row مؤقت والـ row ده بيتمسح (`updateIntegration` بينقل `token` بس، ومش بينقل `refreshToken`). اتنقل الـ refresh token يدوي للـ rows الحقيقية بـ SQL، والمشغّل هو اللي شغّله بنفسه. Fingerprints: Hypogeum `aae2ef644f`، وTwinkle `ea495d025e`. واتأكدنا إن `GET /analytics/{id}` شغال للقناتين. **لو احتجنا نعمل إعادة ربط تاني، لازم ننقل الـ refresh token بنفس الطريقة.** في Google picker، الـ Hypogeum بتظهر باسم الـ brand account القديم "رادار | RADAR AI".
 
 Google بيستثني الاستخدام الشخصي من الـ verification، يعني أي أبلكيشن مستخدمينه أقل من 100. التوكن بيقع كل 7 أيام **بس** طول ما الأبلكيشن في وضع Testing.
 

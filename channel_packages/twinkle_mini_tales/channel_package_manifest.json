@@ -12,9 +12,9 @@
     {
       "path": "platform_distribution_policy_v1.json",
       "role": "platform_distribution_policy",
-      "policy_id": "hypogeum_platform_distribution_policy_v1",
-      "policy_version": "1.3.0",
-      "sha256": "d091057cf85d2eca3ab9479a1be1e4da53225ac8a7f8653e778cd33410fa71f7"
+      "policy_id": "twinkle_mini_tales_platform_distribution_policy_v1",
+      "policy_version": "1.4.0",
+      "sha256": "d16c6536011a358287388a3eba470c7d88df9b67963b5955782eb2b1261a9331"
     },
     {
       "path": "deliverable_contract_v1.json",

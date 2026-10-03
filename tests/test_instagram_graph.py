@@ -193,7 +193,8 @@ def test_pre_conversion_media_is_expected_and_stops_older_insight_calls(db_path,
     out = sync_client_content("old", provider=object(), db_path=db_path)
     assert out["errors"] == {}                       # expected, not an error
     assert out["content_items"] == 2 and out["metric_rows"] == 2   # likes/comments still stored
-    assert sum("/insights" in u for u in fake.calls) == 1          # stopped after the first
+    media_insight_calls = [u for u in fake.calls if "/insights" in u and "/me/insights" not in u]
+    assert len(media_insight_calls) == 1                            # stopped after the first
     assert out["ig_pre_conversion_from"] == "2026-09-30T10:00:00+0000"
 
 
@@ -214,3 +215,41 @@ def test_content_analysis_skips_posts_before_client_start_date(db_path, monkeypa
     monkeypatch.setattr(caa, "analyze_content_item", fake_analyze)
     ccs.sync_client_content("st", provider=object(), analyze=True, db_path=db_path)
     assert analysed == ["m1"]          # m1 is 2026-09-30 (after start); m2 2026-09-20 is skipped
+
+
+class DemoGraph(FakeGraph):
+    def __call__(self, url, timeout=30.0):
+        if "/me/insights" in url and "follower_demographics" in url:
+            self.calls.append(url)
+            dim = parse_qs(urlparse(url).query)["breakdown"][0]
+            res = {"age": [("35-44", 60), ("25-34", 40)], "gender": [("M", 75), ("F", 25)],
+                   "country": [("EG", 50), ("AE", 50)], "city": [("Dubai, Dubai", 10)]}[dim]
+            return ig.HttpResponse(200, {"data": [{"name": "follower_demographics", "total_value": {
+                "breakdowns": [{"results": [{"dimension_values": [k], "value": v} for k, v in res]}]}}]})
+        return super().__call__(url, timeout)
+
+
+def test_follower_demographics_normalised(db_path):
+    ig.store_account_token(IG_ID, "T", db_path=db_path)
+    d = _client(db_path, DemoGraph()).follower_demographics()
+    assert d["age"][0] == {"label": "35-44", "value": 60.0, "pct": 60.0}
+    assert [r["label"] for r in d["gender"]] == ["Men", "Women"]
+    assert {r["label"] for r in d["country"]} == {"Egypt", "UAE"}
+    assert d["city"][0]["label"] == "Dubai"
+
+
+def test_sync_stores_instagram_audience_once_a_day(db_path, monkeypatch):
+    from hypogeum.publishing.zernio_native_sync import get_channel_audience
+    ig.store_account_token(IG_ID, "T", db_path=db_path)
+    cm.create_client("Aud", client_id="aud", db_path=db_path)
+    cm.link_managed_account("aud", "instagram", handle="me", provider_id="instagram_graph",
+                            provider_account_id=IG_ID, native_account_id=IG_ID, db_path=db_path)
+    fake = DemoGraph()
+    monkeypatch.setattr(ig, "_requests_get", fake)
+    out = sync_client_content("aud", provider=object(), db_path=db_path)
+    assert out["audience_rows"] == 4
+    aud = get_channel_audience("aud", db_path=db_path)["instagram"]
+    assert aud["country"][0]["label"] in ("Egypt", "UAE") and aud["gender"][0]["label"] == "Men"
+    n = sum("follower_demographics" in u for u in fake.calls)
+    sync_client_content("aud", provider=object(), db_path=db_path)   # same day again
+    assert sum("follower_demographics" in u for u in fake.calls) == n

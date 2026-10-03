@@ -169,6 +169,32 @@ class InstagramGraphClient:
             return out
         raise last or InstagramGraphError("insights unavailable")
 
+    def follower_demographics(self) -> dict:
+        """{dimension: [{label, value, pct}]} for age / gender / country / city,
+        from `follower_demographics` (lifetime, total_value). Meta only reports
+        it for accounts with 100+ followers; a dimension that errors or comes
+        back empty is simply absent."""
+        out: dict = {}
+        for dim in ("age", "gender", "country", "city"):
+            try:
+                body = self._call("me/insights", {"metric": "follower_demographics", "period": "lifetime",
+                                                  "metric_type": "total_value", "breakdown": dim})
+            except InstagramGraphError:
+                continue
+            data = (body.get("data") or [{}])[0]
+            results = (((data.get("total_value") or {}).get("breakdowns") or [{}])[0].get("results")) or []
+            rows = []
+            for r in results:
+                vals = r.get("dimension_values") or []
+                if vals and isinstance(r.get("value"), (int, float)):
+                    rows.append({"label": _demo_label(dim, vals[0]), "value": float(r["value"])})
+            total = sum(x["value"] for x in rows)
+            if not rows or not total:
+                continue
+            rows.sort(key=lambda x: -x["value"])
+            out[dim] = [{**x, "pct": round(100.0 * x["value"] / total, 1)} for x in rows]
+        return out
+
     def refresh_token_if_due(self, *, now: Optional[datetime] = None) -> bool:
         """Refresh the long-lived token once it is >= 30 days old. Returns
         True when refreshed. Never raises for a refresh failure (logged) —
@@ -239,6 +265,27 @@ def to_cortex_metrics(insights: dict, media: dict) -> dict:
         # PERCENT, like every other source (zernio_analytics_sync: 2.66 == 2.66%)
         m["engagement_rate"] = round(100.0 * float(total) / float(reach), 2)
     return {k: v for k, v in m.items() if v is not None}
+
+
+_COUNTRIES = {
+    "EG": "Egypt", "AE": "UAE", "SA": "Saudi Arabia", "GB": "United Kingdom", "US": "United States",
+    "KW": "Kuwait", "QA": "Qatar", "BH": "Bahrain", "OM": "Oman", "JO": "Jordan", "LB": "Lebanon",
+    "IQ": "Iraq", "SY": "Syria", "PS": "Palestine", "MA": "Morocco", "DZ": "Algeria", "TN": "Tunisia",
+    "LY": "Libya", "SD": "Sudan", "YE": "Yemen", "TR": "Turkey", "DE": "Germany", "FR": "France",
+    "IN": "India", "PK": "Pakistan", "CA": "Canada", "IT": "Italy", "ES": "Spain", "NL": "Netherlands",
+}
+_GENDERS = {"M": "Men", "F": "Women", "U": "Unspecified"}
+
+
+def _demo_label(dim: str, raw) -> str:
+    raw = str(raw)
+    if dim == "country":
+        return _COUNTRIES.get(raw, raw)
+    if dim == "gender":
+        return _GENDERS.get(raw, raw)
+    if dim == "city":
+        return raw.split(",")[0].strip()   # "Dubai, Dubai" -> "Dubai"
+    return raw
 
 
 def _parse_ts(value) -> Optional[datetime]:

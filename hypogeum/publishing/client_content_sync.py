@@ -218,6 +218,7 @@ def _sync_instagram_graph(client_id: str, acct: dict, seen_content: set, out: di
     except Exception as exc:  # noqa: BLE001
         out["errors"][f"instagram_graph:{ig_user_id}"] = str(exc)[:160]
         return
+    _sync_instagram_audience(client, client_id, out, db_path)
     calls = 0
     insights_stop = False   # set once we reach media older than the last Professional conversion
     for m in media:
@@ -253,6 +254,35 @@ def _sync_instagram_graph(client_id: str, acct: dict, seen_content: set, out: di
                 out["metric_rows"] += 1
             except Exception as exc:  # noqa: BLE001
                 out["errors"][f"store:{content_id}"] = str(exc)[:120]
+
+
+def _sync_instagram_audience(ig_client, client_id: str, out: dict, db_path) -> None:
+    """Follower demographics -> channel_audience (channel_id = client_id), the
+    same rows the Audience page reads for Zernio-sourced clients. Once per day."""
+    from hypogeum.db import get_connection
+    from hypogeum.publishing.zernio_native_sync import _store_audience, _today
+    conn = get_connection(Path(db_path) if db_path else None)
+    try:
+        if conn.execute("SELECT 1 FROM channel_audience WHERE channel_id=? AND platform='instagram' "
+                        "AND snapshot_date=? LIMIT 1", (client_id, _today())).fetchone():
+            return
+    finally:
+        conn.close()
+    try:
+        demo = ig_client.follower_demographics()
+    except Exception as exc:  # noqa: BLE001
+        out["errors"][f"ig_audience:{client_id}"] = str(exc)[:120]
+        return
+    if not demo:
+        return
+    conn = get_connection(Path(db_path) if db_path else None)
+    try:
+        out["audience_rows"] += _store_audience(
+            conn, channel_id=client_id, platform="instagram",
+            demographics={k: [{"label": r["label"], "pct": r["pct"]} for r in v] for k, v in demo.items()})
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _sync_account_retention(provider, client_id, account_id, platform, db_path, out) -> int:

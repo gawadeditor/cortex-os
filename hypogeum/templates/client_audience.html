@@ -41,14 +41,16 @@
     {% if d.observed_audience %}
       <p style="font-size:12px; line-height:1.55; margin:8px 0 14px; color:var(--text);">{{ d.observed_audience }}</p>
     {% endif %}
-    {% set _yt = d.audience.get('youtube') or d.audience.get('instagram') or d.audience.get('tiktok') or d.audience.get('facebook') or {} %}
-    {% if _yt %}
-      {% for dim in ['age', 'gender', 'country'] %}
-        {% set rows = _yt.get(dim) %}
+    {% set _plats = [] %}{% for pn in ['youtube', 'instagram', 'tiktok', 'facebook'] %}{% if d.audience.get(pn) %}{% set _ = _plats.append(pn) %}{% endif %}{% endfor %}
+    {% for pn in _plats %}
+      {% set _a = d.audience.get(pn) %}
+      <div class="demo-group-title" style="margin-top:6px;color:var(--text);">{{ pn | friendly_platform }} followers</div>
+      {% for dim in ['age', 'gender', 'country', 'city'] %}
+        {% set rows = _a.get(dim) %}
         {% if rows %}
         <div class="demo-group">
           <div class="demo-group-title">{{ dim }}</div>
-          {% for row in rows[:6] %}
+          {% for row in rows[:5] %}
           <div class="demo-row">
             <span class="demo-lbl">{{ row.label }}</span>
             {{ hbar(row.pct, 100, tone='accent') }}
@@ -58,8 +60,28 @@
         </div>
         {% endif %}
       {% endfor %}
-    {% else %}
-      <div class="note">No demographic data yet — a platform needs roughly 100+ followers before it reports audience age, gender or geography.</div>
+    {% endfor %}
+    {% set li = d.linkedin %}
+    {% if li %}
+      <div class="demo-group-title" style="margin-top:6px;color:var(--text);">LinkedIn followers ({{ "{:,}".format(li.followers_total or 0) }}) — from the {{ li.period_end }} export</div>
+      {% for cat in ['Job title', 'Industry', 'Company', 'Location', 'Seniority'] %}
+        {% set rows = li.audience.get(cat) %}
+        {% if rows %}
+        <div class="demo-group">
+          <div class="demo-group-title">{{ cat | lower }}</div>
+          {% for row in rows %}
+          <div class="demo-row">
+            <span class="demo-lbl">{{ row.value }}</span>
+            {{ hbar(row.pct or 0, 30, tone='accent') }}
+            <span class="demo-pct">{{ row.pct_raw }}</span>
+          </div>
+          {% endfor %}
+        </div>
+        {% endif %}
+      {% endfor %}
+    {% endif %}
+    {% if not _plats and not li %}
+      <div class="note">No audience data yet. Instagram reports it once an account has 100+ followers (it appears after the next sync); LinkedIn's comes from uploading its analytics export on the Accounts tab.</div>
     {% endif %}
   </div>
 

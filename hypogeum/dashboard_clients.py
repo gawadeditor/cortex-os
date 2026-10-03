@@ -34,7 +34,7 @@ def _content_rows(client_id: str, db_path) -> list[dict]:
     try:
         rows = conn.execute(
             "SELECT content_id, platform, MAX(snapshot_date) sd, "
-            "  views, likes, comments, shares, reach, engagement_rate, "
+            "  views, impressions, likes, comments, shares, saves, reach, engagement_rate, "
             "  avg_view_pct, retention_curve_json "
             "FROM platform_analytics WHERE client_id=? GROUP BY content_id, platform",
             (client_id,),
@@ -48,6 +48,12 @@ def _content_rows(client_id: str, db_path) -> list[dict]:
     for it in items:
         metrics = by_cid.get(it["content_id"], {})
         total_views = sum((_num(m.get("views")) or 0) for m in metrics.values())
+        # LinkedIn reports impressions, not views; old Instagram posts (before
+        # a Business conversion) carry only likes/comments. Track both so a
+        # post with real numbers is never shown as "no data".
+        total_impr = sum((_num(m.get("impressions")) or 0) for m in metrics.values())
+        interactions = sum((_num(m.get(k)) or 0) for m in metrics.values()
+                           for k in ("likes", "comments", "shares", "saves"))
         ers = [_num(m.get("engagement_rate")) for m in metrics.values()
                if _num(m.get("engagement_rate")) is not None]
         rets = [_num(m.get("avg_view_pct")) for m in metrics.values()
@@ -56,6 +62,9 @@ def _content_rows(client_id: str, db_path) -> list[dict]:
             **it,
             "platforms": sorted(metrics.keys()),
             "total_views": int(total_views),
+            "total_impressions": int(total_impr),
+            "interactions": int(interactions),
+            "has_metrics": bool(total_views or total_impr or interactions or ers),
             "engagement_rate": round(sum(ers) / len(ers), 2) if ers else None,
             "avg_view_pct": round(sum(rets) / len(rets), 4) if rets else None,
             "has_retention": any(m.get("retention_curve_json") for m in metrics.values()),
@@ -93,6 +102,36 @@ def get_clients_overview(db_path: Optional[Path] = None) -> dict:
     return out
 
 
+def get_client_linkedin_snapshot(client_id: str, db_path: Optional[Path] = None) -> Optional[dict]:
+    """Latest imported LinkedIn Export (hypogeum.publishing.linkedin_export):
+    followers, period totals and the top audience values per category."""
+    import json as _json
+    from hypogeum.db import get_connection
+    conn = get_connection(Path(db_path) if db_path else None)
+    try:
+        r = conn.execute("SELECT * FROM client_linkedin_snapshots WHERE client_id=? "
+                         "ORDER BY period_end DESC LIMIT 1", (client_id,)).fetchone()
+    except Exception:  # noqa: BLE001 — table absent on an old DB
+        r = None
+    finally:
+        conn.close()
+    if not r:
+        return None
+    demo = _json.loads(r["audience_demographics_json"] or "[]")
+    by_cat: dict = {}
+    for d in demo:
+        by_cat.setdefault(d["category"], []).append(d)
+    daily = _json.loads(r["daily_json"] or "[]")
+    return {
+        "period_start": r["period_start"], "period_end": r["period_end"],
+        "followers_total": r["followers_total"], "impressions": r["impressions"],
+        "members_reached": r["members_reached"],
+        "new_followers": sum((d.get("new_followers") or 0) for d in daily),
+        "audience": {c: v[:5] for c, v in by_cat.items()},
+        "imported_at": r["imported_at"],
+    }
+
+
 def get_client_overview(client_id: str, db_path: Optional[Path] = None) -> dict:
     from hypogeum import client_manager as cm
     out: dict = {"client": None, "content": [], "top": [], "bottom": [],
@@ -114,11 +153,16 @@ def get_client_overview(client_id: str, db_path: Optional[Path] = None) -> dict:
     out["kpis"] = {
         "content_items": len(rows),
         "total_views": sum(r["total_views"] for r in rows),
+        "total_impressions": sum(r["total_impressions"] for r in rows),
+        "interactions": sum(r["interactions"] for r in rows),
+        "with_metrics": sum(1 for r in rows if r["has_metrics"]),
         "avg_engagement": (round(sum(r["engagement_rate"] for r in scored) / len(scored), 2)
                            if scored else None),
+        "engagement_basis": len(scored),
         "tracked": len([r for r in rows if r["platforms"]]),
     }
 
+    out["linkedin"] = get_client_linkedin_snapshot(client_id, db_path=db_path)
     try:
         from hypogeum.publishing.zernio_native_sync import get_channel_audience
         out["audience"] = get_channel_audience(client_id, db_path=db_path)

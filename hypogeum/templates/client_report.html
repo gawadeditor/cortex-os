@@ -62,7 +62,7 @@
     <div class="rep-kicker">Performance report</div>
     <h1>{{ client.name }}</h1>
     <div class="rep-meta">Prepared by Cortex · {{ generated_at }}
-      {%- if adv.catalogue %} · {{ adv.catalogue.scored }} of {{ adv.catalogue.total }} posts with performance data{% endif %}</div>
+      {%- if adv.catalogue %} · {{ adv.catalogue.with_metrics if adv.catalogue.with_metrics is defined else adv.catalogue.scored }} of {{ adv.catalogue.total }} posts with performance data{% endif %}</div>
   </header>
 
   <section class="rep-sec">
@@ -71,8 +71,10 @@
     {% set k = ov.kpis %}
     <div class="rep-kpis">
       <div class="rep-kpi"><b>{{ k.content_items or 0 }}</b><span>Posts</span></div>
-      <div class="rep-kpi"><b>{{ "{:,}".format(k.total_views or 0) }}</b><span>Views</span></div>
-      <div class="rep-kpi"><b>{{ (k.avg_engagement ~ '%') if k.avg_engagement is not none else '—' }}</b><span>Avg engagement</span></div>
+      {% if k.total_views %}<div class="rep-kpi"><b>{{ "{:,}".format(k.total_views) }}</b><span>Views</span></div>{% endif %}
+      {% if k.total_impressions %}<div class="rep-kpi"><b>{{ "{:,}".format(k.total_impressions) }}</b><span>Impressions</span></div>{% endif %}
+      {% if k.interactions %}<div class="rep-kpi"><b>{{ "{:,}".format(k.interactions) }}</b><span>Interactions</span></div>{% endif %}
+      <div class="rep-kpi"><b>{{ (k.avg_engagement ~ '%') if k.avg_engagement is not none else '—' }}</b><span>Avg engagement{% if k.engagement_basis is defined and k.engagement_basis and k.engagement_basis < k.content_items %} ({{ k.engagement_basis }} post{{ 's' if k.engagement_basis != 1 }}){% endif %}</span></div>
       <div class="rep-kpi"><b>{{ ov.accounts | length }}</b><span>Accounts</span></div>
     </div>
   </section>
@@ -139,6 +141,29 @@
         <div class="ri-axis" style="margin-bottom:6px;">{{ dim }}</div>
         {% for row in rows[:5] %}
         <div class="demo-row"><span class="dl">{{ row.label }}</span>{{ hbar(row.pct, 100, tone='accent') }}<span class="dp">{{ row.pct | round | int }}%</span></div>
+        {% endfor %}
+      </div>
+      {% endif %}
+    {% endfor %}
+  </section>
+  {% endif %}
+
+  {% set li = ov.linkedin %}
+  {% if li %}
+  <section class="rep-sec">
+    <h2>LinkedIn — {{ li.period_start }} to {{ li.period_end }}</h2>
+    <div class="rep-kpis">
+      <div class="rep-kpi"><b>{{ "{:,}".format(li.followers_total or 0) }}</b><span>Followers (+{{ li.new_followers }})</span></div>
+      <div class="rep-kpi"><b>{{ "{:,}".format(li.impressions or 0) }}</b><span>Impressions</span></div>
+      <div class="rep-kpi"><b>{{ "{:,}".format(li.members_reached or 0) }}</b><span>Members reached</span></div>
+    </div>
+    {% for cat in ['Company', 'Job title', 'Industry', 'Location', 'Seniority'] %}
+      {% set rows = li.audience.get(cat) %}
+      {% if rows %}
+      <div style="margin-top:12px;">
+        <div class="ri-axis" style="margin-bottom:6px;">Who follows you — {{ cat | lower }}</div>
+        {% for row in rows %}
+        <div class="demo-row"><span class="dl">{{ row.value }}</span>{{ hbar(row.pct or 0, 25, tone='accent') }}<span class="dp">{{ row.pct_raw }}</span></div>
         {% endfor %}
       </div>
       {% endif %}

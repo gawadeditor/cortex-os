@@ -155,3 +155,12 @@ def test_dashboard_upload_imports_and_reports(tmp_path):
         assert cl.get("/client/me/content").status_code == 200
     finally:
         rd.app.config["DB_PATH"] = old
+
+
+def test_overview_exposes_latest_linkedin_snapshot(db_path, tmp_path):
+    from hypogeum.dashboard_clients import get_client_overview
+    cm.create_client("Me", client_id="me", db_path=db_path)
+    import_linkedin_export("me", _workbook(tmp_path / "x.xlsx"), db_path=db_path)
+    li = get_client_overview("me", db_path=db_path)["linkedin"]
+    assert li["followers_total"] == 2084 and li["new_followers"] == 1
+    assert li["audience"]["Company"][0]["value"] == "MBC GROUP"

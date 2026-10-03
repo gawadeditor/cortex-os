@@ -60,8 +60,10 @@ def _hour_dow(published_at: Optional[str]):
 
 
 def _split(scored: list[dict]) -> tuple[list[dict], list[dict]]:
-    """Top vs bottom by engagement_rate. Quartiles when >= 8 items, else halves."""
-    ordered = sorted(scored, key=lambda r: r["engagement_rate"], reverse=True)
+    """Top vs bottom by the ranking score (`_score`: engagement rate, or
+    interactions within one platform — see generate_client_advisory).
+    Quartiles when >= 8 items, else halves."""
+    ordered = sorted(scored, key=lambda r: r["_score"], reverse=True)
     n = len(ordered)
     k = max(2, n // 4) if n >= 8 else n // 2
     return ordered[:k], ordered[-k:]
@@ -168,7 +170,28 @@ def generate_client_advisory(client_id: str, *,
     scored = [r for r in rows if _num(r.get("engagement_rate")) is not None]
     for r in scored:
         r["engagement_rate"] = _num(r["engagement_rate"])
-    out["catalogue"] = {"total": len(rows), "scored": len(scored)}
+        r["_score"] = r["engagement_rate"]
+    basis = {"metric": "engagement", "unit": "%", "platform": None}
+    # Fallback (2026-10-03): when too few posts carry an engagement RATE but a
+    # platform has enough posts with raw interactions (e.g. Instagram posts
+    # published before a Business conversion — Meta gives no reach for them),
+    # rank by interactions WITHIN that one platform. Counts are never compared
+    # across platforms, and the summary names the basis.
+    if len(scored) < _MIN_SCORED:
+        by_plat: dict = {}
+        for r in rows:
+            if (r.get("interactions") or 0) > 0 and len(r.get("platforms") or []) == 1:
+                by_plat.setdefault(r["platforms"][0], []).append(r)
+        if by_plat:
+            plat, prow = max(by_plat.items(), key=lambda kv: len(kv[1]))
+            if len(prow) >= _MIN_SCORED:
+                scored = prow
+                for r in scored:
+                    r["_score"] = float(r["interactions"])
+                basis = {"metric": "interactions", "unit": "", "platform": plat}
+    out["catalogue"] = {"total": len(rows), "scored": len(scored),
+                        "with_metrics": sum(1 for r in rows if r.get("has_metrics")),
+                        "basis": basis}
 
     # context blocks are always safe to attach
     _attach_context(out, client_id, db_path)
@@ -189,15 +212,23 @@ def generate_client_advisory(client_id: str, *,
         out["summary"] = (
             (ba["verdict"] + " ") if (ba and ba.get("available")) else ""
         ) + (
-            f"{client['name']} has {len(rows)} tracked posts, {len(scored)} with "
-            "performance data. Once a few more have metrics, Cortex can tell you "
+            f"{client['name']} has {len(rows)} tracked posts, "
+            f"{out['catalogue']['with_metrics']} with numbers, but not yet {_MIN_SCORED} on one "
+            "comparable basis. Once a few more have metrics, Cortex can tell you "
             "what the best ones have in common.")
         out["ok"] = bool(ba and ba.get("available"))
         return out
 
     top, bottom = _split(scored)
     out["catalogue"].update(top_n=len(top), bottom_n=len(bottom))
-    top_er, bot_er = _mean(r["engagement_rate"] for r in top), _mean(r["engagement_rate"] for r in bottom)
+    top_er, bot_er = _mean(r["_score"] for r in top), _mean(r["_score"] for r in bottom)
+    if basis["metric"] == "engagement":
+        _vs = f"top posts average {top_er:.1f}% engagement vs {bot_er:.1f}% for the weakest"
+    else:
+        from hypogeum.dashboard_humanize import friendly_platform
+        _vs = (f"on {friendly_platform(basis['platform'])}, top posts average "
+               f"{top_er:,.0f} interactions (likes + comments + shares + saves) vs {bot_er:,.0f} "
+               f"for the weakest — ranked by raw counts because these posts have no reach data")
 
     works = out["what_works"]
     recs = out["recommendations"]
@@ -291,13 +322,11 @@ def generate_client_advisory(client_id: str, *,
     _ba_pre = (ba["verdict"] + " ") if (ba and ba.get("available")) else ""
     if works:
         out["summary"] = _ba_pre + (
-            f"{client['name']}: top posts average {top_er:.1f}% engagement vs "
-            f"{bot_er:.1f}% for the weakest. {len(works)} clear "
+            f"{client['name']}: {_vs}. {len(works)} clear "
             f"difference{'s' if len(works) != 1 else ''} between them — see below.")
     else:
         out["summary"] = _ba_pre + (
-            f"{client['name']}: top posts average {top_er:.1f}% engagement vs "
-            f"{bot_er:.1f}% for the weakest, but nothing yet separates them on a "
+            f"{client['name']}: {_vs}, but nothing yet separates them on a "
             "single measurable axis. More posts (and thumbnails to analyse) will sharpen this.")
         out["reason"] = "no axis cleared the honesty threshold"
 
@@ -327,7 +356,14 @@ def _attach_context(out: dict, client_id: str, db_path) -> None:
         pass
     try:
         from hypogeum.monetization_eligibility import compute_client_monetization
-        out["monetization"] = compute_client_monetization(client_id, db_path=db_path)
+        mon = compute_client_monetization(client_id, db_path=db_path)
+        # Only platforms this client actually has an account on — a personal
+        # brand on LinkedIn + Instagram shouldn't see YouTube/TikTok payout bars.
+        from hypogeum import client_manager as _cm
+        mine = {a["platform"] for a in _cm.list_managed_accounts(client_id, db_path=db_path)}
+        if isinstance(mon, dict) and isinstance(mon.get("platforms"), dict):
+            mon = {**mon, "platforms": {k: v for k, v in mon["platforms"].items() if k in mine}}
+        out["monetization"] = mon
     except Exception:  # noqa: BLE001
         pass
     try:

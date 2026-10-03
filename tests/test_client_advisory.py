@@ -99,10 +99,21 @@ def test_before_after_split_on_managed_since(tmp_path):
 def test_before_after_absent_without_managed_since(tmp_path):
     db = tmp_path / "adv.db"
     initialize_schema(db)
-    c = cm.create_client("NoDate", db_path=db)
+    c = cm.create_client("NoDate", managed_since=None, db_path=db)
     adv = generate_client_advisory(c["client_id"], db_path=db)
     assert adv["before_after"]["available"] is False
     assert "managed_since" in adv["before_after"]["reason"]
+
+
+def test_new_client_start_date_defaults_to_creation_day(tmp_path):
+    # 2026-10-03 general setting: every new client starts "managed" the day
+    # it is created, so analysis spend + before/after are anchored there.
+    from datetime import datetime, timezone
+    db = tmp_path / "adv.db"
+    initialize_schema(db)
+    c = cm.create_client("Fresh", db_path=db)
+    assert c["managed_since"] == datetime.now(timezone.utc).date().isoformat()
+    assert cm.create_client("Backdated", managed_since="2025-01-01", db_path=db)["managed_since"] == "2025-01-01"
 
 
 def test_learning_content_volume_action_is_advisory_for_clients(tmp_path):

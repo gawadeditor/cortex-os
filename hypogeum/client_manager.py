@@ -86,11 +86,20 @@ def create_client(name: str, *, engagement_mode: str = "observe",
                   analysis_depth: str = "metadata", timezone: str = "UTC",
                   brief: Optional[dict] = None,
                   monthly_analysis_budget_usd: float = 5.0,
-                  stage: str = "active", managed_since: Optional[str] = None,
+                  stage: str = "active", managed_since: Optional[str] = "today",
                   client_id: Optional[str] = None,
                   db_path: Optional[Path] = None) -> dict:
     """Create a client. Returns the stored row. Raises ValueError on a bad
-    enum or a client_id collision."""
+    enum or a client_id collision.
+
+    managed_since defaults to the creation date (2026-10-03 general setting):
+    it is the start of the engagement, so content analysis only spends on
+    posts from then on (older catalogue posts still get synced and scored),
+    and the Advice tab's before/after comparison works out of the box. Pass
+    an explicit date to backdate it, or None for no start date."""
+    if managed_since == "today":
+        from datetime import timezone as _tz  # `timezone` is a parameter here
+        managed_since = datetime.now(_tz.utc).date().isoformat()
     if engagement_mode not in _ENGAGEMENT:
         raise ValueError(f"engagement_mode must be one of {_ENGAGEMENT}")
     if analysis_depth not in _ANALYSIS:

@@ -8427,7 +8427,8 @@ def api_clients_create():
             analysis_depth=(payload.get("analysis_depth") or "metadata"),
             timezone=((payload.get("timezone") or "UTC").strip() or "UTC"),
             stage=(payload.get("stage") or "active"),
-            managed_since=((payload.get("managed_since") or "").strip() or None),
+            # blank -> the creation day (client_manager's general default)
+            managed_since=((payload.get("managed_since") or "").strip() or "today"),
             brief={"note": brief_note} if brief_note else None,
             db_path=_db_path())
     except Exception as exc:  # noqa: BLE001

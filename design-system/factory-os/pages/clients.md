@@ -59,3 +59,31 @@ tenant instead of a producing `channels` row.
 - Leaving a linked/unlinked action with no confirmation feedback (use the `flash` line).
 - Showing mock or zero metrics as if real — empty = "not synced yet", never "0".
 - Mixing a client scope into factory rollups.
+
+
+---
+
+## Defaults for every client (2026-10-03)
+
+Applied automatically to any client, not configured per client:
+
+- **Start date** — `managed_since` defaults to the creation day. Content analysis
+  (paid) only runs on posts published from that date; older posts are still synced
+  and scored. Advice → "Before vs after" compares against it.
+- **Data sources without Zernio** — Instagram via the Instagram API with Instagram
+  Login (`provider_id='instagram_graph'`, token from `scripts/connect_instagram_client.py`);
+  LinkedIn personal profiles via the creator-analytics Export uploaded on Accounts
+  (`provider_id='linkedin_export'`). Both feed the same content/analytics tables.
+- **Advice is per platform** — one card per platform the client has an account on:
+  what the numbers show (activity, cadence, format, caption, language — each with
+  its sample size, >= 3 posts per side) and what to do there. The catalogue-wide
+  comparison sits below it.
+- **Audience** lists every platform with data (Instagram follower demographics,
+  LinkedIn export demographics), not only the first one.
+- **Report** shows impressions + interactions (views only when present), an
+  "Avg engagement (N posts)" basis, a LinkedIn section when an export exists, and
+  payout progress only for platforms the client is on.
+- **Plan** tab (strategy, calendar, editable drafts, Copy / Mark posted) is the same
+  for every client; it reads `clients.brief` (`brand_profile`, `brand_strategy`,
+  `content_calendar`). The questionnaire that fills it is run in chat for now.
+- **Language** — dashboard copy is English; post drafts keep their publish language.

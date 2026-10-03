@@ -291,3 +291,93 @@ def generate_calendar(client_id: str, *, month: Optional[str] = None, db_path: O
     cm.update_client(client_id, brief=brief, db_path=db_path)
     log.info("brand_calendar_generated", client_id=client_id, month=month, posts=len(posts), cost_usd=cost)
     return cal
+
+
+# ---------------------------------------------------------------------------
+# Rolling drafts (operator decision 2026-10-03): keep only N drafts ahead
+# (default 2) instead of a whole month; each post marked as posted triggers
+# one new draft — the same buffer idea the factory uses for episodes.
+# ---------------------------------------------------------------------------
+
+DRAFTS_AHEAD = 2
+
+
+def upcoming_slots(after: date, n: int, posts_per_week: int, platforms: list) -> list:
+    """The next n posting days strictly after `after`, on the cadence weekdays,
+    crossing month boundaries as needed."""
+    days = _WEEKDAYS.get(max(1, min(7, posts_per_week)), [1, 3])
+    out, d = [], after
+    while len(out) < n:
+        d += timedelta(days=1)
+        if d.weekday() in days:
+            out.append({"date": d.isoformat(), "day": d.strftime("%a"), "allowed_platforms": list(platforms)})
+    return out
+
+
+def _all_posts(brief: dict) -> list:
+    from hypogeum.dashboard_clients import calendars_of
+    return [p for cal in calendars_of(brief).values() for p in (cal.get("posts") or [])]
+
+
+def draft_next_posts(client_id: str, *, db_path: Optional[Path] = None, llm: Optional[Callable] = None,
+                     today: Optional[date] = None, ahead: Optional[int] = None) -> list:
+    """Top the queue of unposted upcoming drafts back up to `ahead` (default
+    DRAFTS_AHEAD). Returns the new posts ([] when already full)."""
+    from hypogeum import client_manager as cm
+    from hypogeum.dashboard_clients import calendars_of
+    client = cm.get_client(client_id, db_path=db_path)
+    if not client:
+        raise BrandGenerationError(f"no client {client_id!r}")
+    brief = dict(client.get("brief") or {})
+    strategy = brief.get("brand_strategy")
+    if not strategy:
+        raise BrandGenerationError("generate a strategy first")
+    today = today or datetime.now(timezone.utc).date()
+    ahead = int(ahead or (brief.get("brand_profile") or {}).get("drafts_ahead") or DRAFTS_AHEAD)
+    posts = _all_posts(brief)
+    pending = [p for p in posts if (p.get("status") or "draft") in ("draft", "approved")
+               and p.get("date", "") > today.isoformat()]
+    need = ahead - len(pending)
+    if need <= 0:
+        return []
+    _check_budget(client, db_path)
+    ctx = build_context(client_id, db_path=db_path)
+    platforms = [p for p in (strategy.get("platforms") or {}) if p in ctx["platforms_connected"]] \
+        or ctx["platforms_connected"] or ["linkedin"]
+    ppw = int((strategy.get("cadence") or {}).get("posts_per_week") or 2)
+    last = max([date.fromisoformat(p["date"]) for p in posts if p.get("date")] + [today])
+    slots = upcoming_slots(last, need, ppw, platforms)
+    langs = ctx["profile"].get("languages") or ["en"]
+    lang_default = "ar" if langs == ["ar"] else "en"
+    recent = sorted(posts, key=lambda p: p.get("date", ""))[-6:]
+    payload = {"profile": ctx["profile"], "strategy": strategy, "platform_data": ctx.get("platform_data"),
+               "post_language": {"en": "English", "ar": "Arabic"}[lang_default] if len(langs) == 1
+               else "alternate English and Arabic",
+               "recent_posts_do_not_repeat": [{"date": p.get("date"), "pillar": p.get("pillar"),
+                                               "first_line": (p.get("draft") or "").split("\n", 1)[0]}
+                                              for p in recent],
+               "slots": slots}
+    llm = llm or _default_llm()
+    cost = 0.0
+    try:
+        raw, cost = llm(load_prompt(_PROMPTS / "brand_calendar.txt"),
+                        "Input:\n" + json.dumps(payload, ensure_ascii=False, default=str),
+                        _STRATEGY_MAX_TOKENS + 1500, agent="brand_calendar_agent", client_id=client_id)
+        new = _coerce_calendar(_parse(raw), slots, lang_default)
+    except Exception as exc:  # noqa: BLE001
+        _log_call(brief, f"drafts x{need}", cost, False, str(exc))
+        cm.update_client(client_id, brief=brief, db_path=db_path)
+        raise BrandGenerationError(f"drafting failed: {exc}") from exc
+    cals = calendars_of(brief)
+    for p in new:
+        m = p["date"][:7]
+        cal = dict(cals.get(m) or {"month": m, "status": "rolling", "posts": []})
+        cal["posts"] = sorted(list(cal.get("posts") or []) + [p], key=lambda x: x.get("date", ""))
+        cal["strategy_version"] = strategy.get("version")
+        cals[m] = cal
+    brief["content_calendars"] = cals
+    brief.pop("content_calendar", None)
+    _log_call(brief, f"drafts x{len(new)}", cost, True)
+    cm.update_client(client_id, brief=brief, db_path=db_path)
+    log.info("brand_drafts_generated", client_id=client_id, count=len(new), cost_usd=cost)
+    return new

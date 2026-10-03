@@ -276,6 +276,13 @@ def default_month(cals: dict, today=None) -> Optional[str]:
     return future[0] if future else (max(cals) if cals else None)
 
 
+def _pending_ahead(cals: dict) -> int:
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).date().isoformat()
+    return sum(1 for cal in cals.values() for p in (cal.get("posts") or [])
+               if (p.get("status") or "draft") in ("draft", "approved") and p.get("date", "") > today)
+
+
 def get_client_plan(client_id: str, db_path: Optional[Path] = None, month: Optional[str] = None) -> dict:
     from hypogeum import client_manager as cm
     client = cm.get_client(client_id, db_path=db_path)
@@ -291,6 +298,8 @@ def get_client_plan(client_id: str, db_path: Optional[Path] = None, month: Optio
             "strategy": brief.get("brand_strategy") or {}, "calendar": cal, "posts": posts,
             "counts": counts, "months": sorted(cals), "month": month,
             "generation": brief.get("generation_status") or {},
+            "drafts_ahead": int((brief.get("brand_profile") or {}).get("drafts_ahead") or 2),
+            "pending_ahead": _pending_ahead(cals),
             "generation_log": list(brief.get("generation_log") or [])[-5:]}
 
 

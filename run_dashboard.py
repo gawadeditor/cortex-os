@@ -8559,7 +8559,14 @@ def client_plan_generate(client_id):
     def _work():
         from hypogeum.agents import brand_strategy_agent as bsa
         try:
-            if what == "calendar":
+            if what == "drafts":
+                new = bsa.draft_next_posts(client_id, db_path=db)
+                _set_generation_status(client_id, db, state="done", what=what,
+                                       message=(f"{len(new)} new draft{'s' if len(new) != 1 else ''} "
+                                                f"({', '.join(p['date'] for p in new)})") if new
+                                       else f"Already {bsa.DRAFTS_AHEAD} drafts ahead — nothing to add",
+                                       finished_at=_dt.now(_tz.utc).isoformat())
+            elif what == "calendar":
                 cal = bsa.generate_calendar(client_id, month=month, db_path=db)
                 _set_generation_status(client_id, db, state="done", what=what, month=cal["month"],
                                        message=f"{len(cal['posts'])} posts drafted for {cal['month']}",
@@ -8602,6 +8609,30 @@ def client_plan_post_update(client_id):
     status = action if action in ("published", "draft") else None
     ok = update_plan_post(client_id, date, status=status, draft=request.form.get("draft"),
                           db_path=_db_path())
+    if ok and action == "published":
+        # rolling drafts: each post marked as posted makes room for one new draft
+        import threading
+        from hypogeum.dashboard_clients import get_client_plan as _gcp
+        db = _db_path()
+        if (_gcp(client_id, db_path=db).get("strategy") or {}) and \
+                (_gcp(client_id, db_path=db).get("generation") or {}).get("state") != "running":
+            from datetime import datetime as _dt, timezone as _tz
+            _set_generation_status(client_id, db, state="running", what="drafts",
+                                   started_at=_dt.now(_tz.utc).isoformat())
+
+            def _topup():
+                from hypogeum.agents import brand_strategy_agent as bsa
+                try:
+                    new = bsa.draft_next_posts(client_id, db_path=db)
+                    msg = (f"{len(new)} new draft{'s' if len(new) != 1 else ''} after posting "
+                           f"({', '.join(p['date'] for p in new)})") if new else \
+                          f"Still {bsa.DRAFTS_AHEAD}+ drafts ahead — no new draft needed"
+                    _set_generation_status(client_id, db, state="done", what="drafts", message=msg,
+                                           finished_at=_dt.now(_tz.utc).isoformat())
+                except Exception as exc:  # noqa: BLE001
+                    _set_generation_status(client_id, db, state="error", what="drafts",
+                                           message=str(exc)[:300], finished_at=_dt.now(_tz.utc).isoformat())
+            threading.Thread(target=_topup, name=f"brand-topup-{client_id}", daemon=True).start()
     msg = ("Marked as posted" if action == "published" else
            "Moved back to draft" if action == "draft" else "Edit saved") if ok else "Post not found"
     return redirect(f"/client/{client_id}/plan?scope=client:{client_id}&flash={msg}", 302)

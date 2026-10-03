@@ -135,3 +135,54 @@ def test_generate_route_runs_in_background_and_reports(db, monkeypatch):
         assert "Regenerate strategy" in page and "calendar" in page
     finally:
         rd.app.config["DB_PATH"] = old
+
+
+def _slot_reply(user):
+    slots = json.loads(user.split("Input:\n", 1)[1])["slots"]
+    return {"posts": [{"date": s["date"], "platforms": ["linkedin"], "lang": "en", "pillar": "Before / after",
+                       "format": "text", "needs": None, "draft": f"Post for {s['date']}"} for s in slots]}
+
+
+def test_rolling_drafts_keep_two_ahead_across_month_end(db):
+    bsa.generate_strategy("me", db_path=db, llm=FakeLLM(STRATEGY))
+    llm = FakeLLM(_slot_reply)
+    new = bsa.draft_next_posts("me", db_path=db, llm=llm, today=date(2026, 10, 27))
+    assert [p["date"] for p in new] == ["2026-10-29", "2026-11-03"]   # Thu, then next Tue in November
+    assert bsa.draft_next_posts("me", db_path=db, llm=llm, today=date(2026, 10, 27)) == []   # already 2 ahead
+    assert len(llm.calls) == 1
+    cals = calendars_of(cm.get_client("me", db_path=db)["brief"])
+    assert set(cals) == {"2026-10", "2026-11"}
+    # the model is told what was already drafted, so it doesn't repeat
+    from hypogeum.dashboard_clients import update_plan_post
+    update_plan_post("me", "2026-10-29", status="published", db_path=db)
+    more = bsa.draft_next_posts("me", db_path=db, llm=llm, today=date(2026, 10, 30))
+    assert [p["date"] for p in more] == ["2026-11-05"]
+    assert "recent_posts_do_not_repeat" in llm.calls[-1]["user"] and "Post for 2026-10-29" in llm.calls[-1]["user"]
+
+
+def test_mark_posted_tops_up_drafts_in_background(db, monkeypatch):
+    import threading
+    import run_dashboard as rd
+    from datetime import date as _d, timedelta
+    bsa.generate_strategy("me", db_path=db, llm=FakeLLM(STRATEGY))
+    tomorrow = (_d.today() + timedelta(days=1)).isoformat()
+    b = cm.get_client("me", db_path=db)["brief"]
+    b["content_calendars"] = {tomorrow[:7]: {"month": tomorrow[:7], "posts": [
+        {"date": tomorrow, "platforms": ["linkedin"], "lang": "en", "draft": "x", "status": "draft"}]}}
+    cm.update_client("me", db_path=db, brief=b)
+    monkeypatch.setattr(bsa, "_default_llm", lambda config=None: FakeLLM(_slot_reply))
+
+    class SyncThread(threading.Thread):
+        def start(self):
+            self.run()
+    monkeypatch.setattr(threading, "Thread", SyncThread)
+    old = rd.app.config.get("DB_PATH")
+    rd.app.config["DB_PATH"] = str(db)
+    try:
+        r = rd.app.test_client().post("/client/me/plan/post",
+                                      data={"date": tomorrow, "draft": "x", "action": "published"})
+        assert r.status_code == 302
+        plan = get_client_plan("me", db_path=db)
+        assert plan["generation"]["state"] == "done" and plan["pending_ahead"] == 2
+    finally:
+        rd.app.config["DB_PATH"] = old

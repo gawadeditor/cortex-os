@@ -80,16 +80,14 @@
           {{ icon('sparkle') }} {{ 'Regenerate strategy' if d.strategy else 'Generate strategy' }}</button>
       </form>
       {% if d.strategy %}
-      {% for m in [d.this_month, d.next_month] %}
       <form method="post" action="/client/{{ d.client.client_id }}/plan/generate" style="display:inline;">
-        <input type="hidden" name="what" value="calendar"><input type="hidden" name="month" value="{{ m }}">
-        <button class="btn btn-sm {{ 'btn-primary' if m not in d.months else '' }}" type="submit">
-          {{ icon('calendar') }} {{ ('Regenerate ' if m in d.months else 'Generate ') ~ m ~ ' calendar' }}</button>
+        <input type="hidden" name="what" value="drafts">
+        <button class="btn btn-sm btn-primary" type="submit">{{ icon('pencil') }} Top up to {{ d.drafts_ahead }} drafts</button>
       </form>
-      {% endfor %}
       {% endif %}
     </div>
-    {% if not d.profile.answered_at %}<p class="note">Answer the questionnaire first.</p>{% endif %}
+    {% if not d.profile.answered_at %}<p class="note">Answer the questionnaire first.</p>
+    {% elif d.strategy %}<p class="note">{{ d.pending_ahead }} unposted draft{{ 's' if d.pending_ahead != 1 }} ahead. Cortex keeps {{ d.drafts_ahead }} ready — each post you mark as posted gets replaced by a new draft.</p>{% endif %}
   {% endif %}
   {% if d.generation_log %}
   <p class="note" style="margin-top:10px;">Recent: {% for e in d.generation_log | reverse %}{{ e.what }} {{ 'ok' if e.ok else 'failed' }} ${{ '%.2f' | format(e.cost_usd or 0) }}{{ ' · ' if not loop.last }}{% endfor %}</p>

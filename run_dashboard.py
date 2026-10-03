@@ -8524,6 +8524,23 @@ def client_plan_page(client_id):
     return render_template("client_plan.html", d=d, flash=request.args.get("flash"))
 
 
+@app.route("/client/<client_id>/plan/questionnaire", methods=["GET", "POST"])
+def client_questionnaire_page(client_id):
+    """Brand questionnaire, one question per screen; answers -> brand_profile."""
+    from hypogeum.client_manager import get_client
+    from hypogeum.dashboard_clients import QUESTIONNAIRE, questionnaire_prefill, save_questionnaire
+    client = get_client(client_id, db_path=_db_path())
+    if not client:
+        return render_template("not_found.html", kind="Client", id=client_id), 404
+    if request.method == "POST":
+        ok = save_questionnaire(client_id, request.form, db_path=_db_path())
+        msg = "Questionnaire saved" if ok else "Could not save the answers"
+        return redirect(f"/client/{client_id}/plan?scope=client:{client_id}&flash={msg}", 302)
+    brief = client.get("brief") or {}
+    pre = questionnaire_prefill(brief.get("brand_profile") or {}, brief.get("brand_strategy") or {})
+    return render_template("client_questionnaire.html", client=client, questions=QUESTIONNAIRE, pre=pre)
+
+
 @app.route("/client/<client_id>/plan/post", methods=["POST"])
 def client_plan_post_update(client_id):
     from hypogeum.dashboard_clients import update_plan_post

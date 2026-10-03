@@ -132,3 +132,35 @@ def test_advice_page_shows_platform_cards(db):
         assert "Not enough to advise on yet" not in page
     finally:
         rd.app.config["DB_PATH"] = old
+
+
+def test_questionnaire_page_saves_answers_and_keeps_structured_awards(db):
+    import run_dashboard as rd
+    from hypogeum.dashboard_clients import get_client_plan
+    awards = [{"name": "Gold", "year": 2026, "project": "P", "role": "Editor"}]
+    cm.update_client("me", db_path=db, brief={"brand_profile": {"awards": awards}})
+    old = rd.app.config.get("DB_PATH")
+    rd.app.config["DB_PATH"] = str(db)
+    try:
+        cl = rd.app.test_client()
+        page = cl.get("/client/me/plan/questionnaire?scope=client:me").get_data(as_text=True)
+        assert "What should the content achieve this year?" in page and "Gold — 2026 — P" in page
+        r = cl.post("/client/me/plan/questionnaire", data={
+            "goal": "More clients and projects",
+            "audience": ["Peers in the profession"], "audience__other": "Ad agencies",
+            "services": "Editing\nColor grading\n", "posts_per_week": "2",
+            "on_camera": "No — the work speaks for itself", "language": "English",
+            "awards": "Gold — 2026 — P",          # unchanged
+            "tone": "Storyteller", "tone__other": "",
+        })
+        assert r.status_code == 302 and "Questionnaire saved" in r.headers["Location"].replace("%20", " ")
+        prof = get_client_plan("me", db_path=db)["profile"]
+        assert prof["goal"] == "More clients and projects"
+        assert prof["audience"] == ["Peers in the profession", "Ad agencies"]
+        assert prof["services"] == ["Editing", "Color grading"]
+        assert prof["posts_per_week"] == 2 and prof["on_camera"] is False and prof["languages"] == ["en"]
+        assert prof["awards"] == awards                    # structure preserved
+        assert prof["answered_at"]
+        assert cl.get("/client/nope/plan/questionnaire").status_code == 404
+    finally:
+        rd.app.config["DB_PATH"] = old

@@ -56,6 +56,7 @@
      figure_label='posts published this month',
      pill=(d.calendar.month or '—'),
      pill_class='is-good') %}
+  <a class="btn" href="/client/{{ d.client.client_id }}/plan/questionnaire?scope=client:{{ d.client.client_id }}">{{ icon('pencil') }} Questionnaire</a>
   <a class="btn" href="/client/{{ d.client.client_id }}/report?scope=client:{{ d.client.client_id }}">{{ icon('review') }} Report</a>
 {% endcall %}
 
@@ -64,7 +65,8 @@
 
 {% set s = d.strategy %}{% set pr = d.profile %}
 {% if not s %}
-  <div class="card"><p class="empty">No strategy for this client yet — start with the questionnaire.</p></div>
+  <div class="card"><p class="empty">No strategy for this client yet.</p>
+    <a class="btn btn-primary btn-sm" style="margin-top:10px;" href="/client/{{ d.client.client_id }}/plan/questionnaire?scope=client:{{ d.client.client_id }}">{{ icon('arrow-right') }} {{ 'Edit questionnaire answers' if pr.answered_at else 'Start the questionnaire' }}</a></div>
 {% else %}
 
 <div class="card">
@@ -84,8 +86,12 @@
   <div class="card-title">{{ icon('check') }} Awards</div>
   <div class="facts">
     {% for a in pr.awards %}
+    {% if a is string %}
+    <div class="fact"><div class="v" style="margin-top:0;"><b>{{ a }}</b></div></div>
+    {% else %}
     <div class="fact"><div class="v" style="margin-top:0;"><b>{{ a.name }}</b></div>
       <div class="k" style="margin-top:4px;">{{ a.year }}{% if a.category %} · {{ a.category }}{% endif %} · {{ a.project }} · {{ a.role }}</div></div>
+    {% endif %}
     {% endfor %}
   </div>
 </div>

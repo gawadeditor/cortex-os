@@ -298,3 +298,104 @@ def update_plan_post(client_id: str, date: str, *, status: Optional[str] = None,
     cal["posts"] = posts
     brief["content_calendar"] = cal
     return cm.update_client(client_id, brief=brief, db_path=db_path)
+
+
+# ---------------------------------------------------------------------------
+# Brand questionnaire (dashboard) — fills clients.brief.brand_profile, the
+# input the strategy / calendar are built from. One question per screen.
+# ---------------------------------------------------------------------------
+
+QUESTIONNAIRE = [
+    {"key": "goal", "type": "single", "q": "What should the content achieve this year?",
+     "options": ["More clients and projects", "Authority and reputation in the field",
+                 "A bigger job or role", "Selling courses or products"], "other": True},
+    {"key": "audience", "type": "multi", "q": "Who most needs to see it?",
+     "options": ["Decision-makers at broadcasters and production companies", "Peers in the profession",
+                 "Learners and beginners", "Creators and brands"], "other": True},
+    {"key": "services", "type": "lines", "q": "What do you offer? One per line.",
+     "hint": "e.g. Documentary editing, Color grading, AI ads"},
+    {"key": "pillars", "type": "lines", "q": "What do you want to talk about? One topic per line.",
+     "hint": "e.g. Before / after, Editing decisions, AI in production"},
+    {"key": "tone", "type": "single", "q": "How should you come across?",
+     "options": ["Calm, confident expert", "Storyteller", "Practical teacher", "Bold opinions"], "other": True},
+    {"key": "posts_per_week", "type": "single", "q": "How many posts a week can you realistically approve?",
+     "options": ["1", "2", "3", "5"]},
+    {"key": "on_camera", "type": "single", "q": "Will you appear on camera?",
+     "options": ["Yes", "No — the work speaks for itself"]},
+    {"key": "language", "type": "single", "q": "Which language should posts be written in?",
+     "options": ["English", "Arabic", "Both"]},
+    {"key": "avoid", "type": "multi", "q": "Anything the content must stay away from?",
+     "options": ["Politics", "Client names and numbers without permission", "Personal life", "Religion"],
+     "other": True},
+    {"key": "featured_projects", "type": "lines", "q": "Which projects should we talk about first? One per line.",
+     "hint": "Name, client (if allowed), your role"},
+    {"key": "awards", "type": "lines", "q": "Awards or recognitions worth mentioning? One per line.",
+     "hint": "Award — year — project"},
+    {"key": "assets_status", "type": "single", "q": "Where is the material (clips, before/after, stills)?",
+     "options": ["On this computer", "On the archive", "On a drive / Vimeo / YouTube", "Scattered — still collecting"]},
+]
+
+
+def _as_lines(v) -> list:
+    if isinstance(v, list):
+        return [str(x).strip() for x in v if str(x).strip()]
+    return [ln.strip() for ln in str(v or "").splitlines() if ln.strip()]
+
+
+def questionnaire_prefill(profile: dict, strategy: dict) -> dict:
+    """Current answers for the form, from brand_profile (and pillar names
+    from an existing strategy)."""
+    pre = dict(profile or {})
+    if not pre.get("pillars") and (strategy or {}).get("pillars"):
+        pre["pillars"] = [p.get("name") for p in strategy["pillars"] if p.get("name")]
+    if isinstance(pre.get("awards"), list):
+        pre["awards"] = [a if isinstance(a, str) else
+                         " — ".join(str(x) for x in (a.get("name"), a.get("year"), a.get("project")) if x)
+                         for a in pre["awards"]]
+    if isinstance(pre.get("posts_per_week"), int):
+        pre["posts_per_week"] = str(pre["posts_per_week"])
+    if isinstance(pre.get("on_camera"), bool):
+        pre["on_camera"] = "Yes" if pre["on_camera"] else "No — the work speaks for itself"
+    langs = pre.get("languages")
+    if langs and not pre.get("language"):
+        pre["language"] = "Both" if len(langs) > 1 else ("Arabic" if langs == ["ar"] else "English")
+    return pre
+
+
+def save_questionnaire(client_id: str, form, db_path: Optional[Path] = None) -> bool:
+    """Persist answers into clients.brief.brand_profile. `form` is a
+    werkzeug MultiDict-like object (getlist/get). Keeps any other keys."""
+    from datetime import datetime, timezone
+    from hypogeum import client_manager as cm
+    client = cm.get_client(client_id, db_path=db_path)
+    if not client:
+        return False
+    brief = dict(client.get("brief") or {})
+    prof = dict(brief.get("brand_profile") or {})
+    before = questionnaire_prefill(prof, brief.get("brand_strategy") or {})
+    for q in QUESTIONNAIRE:
+        k = q["key"]
+        other = (form.get(f"{k}__other") or "").strip()
+        if q["type"] == "multi":
+            vals = [v for v in form.getlist(k) if v.strip()] + ([other] if other else [])
+            if vals:
+                prof[k] = vals
+        elif q["type"] == "single":
+            v = other or (form.get(k) or "").strip()
+            if v:
+                prof[k] = v
+        else:
+            lines = _as_lines(form.get(k) or "")
+            # unchanged -> keep the stored value (e.g. structured award records)
+            if lines and lines != _as_lines(before.get(k)):
+                prof[k] = lines
+    if prof.get("posts_per_week", "").isdigit() if isinstance(prof.get("posts_per_week"), str) else False:
+        prof["posts_per_week"] = int(prof["posts_per_week"])
+    if isinstance(prof.get("on_camera"), str):
+        prof["on_camera"] = prof["on_camera"].lower().startswith("yes")
+    lang = prof.get("language")
+    if lang:
+        prof["languages"] = {"English": ["en"], "Arabic": ["ar"], "Both": ["en", "ar"]}.get(lang, prof.get("languages"))
+    prof["answered_at"] = datetime.now(timezone.utc).date().isoformat()
+    brief["brand_profile"] = prof
+    return cm.update_client(client_id, brief=brief, db_path=db_path)

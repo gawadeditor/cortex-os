@@ -85,5 +85,7 @@ Applied automatically to any client, not configured per client:
   payout progress only for platforms the client is on.
 - **Plan** tab (strategy, calendar, editable drafts, Copy / Mark posted) is the same
   for every client; it reads `clients.brief` (`brand_profile`, `brand_strategy`,
-  `content_calendar`). The questionnaire that fills it is run in chat for now.
+  `content_calendar`). Its inputs come from the **Questionnaire** (`/client/<id>/plan/questionnaire`):
+  12 questions, one per screen with options + "Other", progress bar, Back/Next,
+  prefilled from `brand_profile`; unchanged structured answers (e.g. award records) are kept.
 - **Language** — dashboard copy is English; post drafts keep their publish language.

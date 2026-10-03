@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ client.name }} — Questionnaire</title>
+  {% include '_base_style.html' %}
+  <style>
+    .qz { max-width: 720px; }
+    .qz-progress { height: 4px; background: var(--overlay); border-radius: 999px; overflow: hidden; margin: 4px 0 16px; }
+    .qz-progress > span { display: block; height: 100%; background: var(--accent); width: 0; transition: width .25s ease; }
+    .qz-count { font-size: 11px; color: var(--faint); letter-spacing: .06em; text-transform: uppercase; }
+    .qz-step { display: block; }
+    .js .qz-step { display: none; }
+    .js .qz-step.is-on { display: block; }
+    .qz-q { font-size: 18px; line-height: 1.4; color: var(--text); margin: 6px 0 14px; font-weight: 600; }
+    .qz-hint { font-size: 12px; color: var(--faint); margin: -6px 0 12px; }
+    .qz-opts { display: flex; flex-direction: column; gap: 8px; }
+    .qz-opt { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border: 1px solid var(--border);
+              border-radius: 10px; background: var(--surface); cursor: pointer; transition: border-color .2s, background .2s;
+              font-size: 13.5px; color: var(--text); text-transform: none; letter-spacing: normal; font-weight: 400; }
+    .qz-opt:hover { border-color: var(--border-strong); }
+    .qz-opt input { accent-color: var(--accent); width: 16px; height: 16px; cursor: pointer; }
+    .qz-opt:has(input:checked) { border-color: var(--accent-line); background: var(--accent-bg); }
+    .qz-other, .qz-lines { width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 10px;
+                           border: 1px solid var(--border); background: var(--overlay); color: var(--text); font: inherit; font-size: 13.5px; }
+    .qz-other { margin-top: 8px; }
+    .qz-lines { min-height: 140px; resize: vertical; line-height: 1.6; }
+    .qz-nav { display: flex; gap: 8px; justify-content: space-between; margin-top: 18px; }
+    .qz-nav .btn { cursor: pointer; }
+    .qz-other:focus-visible, .qz-lines:focus-visible, .qz-opt:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+    @media (prefers-reduced-motion: reduce) { .qz-progress > span, .qz-opt { transition: none; } }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+{% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
+
+<div class="container">
+{% call hero(
+     eyebrow='Client · questionnaire',
+     title=client.name ~ ' — brand questionnaire',
+     lede='One question at a time. The answers shape the strategy and the monthly calendar on the Plan tab.',
+     figure=questions | length,
+     figure_label='questions',
+     pill=('answered ' ~ pre.answered_at) if pre.answered_at else 'not answered yet',
+     pill_class='is-good' if pre.answered_at else 'is-warn') %}
+  <a class="btn" href="/client/{{ client.client_id }}/plan?scope=client:{{ client.client_id }}">{{ icon('arrow-right') }} Plan</a>
+{% endcall %}
+
+<form class="card qz" method="post" action="/client/{{ client.client_id }}/plan/questionnaire" id="qz">
+  <div class="qz-count" id="qz-count">Question 1 of {{ questions | length }}</div>
+  <div class="qz-progress" aria-hidden="true"><span id="qz-bar"></span></div>
+
+  {% for q in questions %}
+  {% set cur = pre.get(q.key) %}
+  <fieldset class="qz-step" data-step="{{ loop.index0 }}" style="border:0;padding:0;margin:0;">
+    <legend class="qz-q">{{ q.q }}</legend>
+    {% if q.hint %}<div class="qz-hint">{{ q.hint }}</div>{% endif %}
+    {% if q.type == 'lines' %}
+      <textarea class="qz-lines" name="{{ q.key }}" aria-label="{{ q.q }}">{{ (cur if cur is string else (cur or []) | join('\n')) }}</textarea>
+    {% else %}
+      {% set curl = (cur if cur is not string else [cur]) or [] %}
+      <div class="qz-opts" role="{{ 'radiogroup' if q.type == 'single' else 'group' }}">
+        {% for o in q.options %}
+        <label class="qz-opt">
+          <input type="{{ 'radio' if q.type == 'single' else 'checkbox' }}" name="{{ q.key }}" value="{{ o }}"
+                 {{ 'checked' if o in curl }}>
+          <span>{{ o }}</span>
+        </label>
+        {% endfor %}
+      </div>
+      {% if q.other %}
+        {% set extra = curl | reject('in', q.options) | list %}
+        <input class="qz-other" type="text" name="{{ q.key }}__other" placeholder="Other (type your own)"
+               value="{{ extra | join(', ') }}" aria-label="Other answer">
+      {% endif %}
+    {% endif %}
+  </fieldset>
+  {% endfor %}
+
+  <div class="qz-nav">
+    <button type="button" class="btn btn-sm" id="qz-back">{{ icon('arrow-right') }} Back</button>
+    <button type="button" class="btn btn-primary btn-sm" id="qz-next">Next {{ icon('arrow-right') }}</button>
+    <button type="submit" class="btn btn-primary btn-sm" id="qz-save">{{ icon('check') }} Save answers</button>
+  </div>
+</form>
+</div>
+
+<script>
+(function () {
+  document.documentElement.classList.add('js');
+  var steps = Array.prototype.slice.call(document.querySelectorAll('.qz-step'));
+  var back = document.getElementById('qz-back'), next = document.getElementById('qz-next'),
+      save = document.getElementById('qz-save'), bar = document.getElementById('qz-bar'),
+      count = document.getElementById('qz-count'), i = 0;
+  back.querySelector('svg') && (back.querySelector('svg').style.transform = 'scaleX(-1)');
+  function show(n) {
+    i = Math.max(0, Math.min(steps.length - 1, n));
+    steps.forEach(function (s, k) { s.classList.toggle('is-on', k === i); });
+    count.textContent = 'Question ' + (i + 1) + ' of ' + steps.length;
+    bar.style.width = ((i + 1) / steps.length * 100) + '%';
+    back.style.visibility = i === 0 ? 'hidden' : 'visible';
+    var last = i === steps.length - 1;
+    next.style.display = last ? 'none' : '';
+    save.style.display = last ? '' : 'none';
+    var f = steps[i].querySelector('input, textarea');
+    if (f) { try { f.focus({ preventScroll: true }); } catch (e) {} }
+  }
+  back.addEventListener('click', function () { show(i - 1); });
+  next.addEventListener('click', function () { show(i + 1); });
+  // a single-choice click moves on by itself
+  steps.forEach(function (s) {
+    s.querySelectorAll('input[type=radio]').forEach(function (r) {
+      r.addEventListener('change', function () { setTimeout(function () { show(i + 1); }, 180); });
+    });
+  });
+  document.getElementById('qz').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA' && i < steps.length - 1) { e.preventDefault(); show(i + 1); }
+  });
+  show(0);
+})();
+</script>
+</body>
+</html>

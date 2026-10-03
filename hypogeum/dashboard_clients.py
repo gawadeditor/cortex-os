@@ -170,7 +170,8 @@ def get_client_overview(client_id: str, db_path: Optional[Path] = None) -> dict:
         pass
     try:
         from hypogeum.audience_profile import summarize_observed_audience
-        out["observed_audience"] = summarize_observed_audience(client_id, db_path=db_path)
+        out["observed_audience"] = summarize_observed_audience(client_id, db_path=db_path,
+                                                               for_display=True)
     except Exception:  # noqa: BLE001
         pass
     try:

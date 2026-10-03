@@ -59,7 +59,8 @@ def _gender_phrase(rows: list) -> Optional[str]:
 
 
 def summarize_observed_audience(channel_id: str, *,
-                                db_path: Optional[Path] = None) -> Optional[str]:
+                                db_path: Optional[Path] = None,
+                                for_display: bool = False) -> Optional[str]:
     """One sentence describing who actually watches, from the most recent
     demographics snapshot. None when there is no demographic data yet
     (a platform needs ~100+ followers before its API returns any)."""
@@ -88,6 +89,10 @@ def summarize_observed_audience(channel_id: str, *,
             parts.append(f"mostly in {geo[0]} ({geo[1]:.0f}%)")
         if not parts:
             continue
+        if for_display:
+            # Dashboard (e.g. a client's Audience tab): describe, don't instruct.
+            from hypogeum.dashboard_humanize import friendly_platform
+            return f"Measured {friendly_platform(platform)} audience {', '.join(parts)}."
         return (f"Measured {platform} audience {', '.join(parts)}. "
                 f"Pitch references, vocabulary and pacing to this real "
                 f"audience, not the channel's original target.")

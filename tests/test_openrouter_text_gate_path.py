@@ -233,6 +233,43 @@ class TestGrantDerivedGatePath:
                 call_claude(
                     SONNET, MINIMAL_MESSAGES, 512, cfg, episode_id="ep_gate_test", channel_id="test_channel",
                 )
+    def test_failed_call_releases_lease_so_retry_is_not_locked_out(self, keypair, tmp_path, monkeypatch):
+        """2026-10-03: an OpenRouter 402 left the text gate's runtime_lease
+        active for its 30-min TTL, so the next two runs of the same episode
+        failed instantly with "Text gate lease unavailable" (identical call
+        -> identical lease owner) and tripped the spend breaker. The gate
+        call must release the lease however it ends."""
+        priv, _pub = keypair
+        db_path = tmp_path / "auth.db"
+        cfg = make_config()
+        import hypogeum.db as db
+        from hypogeum.openrouter import CreditsExhausted
+        db.initialize_schema(db_path)
+        _register_grant(priv, db_path, max_calls=5, max_total_spend=Decimal("10.00"))
+        monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
+
+        with patch("hypogeum.openrouter.requests.post", return_value=http_error(402)), \
+             patch("hypogeum.openrouter.time.sleep"):
+            with pytest.raises(Exception) as first:
+                call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg, episode_id="ep_gate_test", channel_id="test_channel")
+        assert "lease unavailable" not in str(first.value)
+
+        conn = db.get_connection(db_path)
+        try:
+            leases = conn.execute(
+                "SELECT status FROM runtime_leases WHERE owner_id LIKE 'openrouter_text_adapter:%'").fetchall()
+        finally:
+            conn.close()
+        assert leases and all(r["status"] == "released" for r in leases), [dict(r) for r in leases]
+
+        reset_run_state()
+        with patch("hypogeum.openrouter.requests.post", return_value=openrouter_200("after top-up")):
+            try:
+                call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg, episode_id="ep_gate_test", channel_id="test_channel")
+            except Exception as exc:  # noqa: BLE001
+                assert "lease unavailable" not in str(exc), exc
+
+
 class TestLegacyGrantStillRoutesThroughGate:
     """Phase 2 correction: a PRE-PHASE-2 historical grant (checksum
     computed before production_plan_content_hash existed; NULL column)

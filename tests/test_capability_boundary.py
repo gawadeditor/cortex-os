@@ -126,7 +126,11 @@ def issued(tmp_path, monkeypatch):
         holder.update(cap=cap, envelope_id=envelope.envelope_id, owner=owner, token=token, at=at)
         raise _Stop()
 
+    # keep the runtime_lease held as at the real invoke() moment -- the
+    # provider now releases it in a finally once the gate call exits
+    real_release = db.release_lease
     submission_gate._mint_capability = _capturing
+    db.release_lease = lambda *a, **k: False
     try:
         with pytest.raises(_Stop):
             up.MuapiVideoUpscalerProvider().enhance(
@@ -136,6 +140,7 @@ def issued(tmp_path, monkeypatch):
             )
     finally:
         submission_gate._mint_capability = real_mint
+        db.release_lease = real_release
 
     holder["db_path"] = db_path
     holder["tmp_path"] = tmp_path

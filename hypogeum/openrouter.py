@@ -579,6 +579,7 @@ def _call_openrouter_via_gate(
         raise FallbackFailed(f"Text gate authorization failed for {call_label!r}: {exc}") from exc
 
     conn = db.get_connection()
+    _held_lease = None
     try:
         authorization_store.persist_execution_envelope(conn, envelope)
 
@@ -588,6 +589,7 @@ def _call_openrouter_via_gate(
         lease = db.acquire_lease(conn, envelope.envelope_id, lease_owner_id, acquired_at=at, expires_at=lease_expires_at)
         if lease is None:
             raise FallbackFailed(f"Text gate lease unavailable for {call_label!r}")
+        _held_lease = (envelope.envelope_id, lease_owner_id, lease["fencing_token"])
 
         receipt_store = WriteAheadReceiptStore(_ASSETS_ROOT / "episodes" / episode_id)
         live_sources = submission_gate.LiveSources(
@@ -614,6 +616,18 @@ def _call_openrouter_via_gate(
             output_already_exists=False,
         )
     finally:
+        # Release in finally (as muapi's gate paths do since 2026-09-03): an
+        # unreleased lease makes every retry of the same call within 30 min
+        # fail "lease unavailable" -- on 2026-10-03 one OpenRouter 402 turned
+        # into three wasted runs this way and tripped the spend breaker.
+        if _held_lease is not None:
+            try:
+                db.release_lease(
+                    conn, _held_lease[0], _held_lease[1], _held_lease[2],
+                    released_at=datetime.now(timezone.utc).isoformat(),
+                )
+            except Exception:  # noqa: BLE001
+                pass
         conn.close()
 
     if not result.approved:

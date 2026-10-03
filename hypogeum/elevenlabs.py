@@ -760,6 +760,7 @@ def _generate_narration_via_gate(
         raise ElevenLabsError(f"Narration gate authorization failed for beat {beat_id!r}: {exc}") from exc
 
     conn = db.get_connection()
+    _held_lease = None
     try:
         authorization_store.persist_execution_envelope(conn, envelope)
 
@@ -770,6 +771,7 @@ def _generate_narration_via_gate(
         if lease is None:
             raise ElevenLabsError(f"Narration gate lease unavailable for beat {beat_id!r}")
 
+        _held_lease = (envelope.envelope_id, lease_owner_id, lease["fencing_token"])
         receipt_store = WriteAheadReceiptStore(output_dir)
         live_sources = submission_gate.LiveSources(
             channel_package_checksum=package_identity["checksum"], plan_checksum=plan_checksum,
@@ -788,6 +790,16 @@ def _generate_narration_via_gate(
             output_already_exists=dest_path.exists(),
         )
     finally:
+        # release in finally: an unreleased lease fails every retry of this
+        # call for 30 min with "lease unavailable" (2026-10-03 incident)
+        if _held_lease is not None:
+            try:
+                db.release_lease(
+                    conn, _held_lease[0], _held_lease[1], _held_lease[2],
+                    released_at=datetime.now(timezone.utc).isoformat(),
+                )
+            except Exception:  # noqa: BLE001
+                pass
         conn.close()
 
     if not result.approved:
@@ -1577,6 +1589,7 @@ def _generate_music_via_gate(
         raise ElevenLabsError(f"Music gate authorization failed for category {category!r}: {exc}") from exc
 
     conn = db.get_connection()
+    _held_lease = None
     try:
         authorization_store.persist_execution_envelope(conn, envelope)
 
@@ -1587,6 +1600,7 @@ def _generate_music_via_gate(
         if lease is None:
             raise ElevenLabsError(f"Music gate lease unavailable for category {category!r}")
 
+        _held_lease = (envelope.envelope_id, lease_owner_id, lease["fencing_token"])
         receipt_store = WriteAheadReceiptStore(assets_root / "episodes" / episode_id)
         live_sources = submission_gate.LiveSources(
             channel_package_checksum=package_identity["checksum"], plan_checksum=plan_checksum,
@@ -1605,6 +1619,16 @@ def _generate_music_via_gate(
             output_already_exists=local_path.exists(),
         )
     finally:
+        # release in finally: an unreleased lease fails every retry of this
+        # call for 30 min with "lease unavailable" (2026-10-03 incident)
+        if _held_lease is not None:
+            try:
+                db.release_lease(
+                    conn, _held_lease[0], _held_lease[1], _held_lease[2],
+                    released_at=datetime.now(timezone.utc).isoformat(),
+                )
+            except Exception:  # noqa: BLE001
+                pass
         conn.close()
 
     if not result.approved:

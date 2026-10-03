@@ -176,12 +176,19 @@ def _capture_capability_pre_invoke(env, monkeypatch):
     # Restore ONLY _mint_capability afterwards -- never monkeypatch.undo(),
     # which would also revert the gate_env fixture's db/_ASSETS_ROOT/
     # canonical-dir patches that the later real invoke() still needs.
+    # The provider releases its runtime_lease in a finally (so a failed call
+    # can't lock out its own retry); keep it held here, as it is at the real
+    # moment the gate calls invoke(), so the captured capability stays valid.
+    import hypogeum.db as _db
+    real_release = _db.release_lease
     submission_gate._mint_capability = _capturing_mint
+    _db.release_lease = lambda *a, **k: False
     try:
         with pytest.raises(_CaptureStop):
             _enhance(env)
     finally:
         submission_gate._mint_capability = real_mint
+        _db.release_lease = real_release
     return holder["cap"]
 
 
@@ -405,7 +412,10 @@ class TestDurableSingleUse:
 
         sentinel = MagicMock(side_effect=AssertionError("network reached on replay"))
         with patch("requests.post", sentinel), patch("requests.get", sentinel):
-            with pytest.raises(CapabilityAlreadyConsumedError):
+            # rejected either as already consumed or -- since the provider
+            # releases its runtime_lease once the gate call exits -- as no
+            # longer backed by a current lease; never reaching the network
+            with pytest.raises((CapabilityAlreadyConsumedError, CapabilityAuthenticityError)):
                 MuapiUpscaleAdapter().invoke(cap)   # brand-new instance == process restart
         sentinel.assert_not_called()
 

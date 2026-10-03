@@ -285,6 +285,7 @@ class MuapiVideoUpscalerProvider(EnhancementProvider):
             )
 
         conn = db.get_connection()
+        _held_lease = None
         try:
             authorization_store.persist_execution_envelope(conn, envelope)
 
@@ -298,6 +299,7 @@ class MuapiVideoUpscalerProvider(EnhancementProvider):
                     failure_reason=f"gate_lease_unavailable for scene {scene_id!r}", generation_time_s=time.time() - t0,
                 )
 
+            _held_lease = (envelope.envelope_id, lease_owner_id, lease["fencing_token"])
             receipt_store = WriteAheadReceiptStore(_ASSETS_ROOT / "episodes" / episode_id)
             live_sources = submission_gate.LiveSources(
                 channel_package_checksum=package_identity["checksum"], plan_checksum=plan_checksum,
@@ -326,6 +328,16 @@ class MuapiVideoUpscalerProvider(EnhancementProvider):
                 output_already_exists=dest_path.exists(),
             )
         finally:
+            # release in finally: an unreleased lease fails every retry of this
+            # call for 30 min with "lease unavailable" (2026-10-03 incident)
+            if _held_lease is not None:
+                try:
+                    db.release_lease(
+                        conn, _held_lease[0], _held_lease[1], _held_lease[2],
+                        released_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
             conn.close()
 
         if not result.approved:

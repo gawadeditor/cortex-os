@@ -403,3 +403,174 @@ def _closest_monetization_gap(mon: dict) -> Optional[str]:
                         f"({r['remaining']:,.0f} {r['unit']} to payout eligibility).",
                         r["pct"])
     return best[0] if best else None
+
+
+# ---------------------------------------------------------------------------
+# Per-platform advice (2026-10-03). The catalogue-wide comparison above needs
+# content profiles before it can say anything; this reads what each platform's
+# own numbers already show — cadence, dormancy, format, caption and language —
+# and turns it into platform-specific actions. Every finding carries its sample
+# size; an axis is only reported with >= 3 posts per side and a clear gap.
+# ---------------------------------------------------------------------------
+
+_PA_MIN_N = 3
+_PA_GAP = 1.3            # one side must beat the other by 30%+
+_DORMANT_DAYS = 180
+
+
+def _lang_of(text: str) -> Optional[str]:
+    import re
+    t = (text or "").strip()
+    if not t:
+        return None
+    return "Arabic" if re.search(r"[؀-ۿ]", t) else "English"
+
+
+def _platform_score(rows: list, platform: str) -> tuple:
+    """(field, label) the platform's posts are compared on."""
+    if sum(1 for r in rows if r.get("engagement_rate") is not None) >= _PA_MIN_N:
+        return "engagement_rate", "engagement rate"
+    if platform == "linkedin":
+        return "total_impressions", "impressions"
+    return "interactions", "interactions"
+
+
+def _compare_groups(rows: list, key, field: str, label: str, axis: str) -> Optional[dict]:
+    groups: dict = {}
+    for r in rows:
+        g = key(r)
+        v = r.get(field)
+        if g is None or v is None:
+            continue
+        groups.setdefault(g, []).append(float(v))
+    groups = {g: v for g, v in groups.items() if len(v) >= _PA_MIN_N}
+    if len(groups) < 2:
+        return None
+    ranked = sorted(groups.items(), key=lambda kv: statistics.fmean(kv[1]), reverse=True)
+    (best, bv), (worst, wv) = ranked[0], ranked[-1]
+    bm, wm = statistics.fmean(bv), statistics.fmean(wv)
+    if wm <= 0 or bm / wm < _PA_GAP:
+        return None
+    fmt = (lambda x: f"{x:.1f}%") if field == "engagement_rate" else (lambda x: f"{x:,.0f}")
+    return {"axis": axis, "best": best, "worst": worst,
+            "finding": f"{best} posts average {fmt(bm)} {label} vs {fmt(wm)} for {worst}.",
+            "evidence": f"{len(bv)} vs {len(wv)} posts."}
+
+
+def generate_platform_advice(client_id: str, *, db_path: Optional[Path] = None) -> dict:
+    """{platform: {posts, last_post, posts_365d, findings: [...], actions: [...],
+    audience: str|None, basis: str}} for every platform the client has an
+    account on. Deterministic — no LLM."""
+    from datetime import datetime, timezone
+    from hypogeum import client_manager as cm
+    from hypogeum.dashboard_clients import _content_rows, get_client_linkedin_snapshot
+
+    client = cm.get_client(client_id, db_path=db_path)
+    if not client:
+        return {}
+    strategy = (client.get("brief") or {}).get("brand_strategy") or {}
+    plats = sorted({a["platform"] for a in cm.list_managed_accounts(client_id, db_path=db_path)})
+    rows = _content_rows(client_id, db_path)
+    now = datetime.now(timezone.utc)
+    out: dict = {}
+    for plat in plats:
+        pr = [r for r in rows if r.get("platform") == plat]
+        dates = sorted((r.get("published_at") or "")[:10] for r in pr if r.get("published_at"))
+        last = dates[-1] if dates else None
+        days_since = (now.date() - datetime.fromisoformat(last).date()).days if last else None
+        p365 = sum(1 for d in dates if (now.date() - datetime.fromisoformat(d).date()).days <= 365)
+        field, label = _platform_score(pr, plat)
+        findings, actions = [], []
+
+        # cadence / dormancy
+        if days_since is not None and days_since > _DORMANT_DAYS:
+            findings.append({"axis": "activity", "finding": f"No posts since {last} ({days_since // 30} months).",
+                             "evidence": f"{len(pr)} posts on record."})
+        target = ((strategy.get("cadence") or {}).get("posts_per_week"))
+        if p365 < 26 and not (days_since is not None and days_since > _DORMANT_DAYS):
+            findings.append({"axis": "cadence", "finding": f"Only {p365} post{'s' if p365 != 1 else ''} in the last 12 months.",
+                             "evidence": "the algorithm rewards consistency; under 1 post / fortnight rarely builds reach."})
+
+        # format, caption, language
+        for cmp in (
+            _compare_groups(pr, lambda r: (r.get("media_type") or None) and
+                            {"carousel_album": "Carousel", "image": "Single-image", "video": "Video",
+                             "reels": "Reels"}.get(r["media_type"], r["media_type"]),
+                            field, label, "format"),
+            _compare_groups(pr, lambda r: "Captioned" if (r.get("caption") or "").strip() else "No-caption",
+                            field, label, "caption") if plat != "linkedin" else None,
+            _compare_groups(pr, lambda r: _lang_of(r.get("caption") or r.get("title") or ""),
+                            field, label, "language"),
+        ):
+            if cmp:
+                findings.append(cmp)
+
+        # LinkedIn: the two-post language signal is too small for the >=3 rule,
+        # but reach vs engagement disagree there — report it as a labelled hint.
+        if plat == "linkedin":
+            langs: dict = {}
+            for r in pr:
+                lg = _lang_of(r.get("title") or "")
+                if lg and r.get("total_impressions"):
+                    langs.setdefault(lg, []).append(r)
+            if "Arabic" in langs and "English" in langs:
+                def _best(lst, f):
+                    vals = [x.get(f) for x in lst if x.get(f) is not None]
+                    return max(vals) if vals else None
+                ar_i, en_i = _best(langs["Arabic"], "total_impressions"), _best(langs["English"], "total_impressions")
+                ar_e, en_e = _best(langs["Arabic"], "engagement_rate"), _best(langs["English"], "engagement_rate")
+                if None not in (ar_i, en_i, ar_e, en_e):
+                    findings.append({"axis": "language (early signal)",
+                                     "finding": f"Best Arabic post: {ar_i:,} impressions, {ar_e:.1f}% engagement. "
+                                                f"Best English post: {en_i:,} impressions, {en_e:.1f}% engagement.",
+                                     "best": "English" if en_e > ar_e else "Arabic",
+                                     "evidence": f"{len(langs['Arabic'])} Arabic vs {len(langs['English'])} English posts — "
+                                                 "too few to be sure, keep testing."})
+
+        # actions
+        role = ((strategy.get("platforms") or {}).get(plat) or {}).get("role")
+        cal_posts = ((client.get("brief") or {}).get("content_calendar") or {}).get("posts") or []
+        planned = sum(1 for cp in cal_posts if plat in (cp.get("platforms") or []))
+        if planned:
+            per_week = max(1, round(planned / 4))
+            actions.append(f"Post {per_week}× a week here, as the content calendar plans ({planned} posts this month).")
+        elif target:
+            actions.append(f"Post at least once a week here (plan: {target} posts/week across platforms).")
+        for f in findings:
+            if f["axis"] == "format" and f.get("best"):
+                actions.append(f"Lean on {f['best'].lower()} posts — they outperform {f['worst'].lower()} on this account.")
+            if f["axis"] == "caption" and f.get("best") == "Captioned":
+                actions.append("Always write a caption — captioned posts clearly beat bare images here.")
+            if f["axis"] == "language" and f.get("best"):
+                actions.append(f"Write in {f['best']} — it performs better here.")
+            elif f["axis"] == "language (early signal)" and f.get("best"):
+                actions.append(f"Write in {f['best']} — the early signal points there; "
+                               "keep watching engagement as more posts land.")
+            if f["axis"] == "activity":
+                actions.append("Restart with a consistent run: the first 4–6 posts reset what followers expect from you.")
+        if plat == "linkedin":
+            actions.append("Lead with one concrete decision or result per post (a cut, a grade, an award) — "
+                           "your audience is senior media professionals.")
+        if plat == "instagram":
+            actions.append("Use Instagram as the visual portfolio: before/after and AI clips, carousels of stills.")
+
+        audience = None
+        if plat == "linkedin":
+            snap = get_client_linkedin_snapshot(client_id, db_path=db_path)
+            if snap:
+                ind = (snap["audience"].get("Industry") or [{}])[0]
+                sen = (snap["audience"].get("Seniority") or [{}])[0]
+                audience = (f"{snap['followers_total']:,} followers; top industry {ind.get('value')} ({ind.get('pct_raw')}), "
+                            f"top seniority {sen.get('value')} ({sen.get('pct_raw')}).")
+        else:
+            try:
+                from hypogeum.audience_profile import summarize_observed_audience
+                audience = summarize_observed_audience(client_id, db_path=db_path, for_display=True)
+            except Exception:  # noqa: BLE001
+                audience = None
+
+        seen = set()
+        actions = [a for a in actions if not (a in seen or seen.add(a))]
+        out[plat] = {"posts": len(pr), "last_post": last, "posts_365d": p365, "basis": label,
+                     "role": role, "findings": findings, "actions": actions, "audience": audience}
+    return out

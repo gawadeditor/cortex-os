@@ -42,6 +42,35 @@
   <a class="btn" href="/client/{{ d.client.client_id }}/report?scope=client:{{ d.client.client_id }}">{{ icon('review') }} Full report</a>
 {% endcall %}
 
+{% if d.platforms %}
+<div class="grid grid-2" style="margin: var(--space-md) 0;">
+  {% for plat, pa in d.platforms.items() %}
+  <div class="card">
+    <div class="card-title">{{ icon('channels') }} {{ plat | friendly_platform }}
+      <span class="muted" style="font-weight:400;text-transform:none;letter-spacing:0;">
+        — {{ pa.posts }} posts{% if pa.last_post %}, last {{ pa.last_post }}{% endif %}</span></div>
+    {% if pa.audience %}<p class="note" style="margin-top:6px;">{{ pa.audience }}</p>{% endif %}
+    {% if pa.findings %}
+      <div class="ri-axis" style="font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);margin-top:10px;">What the numbers show</div>
+      <div class="works" style="margin-top:6px;">
+        {% for f in pa.findings %}
+        <div class="work"><div class="work-axis">{{ f.axis }}</div>
+          <div class="work-find">{{ f.finding }}</div><div class="work-ev">{{ f.evidence }}</div></div>
+        {% endfor %}
+      </div>
+    {% endif %}
+    {% if pa.actions %}
+      <div class="ri-axis" style="font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);margin-top:14px;">What to do on {{ plat | friendly_platform }}</div>
+      <div class="recs" style="margin-top:6px;">
+        {% for a in pa.actions %}<div class="rec">{{ icon('arrow-right') }}<span>{{ a }}</span></div>{% endfor %}
+      </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+<div class="ri-axis" style="font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);margin-top:var(--space-md);">Across all posts</div>
+{% endif %}
+
 <div class="adv-sum">{{ d.summary }}</div>
 
 {% set ba = d.before_after %}
@@ -93,7 +122,7 @@
 </div>
 {% endif %}
 
-{% if not d.what_works and not d.recommendations %}
+{% if not d.what_works and not d.recommendations and not d.platforms %}
 <div class="dv-empty">
   {{ icon('learning') }}
   <div class="dv-empty-title">Not enough to advise on yet</div>

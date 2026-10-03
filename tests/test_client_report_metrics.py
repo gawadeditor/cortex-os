@@ -98,3 +98,37 @@ def test_plan_page_renders_and_updates_posts(db, tmp_path):
         assert cl.get("/client/nope/plan").status_code == 404
     finally:
         rd.app.config["DB_PATH"] = old
+
+
+def test_platform_advice_is_per_platform_and_sample_sized(db):
+    from hypogeum.client_advisory import generate_platform_advice
+    # Instagram: 3 carousels clearly beat 3 single images; all old -> dormant
+    for i, (mt, likes) in enumerate([("carousel_album", 60), ("carousel_album", 50), ("carousel_album", 55),
+                                     ("image", 10), ("image", 12), ("image", 8)]):
+        cid = cm.upsert_content_item("me", "instagram", platform_post_id=f"ig{i}", media_type=mt,
+                                     caption="Some caption", published_at="2016-05-01T10:00:00+00:00",
+                                     source="instagram_graph", db_path=db)
+        store_content_metrics(cid, "me", "instagram", {"likes": likes}, source="api", db_path=db)
+    _post(db, "linkedin", "share:1", {"impressions": 900, "engagement_rate": 6.0})
+    adv = generate_platform_advice("me", db_path=db)
+    assert set(adv) == {"instagram", "linkedin"}
+    ig = adv["instagram"]
+    axes = {f["axis"]: f for f in ig["findings"]}
+    assert "activity" in axes and "cadence" not in axes           # dormancy not repeated as cadence
+    assert axes["format"]["best"] == "Carousel" and "3 vs 3 posts" in axes["format"]["evidence"]
+    assert any("carousel" in a for a in ig["actions"])
+    # a lone LinkedIn post never produces a format/language comparison
+    assert not any(f["axis"] in ("format", "language") for f in adv["linkedin"]["findings"])
+
+
+def test_advice_page_shows_platform_cards(db):
+    import run_dashboard as rd
+    _post(db, "linkedin", "share:1", {"impressions": 900, "engagement_rate": 6.0})
+    old = rd.app.config.get("DB_PATH")
+    rd.app.config["DB_PATH"] = str(db)
+    try:
+        page = rd.app.test_client().get("/client/me/advice?scope=client:me").get_data(as_text=True)
+        assert "What to do on LinkedIn" in page and "What to do on Instagram" in page
+        assert "Not enough to advise on yet" not in page
+    finally:
+        rd.app.config["DB_PATH"] = old

@@ -228,7 +228,10 @@ def _sync_instagram_graph(client_id: str, acct: dict, seen_content: set, out: di
             title=(m.get("caption") or "").split("\n", 1)[0][:200] or None,
             caption=m.get("caption") or None,
             thumbnail_url=m.get("thumbnail_url") or (m.get("media_url") if m.get("media_type") == "IMAGE" else None),
-            media_type=(m.get("media_product_type") or m.get("media_type") or "").lower() or None,
+            # 'reels' for Reels, else the post's own type (image / video /
+            # carousel_album) — the format axis per-platform advice compares.
+            media_type=("reels" if (m.get("media_product_type") or "").upper() == "REELS"
+                        else (m.get("media_type") or "").lower() or None),
             published_at=m.get("timestamp"), source="instagram_graph", db_path=db_path,
         )
         if content_id not in seen_content:

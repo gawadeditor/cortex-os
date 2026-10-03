@@ -147,6 +147,7 @@ def test_client_sync_pulls_instagram_without_zernio(db_path, monkeypatch):
         items = {r["platform_post_id"]: dict(r) for r in conn.execute("SELECT * FROM content_items")}
         assert items["m1"]["source"] == "instagram_graph"
         assert items["m1"]["title"] == "First line" and items["m1"]["media_type"] == "reels"
+        assert items["m2"]["media_type"] == "image"
         assert items["m2"]["thumbnail_url"] == "https://cdn/i2.jpg"
         rows = conn.execute("SELECT views, reach, client_id FROM platform_analytics "
                             "WHERE client_id='me_test' ORDER BY views DESC").fetchall()

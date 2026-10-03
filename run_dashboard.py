@@ -8505,6 +8505,11 @@ def client_advice_page(client_id):
         return render_template("not_found.html", kind="Client", id=client_id), 404
     d = generate_client_advisory(client_id, db_path=_db_path())
     d["client"] = get_client(client_id, db_path=_db_path())
+    try:
+        from hypogeum.client_advisory import generate_platform_advice
+        d["platforms"] = generate_platform_advice(client_id, db_path=_db_path())
+    except Exception:  # noqa: BLE001 — the catalogue advice still renders
+        d["platforms"] = {}
     return render_template("client_advice.html", d=d)
 
 

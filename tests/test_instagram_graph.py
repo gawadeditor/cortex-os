@@ -195,3 +195,22 @@ def test_pre_conversion_media_is_expected_and_stops_older_insight_calls(db_path,
     assert out["content_items"] == 2 and out["metric_rows"] == 2   # likes/comments still stored
     assert sum("/insights" in u for u in fake.calls) == 1          # stopped after the first
     assert out["ig_pre_conversion_from"] == "2026-09-30T10:00:00+0000"
+
+
+def test_content_analysis_skips_posts_before_client_start_date(db_path, monkeypatch):
+    from hypogeum.publishing import client_content_sync as ccs
+    ig.store_account_token(IG_ID, "T", db_path=db_path)
+    cm.create_client("Start", client_id="st", managed_since="2026-09-25", db_path=db_path)
+    cm.link_managed_account("st", "instagram", handle="me", provider_id="instagram_graph",
+                            provider_account_id=IG_ID, native_account_id=IG_ID, db_path=db_path)
+    monkeypatch.setattr(ig, "_requests_get", FakeGraph())
+    analysed = []
+
+    def fake_analyze(item, client=None, analyze_fn=None, db_path=None):
+        analysed.append(item["platform_post_id"])
+        return {"ok": True, "cost_usd": 0.01}
+
+    import hypogeum.agents.content_analysis_agent as caa
+    monkeypatch.setattr(caa, "analyze_content_item", fake_analyze)
+    ccs.sync_client_content("st", provider=object(), analyze=True, db_path=db_path)
+    assert analysed == ["m1"]          # m1 is 2026-09-30 (after start); m2 2026-09-20 is skipped

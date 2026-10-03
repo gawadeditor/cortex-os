@@ -421,6 +421,10 @@ def _profile_new_content(client, content_ids, analyze_fn, db_path, out) -> int:
 
     budget = float(client.get("monthly_analysis_budget_usd") or 0.0)
     spent = cm.analysis_spend_this_month(client["client_id"], db_path=db_path)
+    # 2026-10-03: when the client has a start date (managed_since), only content
+    # published from that date on is analysed — the operator chose not to spend
+    # analysis budget on years-old posts that predate the engagement.
+    since = (client.get("managed_since") or "")[:10]
     done = 0
     for cid in list(content_ids):
         if done >= _MAX_ANALYSIS_CALLS or (budget and spent >= budget):
@@ -429,6 +433,8 @@ def _profile_new_content(client, content_ids, analyze_fn, db_path, out) -> int:
             continue
         item = cm.get_content_item(cid, db_path=db_path)
         if not item:
+            continue
+        if since and (item.get("published_at") or "")[:10] < since:
             continue
         try:
             res = analyze_content_item(item, client=client, analyze_fn=analyze_fn,

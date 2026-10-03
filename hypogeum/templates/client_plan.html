@@ -6,7 +6,7 @@
   <title>{{ d.client.name }} — Plan</title>
   {% include '_base_style.html' %}
   <style>
-    .plan { direction: rtl; text-align: right; }
+    .plan { }
     .plan .flash { font-size: 12px; padding: 9px 11px; border-radius: 8px; margin-bottom: var(--space-md);
                    background: var(--accent-bg); border: 1px solid var(--accent-line); color: var(--text); }
     .pos { font-size: 15px; line-height: 1.8; color: var(--text); background: var(--overlay);
@@ -16,11 +16,11 @@
     .fact .k { font-size: 11px; color: var(--faint); }
     .fact .v { font-size: 13px; color: var(--text); margin-top: 4px; line-height: 1.6; }
     .pillars { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; margin-top: 12px; }
-    .pillar { border-right: 3px solid var(--accent); background: var(--surface); border-radius: 8px 0 0 8px; padding: 10px 14px; }
+    .pillar { border-left: 3px solid var(--accent); background: var(--surface); border-radius: 0 8px 8px 0; padding: 10px 14px; }
     .pillar b { font-size: 13.5px; color: var(--text); }
     .pillar p { font-size: 12.5px; color: var(--muted); margin: 6px 0 0; line-height: 1.6; }
     .pillar .fm { font-size: 11px; color: var(--faint); margin-top: 6px; }
-    .ev { font-size: 12.5px; color: var(--muted); line-height: 1.8; margin: 8px 0 0; padding-right: 18px; }
+    .ev { font-size: 12.5px; color: var(--muted); line-height: 1.8; margin: 8px 0 0; padding-left: 18px; }
     .post { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); padding: 14px 16px; margin-top: 12px; }
     .post.is-published { opacity: .72; border-style: dashed; }
     .post-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
@@ -33,7 +33,7 @@
     .draft { width: 100%; min-height: 180px; margin-top: 10px; font-family: var(--font-body, inherit); font-size: 13.5px;
              line-height: 1.7; padding: 12px; border-radius: 8px; border: 1px solid var(--border);
              background: var(--overlay); color: var(--text); resize: vertical; box-sizing: border-box; }
-    .draft[dir="ltr"] { text-align: left; }
+    .draft[dir="rtl"] { text-align: right; }
     .post-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
     .btn { cursor: pointer; transition: background .2s, border-color .2s; }
     .btn:focus-visible, .draft:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -51,7 +51,7 @@
 {% call hero(
      eyebrow='Client · plan',
      title=d.client.name ~ ' — Personal branding',
-     lede='الاستراتيجية وجدول المحتوى والمسودات. انسخ البوست، انشره، وبعدين اضغط "نشرته".',
+     lede='Strategy, monthly calendar and ready-to-post drafts. Copy a post, publish it, then mark it Posted.',
      figure=d.counts.published ~ ' / ' ~ (d.posts | length),
      figure_label='posts published this month',
      pill=(d.calendar.month or '—'),
@@ -64,24 +64,24 @@
 
 {% set s = d.strategy %}{% set pr = d.profile %}
 {% if not s %}
-  <div class="card"><p class="empty">لسه مفيش استراتيجية للعميل ده. ابدأ بالاستبيان.</p></div>
+  <div class="card"><p class="empty">No strategy for this client yet — start with the questionnaire.</p></div>
 {% else %}
 
 <div class="card">
-  <div class="card-title">{{ icon('sparkle') }} إنت مين</div>
+  <div class="card-title">{{ icon('sparkle') }} Positioning</div>
   <div class="pos">{{ s.positioning }}</div>
   <div class="facts">
-    {% if pr.goal %}<div class="fact"><div class="k">الهدف</div><div class="v">{{ pr.goal }}</div></div>{% endif %}
-    {% if pr.audience %}<div class="fact"><div class="k">الجمهور</div><div class="v">{{ pr.audience }}</div></div>{% endif %}
-    {% if pr.services %}<div class="fact"><div class="k">الخدمات</div><div class="v">{{ pr.services | join('، ') }}</div></div>{% endif %}
-    {% if s.cadence %}<div class="fact"><div class="k">النشر</div><div class="v">{{ s.cadence.posts_per_week }} بوست في الأسبوع — {{ s.cadence.plan }}</div></div>{% endif %}
-    {% if s.guardrails %}<div class="fact"><div class="k">مش هنتكلم في</div><div class="v">{{ s.guardrails | join(' · ') }}</div></div>{% endif %}
+    {% if pr.goal %}<div class="fact"><div class="k">Goal</div><div class="v">{{ pr.goal }}</div></div>{% endif %}
+    {% if pr.audience %}<div class="fact"><div class="k">Audience</div><div class="v">{{ pr.audience }}</div></div>{% endif %}
+    {% if pr.services %}<div class="fact"><div class="k">Services</div><div class="v">{{ pr.services | join(', ') }}</div></div>{% endif %}
+    {% if s.cadence %}<div class="fact"><div class="k">Cadence</div><div class="v">{{ s.cadence.posts_per_week }} posts / week — {{ s.cadence.plan }}</div></div>{% endif %}
+    {% if s.guardrails %}<div class="fact"><div class="k">Off-limits</div><div class="v">{{ s.guardrails | join(' · ') }}</div></div>{% endif %}
   </div>
 </div>
 
 {% if pr.awards %}
 <div class="card" style="margin-top: var(--space-md);">
-  <div class="card-title">{{ icon('check') }} الجوايز</div>
+  <div class="card-title">{{ icon('check') }} Awards</div>
   <div class="facts">
     {% for a in pr.awards %}
     <div class="fact"><div class="v" style="margin-top:0;"><b>{{ a.name }}</b></div>
@@ -92,7 +92,7 @@
 {% endif %}
 
 <div class="card" style="margin-top: var(--space-md);">
-  <div class="card-title">{{ icon('grid') }} المواضيع</div>
+  <div class="card-title">{{ icon('grid') }} Content pillars</div>
   <div class="pillars">
     {% for p in s.pillars or [] %}
     <div class="pillar"><b>{{ p.name }}</b><p>{{ p.why }}</p>
@@ -102,11 +102,11 @@
 </div>
 
 <div class="card" style="margin-top: var(--space-md);">
-  <div class="card-title">{{ icon('channels') }} دور كل منصة</div>
+  <div class="card-title">{{ icon('channels') }} Platform roles</div>
   <div class="facts">
     {% for name, pl in (s.platforms or {}).items() %}
     <div class="fact"><div class="v" style="margin-top:0;"><b>{{ name | friendly_platform }}</b></div>
-      <div class="v">{{ pl.role }}</div><div class="k" style="margin-top:6px;">اللغة: {{ pl.language }}</div></div>
+      <div class="v">{{ pl.role }}</div><div class="k" style="margin-top:6px;">Language: {{ pl.language }}</div></div>
     {% endfor %}
   </div>
   {% if s.evidence %}
@@ -116,33 +116,33 @@
 {% endif %}
 
 <div class="card" style="margin-top: var(--space-md);">
-  <div class="card-title">{{ icon('calendar') }} جدول الشهر</div>
-  {% if not d.posts %}<p class="empty">لسه مفيش جدول للشهر ده.</p>{% endif %}
+  <div class="card-title">{{ icon('calendar') }} Monthly calendar</div>
+  {% if not d.posts %}<p class="empty">No calendar for this month yet.</p>{% endif %}
   {% for p in d.posts %}
   {% set st = p.status or 'draft' %}
   <form class="post {{ 'is-published' if st == 'published' }}" method="post"
         action="/client/{{ d.client.client_id }}/plan/post" id="post-{{ loop.index }}">
     <input type="hidden" name="date" value="{{ p.date }}">
     <div class="post-head">
-      <div class="post-when">{{ loop.index }}. {{ p.day }} {{ p.date }}</div>
+      <div class="post-when">{{ loop.index }}. {{ p.date }}</div>
       <div class="chips">
         {% for pl in p.platforms %}<span class="chip is-on">{{ pl | friendly_platform }}</span>{% endfor %}
-        <span class="chip">{{ 'عربي' if p.lang == 'ar' else 'إنجليزي' }}</span>
-        <span class="chip">{{ {'draft':'مسودة','approved':'موافق عليه','published':'اتنشر','skipped':'اتلغى'}[st] }}</span>
+        <span class="chip">{{ 'Arabic' if p.lang == 'ar' else 'English' }}</span>
+        <span class="chip">{{ {'draft':'Draft','approved':'Approved','published':'Posted','skipped':'Skipped'}[st] }}</span>
       </div>
     </div>
     <div class="post-meta">{{ p.pillar }} · {{ p.format }}</div>
-    {% if p.needs %}<div class="needs">{{ icon('info') }} محتاج: {{ p.needs }}</div>{% endif %}
+    {% if p.needs %}<div class="needs">{{ icon('info') }} Needs: {{ p.needs }}</div>{% endif %}
     {% if p.review_note %}<div class="needs">{{ p.review_note }}</div>{% endif %}
     <textarea class="draft" name="draft" dir="{{ 'rtl' if p.lang == 'ar' else 'ltr' }}"
-              aria-label="مسودة البوست {{ loop.index }}">{{ p.draft }}</textarea>
+              aria-label="Draft for post {{ loop.index }}">{{ p.draft }}</textarea>
     <div class="post-actions">
-      <button type="button" class="btn btn-primary btn-sm js-copy">{{ icon('check') }} نسخ</button>
-      <button type="submit" name="action" value="save" class="btn btn-sm">{{ icon('pencil') }} حفظ التعديل</button>
+      <button type="button" class="btn btn-primary btn-sm js-copy">{{ icon('check') }} Copy</button>
+      <button type="submit" name="action" value="save" class="btn btn-sm">{{ icon('pencil') }} Save edit</button>
       {% if st != 'published' %}
-      <button type="submit" name="action" value="published" class="btn btn-sm">{{ icon('check') }} نشرته</button>
+      <button type="submit" name="action" value="published" class="btn btn-sm">{{ icon('check') }} Mark posted</button>
       {% else %}
-      <button type="submit" name="action" value="draft" class="btn btn-sm">{{ icon('refresh') }} رجّعه مسودة</button>
+      <button type="submit" name="action" value="draft" class="btn btn-sm">{{ icon('refresh') }} Back to draft</button>
       {% endif %}
     </div>
   </form>
@@ -159,7 +159,7 @@ document.querySelectorAll('textarea.draft').forEach(function (ta) {
 document.querySelectorAll('.js-copy').forEach(function (b) {
   b.addEventListener('click', function () {
     var ta = b.closest('form').querySelector('textarea');
-    var done = function () { var t = b.innerHTML; b.textContent = 'اتنسخ'; setTimeout(function(){ b.innerHTML = t; }, 1500); };
+    var done = function () { var t = b.innerHTML; b.textContent = 'Copied'; setTimeout(function(){ b.innerHTML = t; }, 1500); };
     if (navigator.clipboard) { navigator.clipboard.writeText(ta.value).then(done); }
     else { ta.select(); document.execCommand('copy'); done(); }
   });

@@ -8526,8 +8526,8 @@ def client_plan_post_update(client_id):
     status = action if action in ("published", "draft") else None
     ok = update_plan_post(client_id, date, status=status, draft=request.form.get("draft"),
                           db_path=_db_path())
-    msg = ("اتسجّل إنه اتنشر" if action == "published" else
-           "رجع مسودة" if action == "draft" else "اتحفظ التعديل") if ok else "مالقيتش البوست ده"
+    msg = ("Marked as posted" if action == "published" else
+           "Moved back to draft" if action == "draft" else "Edit saved") if ok else "Post not found"
     return redirect(f"/client/{client_id}/plan?scope=client:{client_id}&flash={msg}", 302)
 
 

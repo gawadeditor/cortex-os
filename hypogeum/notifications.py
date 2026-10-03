@@ -297,7 +297,9 @@ def route_signal(
     # ---- Telegram ----
     tg_token = getattr(config, "TELEGRAM_BOT_TOKEN", None)
     tg_chat = getattr(config, "TELEGRAM_CHAT_ID", None)
-    if tg_token and tg_chat:
+    # Config sets TELEGRAM_RAW_SIGNALS=False by default (operator_alerts owns
+    # the operator's Telegram); bare config objects keep the old behaviour.
+    if tg_token and tg_chat and getattr(config, "TELEGRAM_RAW_SIGNALS", True):
         body = format_signal_message(signal)
         did = _record_delivery(
             channel_name="telegram",

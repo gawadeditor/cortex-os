@@ -1,0 +1,397 @@
+"""
+hypogeum/operator_alerts.py — tell the operator about blockers on Telegram,
+once per problem, and once more when it is resolved.
+
+Why a separate layer from hypogeum.notifications.route_signal(): OIS signals
+are telemetry (disk_low / repeated_failure re-emitted every ~15 min, generic
+run_failed), so routing them to a phone is noise, while the real blockers of
+2026-10-03 (OpenRouter credits exhausted, the spend breaker pausing
+production, a Short waiting for its YouTube cover) raised nothing specific.
+This module runs a small set of checks, each answering "does the operator
+need to act?", keyed so a problem is sent once and its resolution once.
+
+    run_operator_checks(db_path=None, config=None, now=None) -> dict
+    alert(key, title, body, ...) / resolve(key, note, ...)   (also usable directly)
+
+Messages are written in Arabic (operator chat language); keys are stable
+English identifiers. Delivery uses notifications.send_telegram with
+TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID from Config; when those are unset the
+state is still tracked (so the dashboard/tests see it) and nothing is sent.
+Never raises.
+"""
+from __future__ import annotations
+
+import json
+import shutil
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Callable, Optional
+
+from hypogeum.logger import get_logger
+
+log = get_logger(agent="operator_alerts")
+
+_DDL = """
+CREATE TABLE IF NOT EXISTS operator_alerts (
+    alert_key     TEXT NOT NULL PRIMARY KEY,
+    status        TEXT NOT NULL CHECK(status IN ('open','resolved')),
+    title         TEXT NOT NULL,
+    body          TEXT,
+    opened_at     TEXT NOT NULL,
+    resolved_at   TEXT,
+    last_sent_at  TEXT,
+    send_ok       INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS operator_alert_checks (
+    check_name    TEXT NOT NULL PRIMARY KEY,
+    last_run_at   TEXT NOT NULL
+);
+"""
+
+# per-check minimum interval (seconds) — run_operator_checks is called from
+# every worker iteration (~60s); the network-backed checks run less often.
+_INTERVALS = {"openrouter_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
+              "youtube_covers": 300, "posts": 1800, "accounts": 600, "disk": 1800}
+_DASHBOARD = "http://127.0.0.1:5001"
+_CREDIT_LOW_USD = 3.0
+_DISK_LOW_GB, _DISK_OK_GB = 30.0, 40.0
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _conn(db_path):
+    from hypogeum.db import get_connection
+    c = get_connection(Path(db_path) if db_path else None)
+    c.executescript(_DDL)
+    return c
+
+
+def _sender(config) -> Optional[Callable[[str], bool]]:
+    token = getattr(config, "TELEGRAM_BOT_TOKEN", None) if config else None
+    chat = getattr(config, "TELEGRAM_CHAT_ID", None) if config else None
+    if not (token and chat):
+        return None
+    from hypogeum.notifications import send_telegram
+    return lambda text: send_telegram(text, token, str(chat))
+
+
+def _config(config):
+    if config is not None:
+        return config
+    try:
+        from hypogeum.config import Config
+        return Config()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def alert(key: str, title: str, body: str = "", *, db_path=None, config=None,
+          send: Optional[Callable[[str], bool]] = None) -> bool:
+    """Open an alert and send it — only if it isn't already open.
+    Returns True when a new alert was opened."""
+    try:
+        conn = _conn(db_path)
+        try:
+            row = conn.execute("SELECT status FROM operator_alerts WHERE alert_key=?", (key,)).fetchone()
+            if row and row["status"] == "open":
+                return False
+            send = send if send is not None else _sender(_config(config))
+            ok = bool(send(f"🔴 {title}\n\n{body}".strip())) if send is not None else False
+            now = _now().isoformat()
+            conn.execute(
+                "INSERT INTO operator_alerts (alert_key, status, title, body, opened_at, resolved_at, last_sent_at, send_ok) "
+                "VALUES (?,?,?,?,?,NULL,?,?) ON CONFLICT(alert_key) DO UPDATE SET status='open', title=excluded.title, "
+                "body=excluded.body, opened_at=excluded.opened_at, resolved_at=NULL, last_sent_at=excluded.last_sent_at, "
+                "send_ok=excluded.send_ok",
+                (key, "open", title, body, now, now if send is not None else None, 1 if ok else 0))
+            conn.commit()
+        finally:
+            conn.close()
+        log.info("operator_alert_opened", key=key, sent=ok)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warn("operator_alert_failed", key=key, error=str(exc)[:200])
+        return False
+
+
+def resolve(key: str, note: str = "", *, db_path=None, config=None,
+            send: Optional[Callable[[str], bool]] = None) -> bool:
+    """Close an open alert and send one 'resolved' message. Returns True if
+    something was open."""
+    try:
+        conn = _conn(db_path)
+        try:
+            row = conn.execute("SELECT status, title FROM operator_alerts WHERE alert_key=?", (key,)).fetchone()
+            if not row or row["status"] != "open":
+                return False
+            send = send if send is not None else _sender(_config(config))
+            if send is not None:
+                send(f"🟢 اتحلت: {row['title']}" + (f"\n{note}" if note else ""))
+            conn.execute("UPDATE operator_alerts SET status='resolved', resolved_at=? WHERE alert_key=?",
+                         (_now().isoformat(), key))
+            conn.commit()
+        finally:
+            conn.close()
+        log.info("operator_alert_resolved", key=key)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warn("operator_alert_resolve_failed", key=key, error=str(exc)[:200])
+        return False
+
+
+def open_alert_keys(prefix: str = "", db_path=None) -> set:
+    conn = _conn(db_path)
+    try:
+        return {r["alert_key"] for r in conn.execute(
+            "SELECT alert_key FROM operator_alerts WHERE status='open' AND alert_key LIKE ?", (prefix + "%",))}
+    finally:
+        conn.close()
+
+
+def _due(name: str, now: datetime, db_path) -> bool:
+    conn = _conn(db_path)
+    try:
+        row = conn.execute("SELECT last_run_at FROM operator_alert_checks WHERE check_name=?", (name,)).fetchone()
+        if row and (now - datetime.fromisoformat(row["last_run_at"])).total_seconds() < _INTERVALS.get(name, 300):
+            return False
+        conn.execute("INSERT INTO operator_alert_checks (check_name, last_run_at) VALUES (?,?) "
+                     "ON CONFLICT(check_name) DO UPDATE SET last_run_at=excluded.last_run_at", (name, now.isoformat()))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def _sync(prefix: str, current: dict, db_path, config, send, resolved_note: str = "") -> None:
+    """current = {key: (title, body)} — open new ones, resolve vanished ones."""
+    for key, (title, body) in current.items():
+        alert(key, title, body, db_path=db_path, config=config, send=send)
+    for key in open_alert_keys(prefix, db_path) - set(current):
+        resolve(key, resolved_note, db_path=db_path, config=config, send=send)
+
+
+# ---------------------------------------------------------------------------
+# checks — each returns {key: (title, body)} for what needs the operator now
+# ---------------------------------------------------------------------------
+
+def check_openrouter_credits(config, *, http_get=None) -> Optional[dict]:
+    """None = couldn't tell (network) -> leave state unchanged."""
+    key = getattr(config, "OPENROUTER_API_KEY", None) if config else None
+    if not key:
+        return None
+    try:
+        if http_get is None:
+            import urllib.request
+            req = urllib.request.Request("https://openrouter.ai/api/v1/credits",
+                                         headers={"Authorization": f"Bearer {key}"})
+            data = json.load(urllib.request.urlopen(req, timeout=15)).get("data") or {}
+        else:
+            data = http_get()
+        left = float(data.get("total_credits") or 0) - float(data.get("total_usage") or 0)
+    except Exception:  # noqa: BLE001
+        return None
+    if left < _CREDIT_LOW_USD:
+        return {"openrouter:credits": (
+            "رصيد OpenRouter قرّب يخلص" if left > 0 else "رصيد OpenRouter خلص",
+            f"الباقي: ${left:.2f}. المصنع بيستخدمه في كتابة الحلقات، ولو خلص الإنتاج بيقف.\n"
+            "اشحن من openrouter.ai ← Credits (الحساب اللي فيه مفتاح المصنع).")}
+    return {}
+
+
+def check_production_paused(db_path) -> dict:
+    from hypogeum.db import get_worker_control
+    if get_worker_control("queue_paused", "0", db_path=Path(db_path) if db_path else None) != "1":
+        return {}
+    reason = get_worker_control("queue_paused_reason", "", db_path=Path(db_path) if db_path else None) or "سبب غير مكتوب"
+    return {"production:paused": ("الإنتاج واقف",
+                                  f"المصنع وقّف إنتاج الحلقات الجديدة. النشر شغال عادي.\nالسبب: {reason}\n"
+                                  "لازم السبب يتحل الأول، وبعدين الإنتاج يرجع.")}
+
+
+def check_worker(db_path, now: datetime) -> dict:
+    """The worker writes worker_heartbeat_at once per loop iteration — which
+    can't happen while it's inside a pipeline run, so allow a long gap then."""
+    from hypogeum.db import get_worker_control
+    raw = get_worker_control("worker_heartbeat_at", "", db_path=Path(db_path) if db_path else None)
+    status = get_worker_control("worker_status", "", db_path=Path(db_path) if db_path else None)
+    try:
+        hb = datetime.fromisoformat(raw)
+        if hb.tzinfo is None:
+            hb = hb.replace(tzinfo=timezone.utc)
+    except Exception:  # noqa: BLE001
+        return {}
+    limit_min = 240 if status == "running" else 20
+    gap_min = (now - hb).total_seconds() / 60
+    if gap_min <= limit_min:
+        return {}
+    return {"worker:down": ("الـ worker مش شغال",
+                            f"آخر نبضة منه من {gap_min:.0f} دقيقة (حالته: {status or '?'}).\n"
+                            "من غيره مفيش حلقات جديدة بتتعمل ولا بتتجدول. "
+                            "شغّله تاني: launchctl kickstart -k gui/$(id -u)/com.hypogeum.worker")}
+
+
+def check_blocking_signals(db_path) -> dict:
+    from hypogeum.db import get_connection
+    conn = get_connection(Path(db_path) if db_path else None)
+    try:
+        rows = conn.execute("SELECT signal_type, channel_id, full_record FROM signal_records "
+                            "WHERE blocking=1 AND lifecycle_status='open' ORDER BY ingested_at DESC").fetchall()
+    finally:
+        conn.close()
+    out = {}
+    for r in rows:
+        key = f"signal:{r['signal_type']}:{r['channel_id'] or 'factory'}"
+        if key in out:
+            continue
+        try:
+            msg = (json.loads(r["full_record"] or "{}") or {}).get("message") or ""
+        except Exception:  # noqa: BLE001
+            msg = ""
+        out[key] = (f"تنبيه موقّف: {r['signal_type']}" + (f" ({r['channel_id']})" if r["channel_id"] else ""),
+                    (msg[:400] + "\n" if msg else "") + "طول ما التنبيه ده مفتوح، الإنتاج واقف.")
+    return out
+
+
+def check_youtube_covers(db_path, now: datetime) -> dict:
+    """Held Shorts already uploaded (private) on YouTube and still waiting for
+    the operator's cover — the release slot can't go public without it."""
+    from hypogeum.db import get_connection
+    conn = get_connection(Path(db_path) if db_path else None)
+    try:
+        rows = conn.execute(
+            "SELECT h.post_id, h.channel_id, h.release_at, h.status FROM youtube_cover_holds h "
+            "WHERE h.status IN ('held','late','release_failed') AND h.upload_at <= ? "
+            "AND h.post_id NOT IN (SELECT post_id FROM youtube_cover_confirmations)",
+            (now.strftime("%Y-%m-%dT%H:%M:%S"),)).fetchall()
+    except Exception:  # noqa: BLE001 — table absent on a fresh DB
+        return {}
+    finally:
+        conn.close()
+    out = {}
+    for r in rows:
+        try:
+            rel = datetime.fromisoformat(r["release_at"].replace("Z", "+00:00"))
+            local = (rel + timedelta(hours=4)).strftime("%a %d %b %H:%M")
+        except Exception:  # noqa: BLE001
+            local = r["release_at"]
+        late = r["status"] != "held"
+        out[f"cover:{r['post_id']}"] = (
+            f"شورت {r['channel_id']} " + ("فات ميعاده ولسه private" if late else "مستني غلاف يوتيوب"),
+            ("ميعاد النشر عدّى والشورت لسه مش للعامة. " if late else "")
+            + f"اترفع private، ومش هيتنشر للعامة غير بعد الغلاف.\nميعاد النشر: {local} (دبي)\n"
+            f"الغلاف والرابط في الـ Content Grid: {_DASHBOARD}/channel/{r['channel_id']}/grid")
+    return out
+
+
+def check_posts(db_path, now: datetime) -> dict:
+    """Zernio posts the Content Grid flags: a platform failed / stuck
+    (needs_attention), or a live Short whose Studio cover isn't confirmed.
+    Only posts slotted in the last 3 days — older failures are history, not
+    something the operator can still act on in time."""
+    from hypogeum.db import get_connection
+    from hypogeum.dashboard_content_grid import get_content_grid
+    conn = get_connection(Path(db_path) if db_path else None)
+    try:
+        channels = [r[0] for r in conn.execute(
+            "SELECT DISTINCT channel_id FROM channel_provider_bindings WHERE channel_id IS NOT NULL")]
+    finally:
+        conn.close()
+    since = (now - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%S")
+    out = {}
+    for ch in channels:
+        for it in get_content_grid(ch, db_path=Path(db_path) if db_path else None):
+            if (it.get("scheduled_for") or it.get("published_at") or "") < since:
+                continue
+            title = (it.get("display_title") or it["post_id"])[:80]
+            if it.get("needs_attention"):
+                stuck = ", ".join(x for x in (it.get("not_yet_live_platforms") or []) if x) or "?"
+                out[f"post:{it['post_id']}"] = (
+                    f"بوست على {ch} مانزلش صح",
+                    f"«{title}»\nحالته في Zernio: {it.get('status')} — المنصات اللي لسه: {stuck}\n"
+                    f"{_DASHBOARD}/channel/{ch}/grid")
+            if it.get("youtube_cover_pending"):
+                out[f"postcover:{it['post_id']}"] = (
+                    f"شورت {ch} نزل على يوتيوب من غير تأكيد الغلاف",
+                    f"«{title}»\nارفع الغلاف من YouTube Studio واضغط Done في الـ Content Grid:\n"
+                    f"{_DASHBOARD}/channel/{ch}/grid")
+    return out
+
+
+def check_accounts(db_path) -> dict:
+    from hypogeum.db import get_connection
+    conn = get_connection(Path(db_path) if db_path else None)
+    try:
+        rows = conn.execute("SELECT provider_id, platform, display_label FROM provider_accounts "
+                            "WHERE needs_reconnection=1 OR status NOT IN ('active')").fetchall()
+    except Exception:  # noqa: BLE001
+        return {}
+    finally:
+        conn.close()
+    return {f"account:{r['provider_id']}:{r['platform']}:{r['display_label']}": (
+        f"حساب محتاج يتربط تاني: {r['platform']} ({r['provider_id']})",
+        f"{r['display_label'] or ''}\nالنشر على الحساب ده هيفشل لحد ما يتربط من جديد.") for r in rows}
+
+
+def check_disk(path: str = "/System/Volumes/Data", *, usage=None) -> dict:
+    try:
+        u = usage or shutil.disk_usage(path if Path(path).exists() else "/")
+    except Exception:  # noqa: BLE001
+        return {}
+    free_gb = u.free / 1e9
+    if free_gb < _DISK_LOW_GB:
+        return {"disk:low": ("مساحة الهارد قرّبت تخلص",
+                             f"الفاضي {free_gb:.0f} جيجا بس. لو الهارد اتملى المصنع هيقف.\n"
+                             "فضّي مساحة (ملفات كبيرة، تنزيلات قديمة، أو انقل حاجات للأرشيف).")}
+    return {} if free_gb >= _DISK_OK_GB else None   # between thresholds: keep current state
+
+
+def run_operator_checks(*, db_path=None, config=None, now: Optional[datetime] = None,
+                        send: Optional[Callable[[str], bool]] = None, force: bool = False) -> dict:
+    """Run every due check; open/resolve alerts. Returns {check: n_open}."""
+    now = now or _now()
+    config = _config(config)
+    out: dict = {}
+    checks = [
+        ("openrouter_credits", "openrouter:", lambda: check_openrouter_credits(config)),
+        ("worker", "worker:", lambda: check_worker(db_path, now)),
+        ("production_paused", "production:", lambda: check_production_paused(db_path)),
+        ("blocking_signals", "signal:", lambda: check_blocking_signals(db_path)),
+        ("youtube_covers", "cover:", lambda: check_youtube_covers(db_path, now)),
+        ("posts", "post", lambda: check_posts(db_path, now)),
+        ("accounts", "account:", lambda: check_accounts(db_path)),
+        ("disk", "disk:", lambda: check_disk()),
+    ]
+    for name, prefix, fn in checks:
+        try:
+            if not force and not _due(name, now, db_path):
+                continue
+            current = fn()
+            if current is None:
+                continue
+            _sync(prefix, current, db_path, config, send)
+            out[name] = len(current)
+        except Exception as exc:  # noqa: BLE001
+            log.warn("operator_check_failed", check=name, error=str(exc)[:200])
+    return out
+
+
+def start_operator_alerts_loop(db_path=None, *, check_every_s: int = 60):
+    """Run the checks from the dashboard process (always up via its
+    LaunchAgent) rather than the worker, which blocks for the length of a
+    pipeline run and is itself one of the things being watched."""
+    import threading
+    stop = threading.Event()
+
+    def _loop():
+        stop.wait(20)   # let startup settle (sleep-wake DB contention)
+        while not stop.is_set():
+            run_operator_checks(db_path=db_path)
+            stop.wait(check_every_s)
+
+    t = threading.Thread(target=_loop, name="operator-alerts", daemon=True)
+    t.stop_event = stop  # type: ignore[attr-defined]
+    t.start()
+    log.info("operator_alerts_loop_started", check_every_s=check_every_s)
+    return t

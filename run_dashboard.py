@@ -11323,6 +11323,11 @@ def main():
     from hypogeum.publishing.youtube_cover_hold import start_youtube_cover_hold_loop
     start_youtube_cover_hold_loop(_db_path())
 
+    # Tell the operator on Telegram about blockers — once per problem, once
+    # when resolved (no-op until TELEGRAM_BOT_TOKEN/CHAT_ID are set).
+    from hypogeum.operator_alerts import start_operator_alerts_loop
+    start_operator_alerts_loop(_db_path())
+
     app.run(host=args.host, port=args.port, debug=False)
 
 

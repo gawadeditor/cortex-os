@@ -446,6 +446,7 @@ class Config:
     # ------------------------------------------------------------------
     TELEGRAM_BOT_TOKEN: Optional[str]
     TELEGRAM_CHAT_ID: Optional[str]
+    TELEGRAM_RAW_SIGNALS: bool         # default: False — operator_alerts owns Telegram
     NOTIFY_EMAIL_FROM: Optional[str]
     NOTIFY_EMAIL_TO: Optional[str]
     NOTIFY_SMTP_HOST: Optional[str]
@@ -875,6 +876,10 @@ class Config:
         # --- Notifications ---
         self.TELEGRAM_BOT_TOKEN = _get_optional("TELEGRAM_BOT_TOKEN")
         self.TELEGRAM_CHAT_ID = _get_optional("TELEGRAM_CHAT_ID")
+        # Raw OIS signals (disk_low / repeated_failure re-emit every ~15 min)
+        # are not routed to Telegram unless asked; hypogeum.operator_alerts
+        # sends one message per real blocker instead.
+        self.TELEGRAM_RAW_SIGNALS = _get_bool("TELEGRAM_RAW_SIGNALS", default=False)
         self.NOTIFY_EMAIL_FROM = _get_optional("NOTIFY_EMAIL_FROM")
         self.NOTIFY_EMAIL_TO = _get_optional("NOTIFY_EMAIL_TO")
         self.NOTIFY_SMTP_HOST = _get_optional("NOTIFY_SMTP_HOST")

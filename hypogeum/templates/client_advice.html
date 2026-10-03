@@ -64,7 +64,7 @@
   <p style="font-size:12.5px;line-height:1.55;margin-top:12px;color:var(--text);">{{ ba.verdict }}</p>
 </div>
 {% elif ba and ba.reason %}
-<p class="note" style="margin-bottom:var(--space-md);">Before/after comparison: {{ ba.reason }}. Set a "Managed since" date on the client to enable it.</p>
+<p class="note" style="margin-bottom:var(--space-md);">Before vs after: {{ ba.hint or ba.reason }}</p>
 {% endif %}
 
 {% if d.what_works %}

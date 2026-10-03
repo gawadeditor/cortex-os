@@ -117,14 +117,18 @@ def _phase_stats(rows: list[dict]) -> dict:
 def _before_after(client: dict, rows: list[dict]) -> Optional[dict]:
     ms = client.get("managed_since")
     if not ms:
-        return {"available": False, "reason": "no managed_since date set on the client"}
+        return {"available": False, "reason": "no managed_since date set on the client",
+                "hint": "Set a start date (Accounts → Client settings → Managed since) to compare "
+                        "results before and after it."}
     dated = [r for r in rows if r.get("published_at")]
     before = [r for r in dated if r["published_at"][:10] < ms[:10]]
     after = [r for r in dated if r["published_at"][:10] >= ms[:10]]
     if len(before) < 2 or len(after) < 2:
         return {"available": False,
                 "reason": f"need >=2 posts each side of {ms[:10]} "
-                          f"(have {len(before)} before, {len(after)} after)"}
+                          f"(have {len(before)} before, {len(after)} after)",
+                "hint": f"Comparison against {ms[:10]} starts once there are at least 2 posts on "
+                        f"each side — {len(before)} before, {len(after)} after so far."}
     b, a = _phase_stats(before), _phase_stats(after)
     deltas = {}
     for key in ("engagement", "retention", "avg_views", "per_week"):
@@ -328,7 +332,9 @@ def generate_client_advisory(client_id: str, *,
         out["summary"] = _ba_pre + (
             f"{client['name']}: {_vs}, but nothing yet separates them on a "
             "single measurable axis. More posts (and thumbnails to analyse) will sharpen this.")
-        out["reason"] = "no axis cleared the honesty threshold"
+        out["reason"] = ("The best and weakest posts don't yet differ clearly on timing, opening line, "
+                         "image or caption length. Content analysis of each post (and more recent posts) "
+                         "is what surfaces these differences.")
 
     out["ok"] = True
     log.info("client_advisory_generated", client_id=client_id,

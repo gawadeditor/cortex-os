@@ -186,3 +186,15 @@ def test_mark_posted_tops_up_drafts_in_background(db, monkeypatch):
         assert plan["generation"]["state"] == "done" and plan["pending_ahead"] == 2
     finally:
         rd.app.config["DB_PATH"] = old
+
+
+def test_paused_drafting_writes_nothing(db):
+    from hypogeum.dashboard_clients import set_drafts_paused
+    bsa.generate_strategy("me", db_path=db, llm=FakeLLM(STRATEGY))
+    set_drafts_paused("me", True, db_path=db)
+    llm = FakeLLM(_slot_reply)
+    assert bsa.draft_next_posts("me", db_path=db, llm=llm, today=date(2026, 10, 27)) == []
+    assert llm.calls == []
+    assert get_client_plan("me", db_path=db)["drafts_paused"] is True
+    set_drafts_paused("me", False, db_path=db)
+    assert len(bsa.draft_next_posts("me", db_path=db, llm=llm, today=date(2026, 10, 27))) == 2

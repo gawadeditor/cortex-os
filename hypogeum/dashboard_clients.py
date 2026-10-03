@@ -299,6 +299,7 @@ def get_client_plan(client_id: str, db_path: Optional[Path] = None, month: Optio
             "counts": counts, "months": sorted(cals), "month": month,
             "generation": brief.get("generation_status") or {},
             "drafts_ahead": int((brief.get("brand_profile") or {}).get("drafts_ahead") or 2),
+            "drafts_paused": bool((brief.get("brand_profile") or {}).get("drafts_paused")),
             "pending_ahead": _pending_ahead(cals),
             "generation_log": list(brief.get("generation_log") or [])[-5:]}
 
@@ -434,5 +435,17 @@ def save_questionnaire(client_id: str, form, db_path: Optional[Path] = None) -> 
     if lang:
         prof["languages"] = {"English": ["en"], "Arabic": ["ar"], "Both": ["en", "ar"]}.get(lang, prof.get("languages"))
     prof["answered_at"] = datetime.now(timezone.utc).date().isoformat()
+    brief["brand_profile"] = prof
+    return cm.update_client(client_id, brief=brief, db_path=db_path)
+
+
+def set_drafts_paused(client_id: str, paused: bool, db_path: Optional[Path] = None) -> bool:
+    from hypogeum import client_manager as cm
+    client = cm.get_client(client_id, db_path=db_path)
+    if not client:
+        return False
+    brief = dict(client.get("brief") or {})
+    prof = dict(brief.get("brand_profile") or {})
+    prof["drafts_paused"] = bool(paused)
     brief["brand_profile"] = prof
     return cm.update_client(client_id, brief=brief, db_path=db_path)

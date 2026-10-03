@@ -8538,6 +8538,16 @@ def _set_generation_status(client_id, db, **status):
     _cm.update_client(client_id, brief=b, db_path=db)
 
 
+@app.route("/client/<client_id>/plan/drafting", methods=["POST"])
+def client_plan_drafting(client_id):
+    """Pause / resume automatic drafting for a client."""
+    from hypogeum.dashboard_clients import set_drafts_paused
+    paused = (request.form.get("paused") or "") == "1"
+    ok = set_drafts_paused(client_id, paused, db_path=_db_path())
+    msg = ("Automatic drafting paused" if paused else "Automatic drafting resumed") if ok else "Client not found"
+    return redirect(f"/client/{client_id}/plan?scope=client:{client_id}&flash={msg}", 302)
+
+
 @app.route("/client/<client_id>/plan/generate", methods=["POST"])
 def client_plan_generate(client_id):
     """Start strategy or calendar generation in the background (LLM, cost-gated)."""

@@ -80,13 +80,20 @@
           {{ icon('sparkle') }} {{ 'Regenerate strategy' if d.strategy else 'Generate strategy' }}</button>
       </form>
       {% if d.strategy %}
+      {% if not d.drafts_paused %}
       <form method="post" action="/client/{{ d.client.client_id }}/plan/generate" style="display:inline;">
         <input type="hidden" name="what" value="drafts">
         <button class="btn btn-sm btn-primary" type="submit">{{ icon('pencil') }} Top up to {{ d.drafts_ahead }} drafts</button>
       </form>
       {% endif %}
+      <form method="post" action="/client/{{ d.client.client_id }}/plan/drafting" style="display:inline;">
+        <input type="hidden" name="paused" value="{{ '0' if d.drafts_paused else '1' }}">
+        <button class="btn btn-sm" type="submit">{{ icon('play' if d.drafts_paused else 'pause') }} {{ 'Resume automatic drafting' if d.drafts_paused else 'Pause automatic drafting' }}</button>
+      </form>
+      {% endif %}
     </div>
     {% if not d.profile.answered_at %}<p class="note">Answer the questionnaire first.</p>
+    {% elif d.strategy and d.drafts_paused %}<p class="note">Automatic drafting is paused — no new drafts are written, even when a post is marked as posted.</p>
     {% elif d.strategy %}<p class="note">{{ d.pending_ahead }} unposted draft{{ 's' if d.pending_ahead != 1 }} ahead. Cortex keeps {{ d.drafts_ahead }} ready — each post you mark as posted gets replaced by a new draft.</p>{% endif %}
   {% endif %}
   {% if d.generation_log %}

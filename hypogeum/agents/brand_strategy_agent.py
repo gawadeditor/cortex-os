@@ -333,7 +333,10 @@ def draft_next_posts(client_id: str, *, db_path: Optional[Path] = None, llm: Opt
     if not strategy:
         raise BrandGenerationError("generate a strategy first")
     today = today or datetime.now(timezone.utc).date()
-    ahead = int(ahead or (brief.get("brand_profile") or {}).get("drafts_ahead") or DRAFTS_AHEAD)
+    prof = brief.get("brand_profile") or {}
+    if ahead is None and prof.get("drafts_paused"):
+        return []   # operator paused drafting for this client
+    ahead = int(ahead if ahead is not None else (prof.get("drafts_ahead") or DRAFTS_AHEAD))
     posts = _all_posts(brief)
     pending = [p for p in posts if (p.get("status") or "draft") in ("draft", "approved")
                and p.get("date", "") > today.isoformat()]

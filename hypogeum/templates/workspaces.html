@@ -90,7 +90,7 @@
       </div>
       <div class="ws-stat">
         <div class="k">Alert language</div>
-        <div class="v">{{ 'Arabic' if w.language == 'ar' else 'English' }}</div>
+        <div class="v">{% if w.kind == 'platform_owner' %}Arabic (operator){% else %}{{ 'Arabic' if w.language == 'ar' else 'English' }}{% endif %}</div>
       </div>
     </div>
 

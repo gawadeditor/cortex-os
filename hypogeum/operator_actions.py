@@ -259,11 +259,85 @@ def status_text(db_path=None) -> tuple:
     finally:
         conn.close()
     if run:
-        lines.append(f"• آخر حلقة: {run['channel_id']} {run['episode_id']} — {run['status']} ({run['started_at'][:16]} UTC)")
+        lines.append(_last_run_line(dict(run), dbp))
+    lines += _outlook_lines(dbp)
     if covers:
         lines.append(f"• أغلفة يوتيوب مستنية: {covers}")
     lines.append("• تنبيهات مفتوحة: " + ("، ".join(opened) if opened else "مفيش"))
     return "\n".join(lines), ({"inline_keyboard": rows} if rows else None)
+
+
+_DUBAI_TZ = "Asia/Dubai"
+
+
+def _local(iso: str) -> str:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(ZoneInfo(_DUBAI_TZ)).strftime("%a %d %b %H:%M")
+    except Exception:  # noqa: BLE001
+        return iso[:16]
+
+
+def _plain_error(err: str) -> str:
+    e = err or ""
+    if "already registered with implementation checksum" in e:
+        return "كود الـ adapters اتغير ومتسجلش"
+    if "credits exhausted" in e.lower() or "402" in e:
+        return "رصيد OpenRouter خلص"
+    if "lease unavailable" in e:
+        return "حجز قديم ما اتفكّش"
+    return e[:90] or "سبب غير مكتوب"
+
+
+def _last_run_line(run: dict, dbp) -> str:
+    from hypogeum.db import get_connection, get_worker_control
+    line = f"• آخر حلقة: {run['channel_id']} — {run['status']} ({_local(run['started_at'])})"
+    if run["status"] not in ("failed", "error"):
+        return line
+    conn = get_connection(dbp)
+    try:
+        err = (conn.execute("SELECT error_message FROM runs WHERE run_id = (SELECT run_id FROM runs "
+                            "WHERE episode_id=? ORDER BY started_at DESC LIMIT 1)", (run["episode_id"],)).fetchone()
+               or [""])[0]
+    finally:
+        conn.close()
+    cleared = get_worker_control("breaker_cleared_at", "", db_path=dbp) or ""
+    fixed = " — ✅ اتعالج والإنتاج رجع بعدها" if cleared > run["started_at"] else ""
+    return f"{line}\n   السبب: {_plain_error(err)}{fixed}"
+
+
+def _outlook_lines(dbp) -> list:
+    """Per channel: how many episodes are ready ahead, and when the next one
+    gets produced (or why not yet)."""
+    from datetime import datetime, timezone
+    from hypogeum.db import get_connection
+    from hypogeum import scheduler as sch
+    now = datetime.now(timezone.utc)
+    out = []
+    conn = get_connection(dbp)
+    try:
+        for r in conn.execute("SELECT channel_id, next_run_at, max_runs_per_day FROM schedules "
+                              "WHERE status='active' AND channel_id IS NOT NULL ORDER BY channel_id"):
+            ch = r["channel_id"]
+            depth = sch.channel_buffer_depth(ch, conn, now=now)
+            target = sch._env_int("PRODUCTION_BUFFER_TARGET", sch._PRODUCTION_BUFFER_TARGET)
+            day_start = sch._channel_local_day_start_utc(ch, now, dbp)
+            used = sch._scheduled_runs_since(ch, conn, day_start.isoformat())
+            cap = r["max_runs_per_day"] or 0
+            if target and depth >= target:
+                nxt = "مفيش إنتاج لازم دلوقتي"
+            elif cap and used >= cap:
+                from datetime import timedelta
+                nxt = f"محاولة النهارده اتاخدت، الجاية {_local((day_start + timedelta(days=1)).isoformat())}"
+            else:
+                nxt = f"الحلقة الجاية تتعمل عند {_local(r['next_run_at'])} أو أقرب"
+            out.append(f"• {ch}: {depth} حلقة جاهزة قدام (الهدف {target}) — {nxt}")
+    except Exception as exc:  # noqa: BLE001
+        log.warn("status_outlook_failed", error=str(exc)[:200])
+    finally:
+        conn.close()
+    return out
 
 
 _HELP = ("أوامر البوت:\n/status — حالة المصنع وزراير لأي حاجة محتاجة تدخّل\n/help — الأوامر دي\n\n"

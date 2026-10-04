@@ -92,6 +92,13 @@ def buttons_for(alert_key: str, db_path=None) -> Optional[dict]:
         rows = [[_btn("📊 إيه اللي واخد المساحة", "disk")]]
     elif alert_key == "system:adapters_stale":
         rows = [[_btn("🛠 سجّل الـ adapters", "adapters")]]
+    elif alert_key.startswith("run_failed:"):
+        err = _last_error(alert_key.split(":", 1)[1], db_path)
+        if "already registered with implementation checksum" in err:
+            rows = [[_btn("🛠 سجّل الـ adapters", "adapters")]]
+        elif "credits exhausted" in err.lower() or "402" in err:
+            rows = [[_url("💳 اشحن OpenRouter", "https://openrouter.ai/settings/credits")]]
+        rows = rows + [[_btn("📋 حالة المصنع", "status")]]
     elif alert_key.startswith(("openrouter:", "openrouter_ws:")):
         rows = [[_url("💳 اشحن OpenRouter", "https://openrouter.ai/settings/credits")]]
     elif alert_key.startswith(("cover:", "postcover:")):
@@ -100,6 +107,20 @@ def buttons_for(alert_key: str, db_path=None) -> Optional[dict]:
         rows = ([[_url("🎬 افتح YouTube Studio", studio)]] if studio else []) + \
                [[_btn("✅ رفعت الغلاف", "cover_done", post_id)]]
     return {"inline_keyboard": rows} if rows else None
+
+
+def _last_error(episode_id: str, db_path) -> str:
+    from hypogeum.db import get_connection
+    try:
+        conn = get_connection(_p(db_path))
+        try:
+            r = conn.execute("SELECT error_message FROM runs WHERE episode_id=? ORDER BY started_at DESC LIMIT 1",
+                             (episode_id,)).fetchone()
+        finally:
+            conn.close()
+        return (r[0] or "") if r else ""
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +308,12 @@ def _plain_error(err: str) -> str:
         return "رصيد OpenRouter خلص"
     if "lease unavailable" in e:
         return "حجز قديم ما اتفكّش"
+    if "budget" in e.lower() and ("ceiling" in e.lower() or "exceed" in e.lower()):
+        return "عدّى سقف الميزانية"
+    if "timeout" in e.lower() or "timed out" in e.lower():
+        return "مزوّد الخدمة ما ردش في الوقت"
+    if "401" in e or "unauthorized" in e.lower() or "invalid api key" in e.lower():
+        return "مفتاح API مرفوض"
     return e[:90] or "سبب غير مكتوب"
 
 

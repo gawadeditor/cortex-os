@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS operator_alert_checks (
 
 # per-check minimum interval (seconds) — run_operator_checks is called from
 # every worker iteration (~60s); the network-backed checks run less often.
-_INTERVALS = {"adapters": 300, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
+_INTERVALS = {"adapters": 300, "run_failures": 60, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
               "youtube_covers": 300, "posts": 1800, "accounts": 600, "archive": 300, "disk": 1800}
 _DASHBOARD = "http://127.0.0.1:5001"
 _CREDIT_LOW_USD = 3.0
@@ -171,8 +171,8 @@ def resolve(key: str, note: str = "", *, db_path=None, config=None,
             conn.commit()   # before sending, as in alert()
             ar_text = f"🟢 اتحلت: {row['title']}" + (f"\n{note}" if note else "")
             en_text = f"🟢 Resolved: {row['title_en']}" if row["title_en"] else None
-            if not row["send_ok"]:
-                pass   # its alert never reached anyone: a lone "resolved" only confuses (2026-10-04)
+            if not row["send_ok"] or key.startswith("run_failed:"):
+                pass   # never reached anyone (2026-10-04) / a failure report needs no "resolved" follow-up
             elif send is not None:
                 send(ar_text)
             else:
@@ -291,15 +291,66 @@ def check_workspace_credits(db_path, *, http_get=None) -> Optional[dict]:
     return out
 
 
+def _recent_failures(db_path, since_iso: str, limit: int = 40) -> list:
+    conn = _conn(db_path, ddl=False)
+    try:
+        return [dict(r) for r in conn.execute(
+            "SELECT run_id, channel_id, episode_id, status, started_at, error_message FROM runs "
+            "WHERE started_at >= ? ORDER BY started_at DESC LIMIT ?", (since_iso, limit))]
+    except Exception:  # noqa: BLE001
+        return []
+    finally:
+        conn.close()
+
+
+def check_run_failures(db_path, now: datetime) -> dict:
+    """One alert per episode whose latest run failed in the last 6h — with the
+    cause in plain words (2026-10-05: "لازم تجيلي رسالة اية سبب المشكلة").
+    Retries of the same episode don't add messages; it closes silently once
+    that episode runs again successfully or the failure ages out."""
+    from hypogeum.db import get_worker_control
+    from hypogeum.operator_actions import _plain_error
+    since = (now - timedelta(hours=6)).isoformat()
+    # failures from before the operator's last resume were already dealt with
+    cleared = get_worker_control("breaker_cleared_at", "", db_path=Path(db_path) if db_path else None) or ""
+    since = max(since, cleared)
+    latest: dict = {}
+    for r in _recent_failures(db_path, since):
+        latest.setdefault(r["episode_id"], r)      # newest first
+    out = {}
+    for ep, r in latest.items():
+        if r["status"] not in ("failed", "error"):
+            continue
+        cause = _plain_error(r.get("error_message") or "")
+        raw = (r.get("error_message") or "").strip().splitlines()[0][:220] if r.get("error_message") else ""
+        out[f"run_failed:{ep}"] = (
+            f"حلقة {r['channel_id']} فشلت",
+            f"السبب: {cause}\nالحلقة: {ep}\nالتفاصيل: {raw}",
+            _ws_extra(r["channel_id"], db_path, (f"{r['channel_id']}: an episode failed", f"Cause: {raw[:160]}")))
+    return out
+
+
 def check_production_paused(db_path) -> dict:
     from hypogeum.db import get_worker_control
     dbp = Path(db_path) if db_path else None
     out = {}
     if get_worker_control("queue_paused", "0", db_path=dbp) == "1":
         reason = get_worker_control("queue_paused_reason", "", db_path=dbp) or "سبب غير مكتوب"
+        causes = ""
+        try:
+            from hypogeum.operator_actions import _plain_error
+            fails = [r for r in _recent_failures(dbp, (_now() - timedelta(hours=12)).isoformat(), 10)
+                     if r["status"] in ("failed", "error")][:3]
+            if fails:
+                causes = "\nآخر الفشلات:\n" + "\n".join(
+                    f"• {r['channel_id']}: {_plain_error(r.get('error_message') or '')}" for r in fails)
+        except Exception:  # noqa: BLE001
+            pass
+        short_reason = reason.split(" — ")[0].replace("muapi_spend_breaker: ", "")
         out["production:paused"] = ("الإنتاج واقف",
-                                    f"المصنع وقّف إنتاج الحلقات الجديدة. النشر شغال عادي.\nالسبب: {reason}\n"
-                                    "لازم السبب يتحل الأول، وبعدين الإنتاج يرجع.")
+                                    f"المصنع وقّف إنتاج الحلقات الجديدة (النشر شغال عادي).\n"
+                                    f"ليه وقف: {short_reason}{causes}\n"
+                                    "صلّح السبب، وبعدين اضغط «رجّع الإنتاج».")
     # multi-tenant: a workspace's own spend breaker pauses only that workspace
     try:
         from hypogeum.workspace_controls import paused_workspaces
@@ -534,6 +585,7 @@ def run_operator_checks(*, db_path=None, config=None, now: Optional[datetime] = 
         ("worker", "worker:", lambda: None if just_woke else check_worker(db_path, now)),
         ("adapters", "system:adapters", lambda: check_adapters(db_path)),
         ("production_paused", "production:", lambda: check_production_paused(db_path)),
+        ("run_failures", "run_failed:", lambda: check_run_failures(db_path, now)),
         ("blocking_signals", "signal:", lambda: check_blocking_signals(db_path)),
         ("youtube_covers", "cover:", lambda: check_youtube_covers(db_path, now)),
         ("posts", "post", lambda: check_posts(db_path, now)),

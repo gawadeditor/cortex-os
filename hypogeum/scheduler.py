@@ -199,19 +199,57 @@ def _channel_local_day_start_utc(
 
 
 def _scheduled_runs_since(channel_id: str, conn, since_iso: str) -> int:
-    """How many scheduled_runs have been created for this channel at/after
+    """
+    How many scheduled_runs have been created for this channel at/after
     `since_iso` — its real production-trigger count for the current local
     day. Every scheduled_run is a paid pipeline attempt, so this (not a
     distinct-episode count) is what a max_runs_per_day ceiling must bound.
+
+    EXCEPT one that failed without spending anything (2026-10-05): a run
+    refused at its first gated call (e.g. adapter registrations out of date)
+    costs $0 but used to use up the channel's whole day, leaving the buffer
+    short until tomorrow. Those don't count; a failed run that spent money
+    still does, and repeated failures are stopped by the spend breaker
+    (3 consecutive), not by this ceiling.
     Best-effort: 0 on error, so a counting bug never hard-blocks the
     schedule."""
     try:
-        return int(conn.execute(
-            "SELECT COUNT(*) FROM scheduled_runs WHERE channel_id = ? AND created_at >= ?",
+        rows = conn.execute(
+            "SELECT s.scheduled_run_id, q.status AS qstatus, q.episode_id FROM scheduled_runs s "
+            "LEFT JOIN run_queue q ON q.scheduled_run_id = s.scheduled_run_id "
+            "WHERE s.channel_id = ? AND s.created_at >= ?",
             (channel_id, since_iso),
-        ).fetchone()[0] or 0)
+        ).fetchall()
     except Exception:  # noqa: BLE001
         return 0
+    counted = 0
+    seen = set()
+    for r in rows:
+        if r[0] in seen:
+            continue
+        seen.add(r[0])
+        if r[1] == "failed" and r[2] and _episode_spend(conn, r[2]) <= 0:
+            continue
+        counted += 1
+    return counted
+
+
+def _episode_spend(conn, episode_id: str) -> float:
+    """Recorded cost + charged gated spend for an episode (0 on any error is
+    NOT assumed — an unreadable spend counts as spent)."""
+    try:
+        cost = float(conn.execute("SELECT COALESCE(SUM(cost_usd),0) FROM costs WHERE episode_id = ?",
+                                  (episode_id,)).fetchone()[0] or 0)
+    except Exception:  # noqa: BLE001
+        return 1.0
+    try:
+        charged = float(conn.execute(
+            "SELECT COALESCE(SUM(CAST(c.charged_amount AS REAL)),0) FROM run_authorization_grant_consumption c "
+            "JOIN run_authorization_grants g ON g.grant_id = c.grant_id WHERE g.episode_id = ?",
+            (episode_id,)).fetchone()[0] or 0)
+    except Exception:  # noqa: BLE001 — grant tables absent: no gated spend
+        charged = 0.0
+    return cost + charged
 
 _WEEKDAY_NAMES = {
     "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,

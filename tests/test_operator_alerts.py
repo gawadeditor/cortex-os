@@ -53,7 +53,7 @@ def test_production_paused_opens_and_resolves(db):
     oa.run_operator_checks(db_path=db, config=_CFG, now=NOW, send=out, force=True)
     oa.run_operator_checks(db_path=db, config=_CFG, now=NOW, send=out, force=True)
     paused = [m for m in out if "الإنتاج واقف" in m]
-    assert len(paused) == 1 and "muapi_spend_breaker" in paused[0]
+    assert len(paused) == 1 and "3 failed runs" in paused[0]   # the cause, in the message
     set_worker_control("queue_paused", "0", db_path=db)
     oa.run_operator_checks(db_path=db, config=_CFG, now=NOW, send=out, force=True)
     assert any("اتحلت: الإنتاج واقف" in m for m in out)
@@ -283,3 +283,21 @@ def test_no_worker_down_alert_right_after_wake(db):
     for m in (8, 16):
         oa.run_operator_checks(db_path=db, config=_CFG, now=NOW + timedelta(minutes=m), send=out, force=True)
     assert any("الـ worker مش شغال" in m for m in out)
+
+
+def test_run_failure_alert_carries_the_cause_once_per_episode(db):
+    conn = get_connection(db)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+    for i, err in enumerate(["OpenRouter credits exhausted (HTTP 402)", "lease unavailable", "lease unavailable"]):
+        data = {"run_id": f"r{i}", "episode_id": "ep1", "status": "failed", "channel_id": "hypogeum",
+                "started_at": (NOW - timedelta(minutes=30 - i)).isoformat(), "error_message": err}
+        if "created_at" in cols:
+            data["created_at"] = data["started_at"]
+        conn.execute(f"INSERT INTO runs ({','.join(data)}) VALUES ({','.join('?' * len(data))})", list(data.values()))
+    conn.commit()
+    conn.close()
+    got = oa.check_run_failures(db, NOW)
+    assert list(got) == ["run_failed:ep1"]                      # three attempts, one alert
+    assert "السبب: حجز قديم ما اتفكّش" in got["run_failed:ep1"][1]   # latest attempt's cause
+    set_worker_control("breaker_cleared_at", NOW.isoformat(), db_path=db)
+    assert oa.check_run_failures(db, NOW) == {}                 # dealt with by the operator's resume

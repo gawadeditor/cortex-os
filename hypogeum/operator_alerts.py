@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -51,7 +52,7 @@ CREATE TABLE IF NOT EXISTS operator_alert_checks (
 
 # per-check minimum interval (seconds) — run_operator_checks is called from
 # every worker iteration (~60s); the network-backed checks run less often.
-_INTERVALS = {"openrouter_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
+_INTERVALS = {"openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
               "youtube_covers": 300, "posts": 1800, "accounts": 600, "archive": 300, "disk": 1800}
 _DASHBOARD = "http://127.0.0.1:5001"
 _CREDIT_LOW_USD = 3.0
@@ -70,16 +71,29 @@ def _conn(db_path, *, ddl: bool = True):
     c.execute("PRAGMA busy_timeout = 15000")
     if ddl:
         c.executescript(_DDL)
+        cols = {r[1] for r in c.execute("PRAGMA table_info(operator_alerts)")}
+        for col in ("workspace_id", "title_en", "body_en"):   # multi-tenant Phase 4
+            if col not in cols:
+                c.execute(f"ALTER TABLE operator_alerts ADD COLUMN {col} TEXT")
     return c
 
 
-def _sender(config) -> Optional[Callable[[str], bool]]:
-    token = getattr(config, "TELEGRAM_BOT_TOKEN", None) if config else None
-    chat = getattr(config, "TELEGRAM_CHAT_ID", None) if config else None
-    if not (token and chat):
-        return None
-    from hypogeum.notifications import send_telegram
-    return lambda text: send_telegram(text, token, str(chat))
+def _deliver(key: str, workspace_id: Optional[str], ar_text: str, en_text: Optional[str],
+             config, db_path) -> bool:
+    """Send to every chat that should get this alert (hypogeum.alert_recipients):
+    the workspace's own chats in the workspace's language, the operator's
+    chats in Arabic; each chat's alert-type checklist applies."""
+    from hypogeum import alert_recipients as ar
+    cfg = _config(config)
+    atype = ar.alert_type_of(key)
+    operator_chats = set(ar.chat_ids_for(None, db_path=db_path, config=cfg, alert_type=atype))
+    chats = ar.chat_ids_for(workspace_id, db_path=db_path, config=cfg, alert_type=atype)
+    lang = ar._lang(workspace_id, db_path) if workspace_id else "ar"
+    ok_any = False
+    for chat in chats:
+        text = ar_text if (chat in operator_chats or lang != "en" or not en_text) else en_text
+        ok_any = ar.send_to_chat(chat, text, config=cfg) or ok_any
+    return ok_any
 
 
 def _config(config):
@@ -93,9 +107,12 @@ def _config(config):
 
 
 def alert(key: str, title: str, body: str = "", *, db_path=None, config=None,
-          send: Optional[Callable[[str], bool]] = None) -> bool:
+          send: Optional[Callable[[str], bool]] = None, workspace_id: Optional[str] = None,
+          title_en: Optional[str] = None, body_en: Optional[str] = None) -> bool:
     """Open an alert and send it — only if it isn't already open.
-    Returns True when a new alert was opened."""
+    Returns True when a new alert was opened. workspace_id routes it to that
+    workspace's chats too (title_en/body_en for an English workspace); a
+    given `send` overrides routing (single sink, used by tests)."""
     try:
         conn = _conn(db_path)
         try:
@@ -106,17 +123,22 @@ def alert(key: str, title: str, body: str = "", *, db_path=None, config=None,
             # sent, so a lock can never turn into a repeated message.
             now = _now().isoformat()
             conn.execute(
-                "INSERT INTO operator_alerts (alert_key, status, title, body, opened_at, resolved_at, last_sent_at, send_ok) "
-                "VALUES (?,?,?,?,?,NULL,NULL,0) ON CONFLICT(alert_key) DO UPDATE SET status='open', title=excluded.title, "
-                "body=excluded.body, opened_at=excluded.opened_at, resolved_at=NULL, last_sent_at=NULL, send_ok=0",
-                (key, "open", title, body, now))
+                "INSERT INTO operator_alerts (alert_key, status, title, body, opened_at, resolved_at, last_sent_at, "
+                "send_ok, workspace_id, title_en, body_en) VALUES (?,?,?,?,?,NULL,NULL,0,?,?,?) "
+                "ON CONFLICT(alert_key) DO UPDATE SET status='open', title=excluded.title, "
+                "body=excluded.body, opened_at=excluded.opened_at, resolved_at=NULL, last_sent_at=NULL, send_ok=0, "
+                "workspace_id=excluded.workspace_id, title_en=excluded.title_en, body_en=excluded.body_en",
+                (key, "open", title, body, now, workspace_id, title_en, body_en))
             conn.commit()
-            send = send if send is not None else _sender(_config(config))
-            ok = bool(send(f"🔴 {title}\n\n{body}".strip())) if send is not None else False
+            ar_text = f"🔴 {title}\n\n{body}".strip()
+            en_text = f"🔴 {title_en}\n\n{body_en or ''}".strip() if title_en else None
             if send is not None:
-                conn.execute("UPDATE operator_alerts SET last_sent_at=?, send_ok=? WHERE alert_key=?",
-                             (_now().isoformat(), 1 if ok else 0, key))
-                conn.commit()
+                ok = bool(send(ar_text))
+            else:
+                ok = _deliver(key, workspace_id, ar_text, en_text, config, db_path)
+            conn.execute("UPDATE operator_alerts SET last_sent_at=?, send_ok=? WHERE alert_key=?",
+                         (_now().isoformat(), 1 if ok else 0, key))
+            conn.commit()
         finally:
             conn.close()
         log.info("operator_alert_opened", key=key, sent=ok)
@@ -133,15 +155,18 @@ def resolve(key: str, note: str = "", *, db_path=None, config=None,
     try:
         conn = _conn(db_path)
         try:
-            row = conn.execute("SELECT status, title FROM operator_alerts WHERE alert_key=?", (key,)).fetchone()
+            row = conn.execute("SELECT * FROM operator_alerts WHERE alert_key=?", (key,)).fetchone()
             if not row or row["status"] != "open":
                 return False
             conn.execute("UPDATE operator_alerts SET status='resolved', resolved_at=? WHERE alert_key=?",
                          (_now().isoformat(), key))
             conn.commit()   # before sending, as in alert()
-            send = send if send is not None else _sender(_config(config))
+            ar_text = f"🟢 اتحلت: {row['title']}" + (f"\n{note}" if note else "")
+            en_text = f"🟢 Resolved: {row['title_en']}" if row["title_en"] else None
             if send is not None:
-                send(f"🟢 اتحلت: {row['title']}" + (f"\n{note}" if note else ""))
+                send(ar_text)
+            else:
+                _deliver(key, row["workspace_id"], ar_text, en_text, config, db_path)
         finally:
             conn.close()
         log.info("operator_alert_resolved", key=key)
@@ -175,11 +200,27 @@ def _due(name: str, now: datetime, db_path) -> bool:
 
 
 def _sync(prefix: str, current: dict, db_path, config, send, resolved_note: str = "") -> None:
-    """current = {key: (title, body)} — open new ones, resolve vanished ones."""
-    for key, (title, body) in current.items():
-        alert(key, title, body, db_path=db_path, config=config, send=send)
+    """current = {key: (title, body)} for platform alerts, or
+    {key: (title, body, {"ws": workspace_id, "en": (title_en, body_en)})} for
+    a workspace's own — open new ones, resolve vanished ones."""
+    for key, val in current.items():
+        title, body = val[0], val[1]
+        extra = val[2] if len(val) > 2 else {}
+        en = extra.get("en") or (None, None)
+        alert(key, title, body, db_path=db_path, config=config, send=send,
+              workspace_id=extra.get("ws"), title_en=en[0], body_en=en[1])
     for key in open_alert_keys(prefix, db_path) - set(current):
         resolve(key, resolved_note, db_path=db_path, config=config, send=send)
+
+
+def _ws_extra(channel_id: Optional[str], db_path, en: tuple) -> dict:
+    """Route a channel's alert to its workspace (English text for clients)."""
+    try:
+        from hypogeum.workspaces import workspace_of
+        ws = workspace_of(channel_id, db_path=Path(db_path) if db_path else None) if channel_id else None
+    except Exception:  # noqa: BLE001
+        ws = None
+    return {"ws": ws, "en": en}
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +251,36 @@ def check_openrouter_credits(config, *, http_get=None) -> Optional[dict]:
     return {}
 
 
+def check_workspace_credits(db_path, *, http_get=None) -> Optional[dict]:
+    """Each CLIENT workspace's own OpenRouter balance (its key from the vault;
+    the platform's is check_openrouter_credits). None = nothing to check."""
+    try:
+        from hypogeum.workspace_keys import workspace_key
+        from hypogeum.workspaces import list_workspaces
+        workspaces = [w for w in list_workspaces(Path(db_path) if db_path else None) if w["kind"] == "client"]
+    except Exception:  # noqa: BLE001
+        return None
+    if not workspaces:
+        return None
+    out = {}
+    for w in workspaces:
+        key = workspace_key("openrouter", w["workspace_id"], db_path)
+        if not key:
+            out[f"openrouter_ws:missing:{w['workspace_id']}"] = (
+                f"{w['workspace_id']}: مفيش مفتاح OpenRouter",
+                "الـ Workspace دي مالهاش مفتاح OpenRouter، فإنتاجها مش هيشتغل.",
+                {"ws": w["workspace_id"], "en": ("No OpenRouter key", "This workspace has no OpenRouter key, so "
+                                                 "its episodes can't be written. Add one in Credentials.")})
+            continue
+        res = check_openrouter_credits(SimpleNamespace(OPENROUTER_API_KEY=key), http_get=http_get)
+        for _k, (t, b) in (res or {}).items():
+            out[f"openrouter_ws:credits:{w['workspace_id']}"] = (
+                f"{w['workspace_id']}: {t}", b,
+                {"ws": w["workspace_id"], "en": ("OpenRouter balance is low", "Your OpenRouter balance is almost "
+                                                 "used up; production stops when it runs out. Top up at openrouter.ai → Credits.")})
+    return out
+
+
 def check_production_paused(db_path) -> dict:
     from hypogeum.db import get_worker_control
     dbp = Path(db_path) if db_path else None
@@ -226,7 +297,10 @@ def check_production_paused(db_path) -> dict:
             out[f"production:paused:{wid}"] = (
                 f"الإنتاج واقف لـ {wid}",
                 f"إنتاج الحلقات الجديدة لقنوات {wid} واقف (باقي المساحات شغالة). النشر شغال عادي.\n"
-                f"السبب: {reason or 'سبب غير مكتوب'}")
+                f"السبب: {reason or 'سبب غير مكتوب'}",
+                {"ws": wid, "en": ("New episode production is paused",
+                                   "Publishing of finished episodes continues. Production resumes once the "
+                                   f"cause is fixed.\nReason: {reason or 'not recorded'}")})
     except Exception:  # noqa: BLE001
         pass
     return out
@@ -301,7 +375,11 @@ def check_youtube_covers(db_path, now: datetime) -> dict:
             f"شورت {r['channel_id']} " + ("فات ميعاده ولسه private" if late else "مستني غلاف يوتيوب"),
             ("ميعاد النشر عدّى والشورت لسه مش للعامة. " if late else "")
             + f"اترفع private، ومش هيتنشر للعامة غير بعد الغلاف.\nميعاد النشر: {local} (دبي)\n"
-            f"الغلاف والرابط في الـ Content Grid: {_DASHBOARD}/channel/{r['channel_id']}/grid")
+            f"الغلاف والرابط في الـ Content Grid: {_DASHBOARD}/channel/{r['channel_id']}/grid",
+            _ws_extra(r["channel_id"], db_path, (
+                f"{r['channel_id']}: Short " + ("past its slot, still private" if late else "waiting for its YouTube cover"),
+                f"It was uploaded as private and goes public only once its cover is uploaded in YouTube Studio.\n"
+                f"Scheduled release: {r['release_at']} (UTC)")))
     return out
 
 
@@ -334,12 +412,16 @@ def check_posts(db_path, now: datetime) -> dict:
                 out[f"post:{it['post_id']}"] = (
                     f"بوست على {ch} مانزلش صح",
                     f"«{title}»\nحالته في Zernio: {it.get('status')} — المنصات اللي لسه: {stuck}\n"
-                    f"{_DASHBOARD}/channel/{ch}/grid")
+                    f"{_DASHBOARD}/channel/{ch}/grid",
+                    _ws_extra(ch, db_path, (f"{ch}: a post didn't go out correctly",
+                                            f"«{title}»\nStill missing on: {stuck}")))
             if it.get("youtube_cover_pending") and it["post_id"] not in held:
                 out[f"postcover:{it['post_id']}"] = (
                     f"شورت {ch} نزل على يوتيوب من غير تأكيد الغلاف",
                     f"«{title}»\nارفع الغلاف من YouTube Studio واضغط Done في الـ Content Grid:\n"
-                    f"{_DASHBOARD}/channel/{ch}/grid")
+                    f"{_DASHBOARD}/channel/{ch}/grid",
+                    _ws_extra(ch, db_path, (f"{ch}: Short is live without its confirmed cover",
+                                            f"«{title}»\nUpload the cover in YouTube Studio.")))
     return out
 
 
@@ -420,7 +502,8 @@ def run_operator_checks(*, db_path=None, config=None, now: Optional[datetime] = 
     config = _config(config)
     out: dict = {}
     checks = [
-        ("openrouter_credits", "openrouter:", lambda: check_openrouter_credits(config)),
+        ("openrouter_credits", "openrouter:credits", lambda: check_openrouter_credits(config)),
+        ("workspace_credits", "openrouter_ws:", lambda: check_workspace_credits(db_path)),
         ("worker", "worker:", lambda: check_worker(db_path, now)),
         ("production_paused", "production:", lambda: check_production_paused(db_path)),
         ("blocking_signals", "signal:", lambda: check_blocking_signals(db_path)),

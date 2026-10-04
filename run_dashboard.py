@@ -11290,6 +11290,11 @@ def api_infrastructure_debug():
 # Entrypoint
 # ---------------------------------------------------------------------------
 
+# Workspaces page + per-workspace Telegram alert connection (multi-tenant Phase 4)
+from hypogeum.dashboard_workspaces import bp as _workspaces_bp  # noqa: E402
+app.register_blueprint(_workspaces_bp)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Hypogeum Cortex local dashboard"
@@ -11334,6 +11339,11 @@ def main():
     # when resolved (no-op until TELEGRAM_BOT_TOKEN/CHAT_ID are set).
     from hypogeum.operator_alerts import start_operator_alerts_loop
     start_operator_alerts_loop(_db_path())
+
+    # The platform bot answers /start <code> (a client connecting Telegram
+    # from the Workspaces page) and /stop — polled, no webhook needed.
+    from hypogeum.alert_recipients import start_bot_loop
+    start_bot_loop(_db_path())
 
     app.run(host=args.host, port=args.port, debug=False)
 

@@ -188,3 +188,50 @@ def test_archive_check_skipped_for_local_archive(db, monkeypatch):
     import hypogeum.archive_storage as arch
     monkeypatch.setattr(arch, "_raw_configured_root", lambda db_path=None: ("/tmp/x", "default"))
     assert oa.check_archive(db, NOW, mounted=False) is None
+
+
+def test_workspace_alert_routing_language_and_checklist(tmp_path, monkeypatch):
+    """Phase 4: a client workspace's alert reaches its own chats in its
+    language and the operator in Arabic; platform alerts reach only the
+    operator; each chat's checklist filters what it gets."""
+    import hypogeum.db as hdb
+    from hypogeum import alert_recipients as ar
+    from hypogeum import workspaces as ws
+    from hypogeum.factory_entity import create_factory
+    db = tmp_path / "r.db"
+    initialize_schema(db)
+    monkeypatch.setattr(hdb, "_DEFAULT_DB_PATH", db)
+    ws._READY.discard(str(db))
+    create_factory("op", "Operator", "op", db_path=db)
+    ws.backfill_platform_workspace(db)
+    ws.create_workspace("Acme", workspace_id="acme", language="en", db_path=db)
+    cfg = SimpleNamespace(TELEGRAM_BOT_TOKEN="t", TELEGRAM_CHAT_ID="999")
+    monkeypatch.setattr(ar, "_config", lambda: cfg)
+    sent = []
+    monkeypatch.setattr(ar, "send_to_chat", lambda chat, text, **k: sent.append((chat, text)) or True)
+    conn = get_connection(db)
+    conn.executescript(ar._DDL)
+    conn.execute("INSERT INTO alert_recipients (recipient_id, workspace_id, channel, address, status, created_at, "
+                 "updated_at) VALUES ('r1','acme','telegram','111','active','x','x')")
+    conn.commit()
+    conn.close()
+
+    oa.alert("production:paused:acme", "الإنتاج واقف لـ acme", "تفاصيل", db_path=db, config=cfg,
+             workspace_id="acme", title_en="New episode production is paused", body_en="details")
+    by_chat = dict(sent)
+    assert by_chat["111"].startswith("🔴 New episode production is paused")
+    assert by_chat["999"].startswith("🔴 الإنتاج واقف")
+
+    sent.clear()
+    oa.alert("disk:low", "مساحة", "x", db_path=db, config=cfg)
+    assert [c for c, _ in sent] == ["999"]
+
+    sent.clear()
+    ar.set_alert_types("r1", ["covers"], db_path=db)
+    oa.alert("production:paused:acme:2", "t", "b", db_path=db, config=cfg, workspace_id="acme", title_en="t")
+    assert [c for c, _ in sent] == ["999"]                     # client opted out of production alerts
+
+    sent.clear()
+    ar.set_alert_types("r1", ["production", "covers"], db_path=db)
+    oa.resolve("production:paused:acme", db_path=db, config=cfg)
+    assert dict(sent)["111"].startswith("🟢 Resolved: New episode production is paused")

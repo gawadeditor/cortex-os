@@ -1,0 +1,127 @@
+"""
+hypogeum/dashboard_workspaces.py — the /workspaces dashboard page and its
+alert-connection endpoints (multi-tenant plan, Phase 4). A Flask Blueprint
+registered by run_dashboard.py.
+
+    GET  /workspaces                                  page
+    POST /workspaces/<id>/alerts/link                 -> {ok, url, expires_at, recipient_count}
+    GET  /workspaces/<id>/alerts/recipients           -> {count, recipients}
+    POST /alerts/recipients/<rid>/test                -> {ok}
+    POST /alerts/recipients/<rid>/disconnect          -> {ok}
+    POST /alerts/recipients/<rid>/types  {types:[…]}  -> {ok}   (alert checklist)
+    POST /workspaces/<id>/resume                      redirect back
+
+Operator-only today (the dashboard has no login yet — Phase 6); the page is
+how the operator connects each client's Telegram in the managed-service
+model: create the link here, send it to the client, they press Start.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+from flask import Blueprint, current_app, jsonify, redirect, render_template
+
+bp = Blueprint("workspaces", __name__)
+
+
+def _db():
+    p = current_app.config.get("DB_PATH")
+    return Path(p) if p else None
+
+
+def _workspace_rows(db) -> list[dict]:
+    from hypogeum import alert_recipients as ar
+    from hypogeum import workspace_controls as wsc
+    from hypogeum.workspaces import list_workspaces, resources_of
+    paused = wsc.paused_workspaces(db)
+    out = []
+    for w in list_workspaces(db):
+        wid = w["workspace_id"]
+        st = wsc.budget_status(wid, db)
+        out.append({
+            **w,
+            "channels": resources_of(wid, "channel", db_path=db),
+            "spend": st["month_spend_usd"], "ceiling": st["ceiling_usd"], "over": st["over"],
+            "paused": wid in paused or (w["kind"] == "platform_owner" and wsc.operator_production_paused(db)),
+            "pause_reason": paused.get(wid, ""),
+            "recipients": [{**r, "types": ar._types(r)} for r in ar.recipients_for(wid, db)],
+        })
+    out.sort(key=lambda r: (r["kind"] != "platform_owner", r["name"].lower()))
+    return out
+
+
+@bp.route("/workspaces")
+def workspaces_page():
+    from hypogeum import alert_recipients as ar
+    db = _db()
+    try:
+        ar.ensure_operator_recipient(db)   # the .env operator chat gets a checklist row too
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        bot = ar.bot_username()
+    except Exception:  # noqa: BLE001 — Telegram unreachable: page still renders
+        bot = None
+    return render_template("workspaces.html", workspaces=_workspace_rows(db), bot=bot,
+                           alert_types=ar.ALERT_TYPES, scope="factory")
+
+
+@bp.route("/workspaces/<workspace_id>/alerts/link", methods=["POST"])
+def workspace_alert_link(workspace_id):
+    from hypogeum import alert_recipients as ar
+    db = _db()
+    try:
+        link = ar.create_link(workspace_id, db_path=db)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 404
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": f"Telegram unavailable: {exc}"[:200]}), 502
+    if not link.get("url"):
+        return jsonify({"ok": False, "error": "The Telegram bot isn't connected on this machine yet."}), 409
+    return jsonify({"ok": True, "url": link["url"], "expires_at": link["expires_at"],
+                    "recipient_count": len(ar.recipients_for(workspace_id, db))})
+
+
+@bp.route("/workspaces/<workspace_id>/alerts/recipients")
+def workspace_alert_recipients(workspace_id):
+    from hypogeum import alert_recipients as ar
+    rows = ar.recipients_for(workspace_id, _db())
+    return jsonify({"count": len(rows),
+                    "recipients": [{"recipient_id": r["recipient_id"], "label": r["label"],
+                                    "created_at": r["created_at"]} for r in rows]})
+
+
+@bp.route("/alerts/recipients/<recipient_id>/test", methods=["POST"])
+def alert_recipient_test(recipient_id):
+    from hypogeum import alert_recipients as ar
+    return jsonify({"ok": ar.send_test(recipient_id, _db())})
+
+
+@bp.route("/alerts/recipients/<recipient_id>/types", methods=["POST"])
+def alert_recipient_types(recipient_id):
+    from flask import request
+    from hypogeum import alert_recipients as ar
+    types = (request.get_json(silent=True) or {}).get("types") or []
+    ar.set_alert_types(recipient_id, list(types), _db())
+    return jsonify({"ok": True})
+
+
+@bp.route("/alerts/recipients/<recipient_id>/disconnect", methods=["POST"])
+def alert_recipient_disconnect(recipient_id):
+    from hypogeum import alert_recipients as ar
+    return jsonify({"ok": ar.disconnect(recipient_id, _db())})
+
+
+@bp.route("/workspaces/<workspace_id>/resume", methods=["POST"])
+def workspace_resume(workspace_id):
+    """Resume one workspace's production after its spend breaker tripped.
+    The platform owner's resume also clears the global switch (same as the
+    queue page's Resume); a client's never touches anyone else."""
+    from hypogeum.muapi_spend_breaker import clear_breaker
+    from hypogeum.workspaces import platform_workspace_id
+    db = _db()
+    if workspace_id == platform_workspace_id(db):
+        clear_breaker(db_path=db)
+    else:
+        clear_breaker(db_path=db, workspace_id=workspace_id)
+    return redirect("/workspaces?scope=factory")

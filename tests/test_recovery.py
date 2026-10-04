@@ -266,7 +266,21 @@ class TestBackupEnvFile:
 
         assert dest is not None
         assert dest.exists()
-        assert dest.read_text(encoding="utf-8") == "OPENROUTER_API_KEY=test123\n"
+        raw = dest.read_text(encoding="utf-8")
+        assert "test123" not in raw                      # encrypted at rest
+        from hypogeum import vault
+        assert vault.decrypt(raw) == "OPENROUTER_API_KEY=test123\n"
+
+    def test_keeps_only_newest_env_backups(self, tmp_path, monkeypatch):
+        import hypogeum.recovery as rec
+        env_path = tmp_path / ".env"
+        env_path.write_text("K=v\n", encoding="utf-8")
+        stamps = iter(f"2026010{i}T000000Z" for i in range(1, 10))
+        monkeypatch.setattr(rec, "_utc_now_compact", lambda: next(stamps))
+        monkeypatch.setattr(rec, "_ENV_BACKUP_KEEP", 3)
+        for _ in range(5):
+            backup_env_file(env_path=env_path, backup_dir=tmp_path / "b")
+        assert len(list((tmp_path / "b").glob("env.*.backup.enc"))) == 3
 
     def test_returns_none_if_no_env_file(self, tmp_path):
         dest = backup_env_file(env_path=tmp_path / "nonexistent.env", backup_dir=tmp_path / "backups")

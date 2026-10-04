@@ -1383,6 +1383,7 @@ def create_channel_profile(
     publishing_profile_id: Optional[str] = None,
     model_profile_id:      Optional[str] = None,
     db_path:               Optional[Path] = None,
+    workspace_id:          Optional[str] = None,
 ) -> ChannelProfile:
     profile = ChannelProfile(
         channel_id            = channel_id,
@@ -1411,7 +1412,11 @@ def create_channel_profile(
         finally:
             conn.close()
     except Exception:
-        pass
+        return profile
+    # Owner of the channel (and so of the keys/balance it spends) — the
+    # platform owner unless a workspace is named. See hypogeum.workspaces.
+    from hypogeum.workspaces import assign_new
+    assign_new("channel", channel_id, workspace_id, db_path=db_path)
     return profile
 
 

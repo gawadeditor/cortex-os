@@ -295,6 +295,9 @@ _V2_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     ],
     "factories": [
         ("factory_policies", "TEXT"),   # P3-05: JSON policy blob
+        # Multi-tenant Phase 1 (2026-10-04): a factory row is a Workspace;
+        # exactly one is the operator's 'platform_owner' (hypogeum.workspaces).
+        ("workspace_kind",   "TEXT NOT NULL DEFAULT 'client'"),
     ],
     "opportunities": [
         ("generation_source", "TEXT"),      # observability: 'llm_ideation' | 'fallback_seed'

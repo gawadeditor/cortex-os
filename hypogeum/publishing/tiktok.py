@@ -244,7 +244,8 @@ def resolve_tiktok_publish_mode(db_path: Optional[Path] = None) -> str:
         if not row:
             raise RuntimeError("No active TikTok credential in secret_profiles")
 
-        cred = json.loads(row[0])
+        from hypogeum.vault import decrypt
+        cred = json.loads(decrypt(row[0]))
         scope = cred.get("scope", "") or ""
         granted = {s.strip() for s in scope.split(",") if s.strip()}
 
@@ -745,7 +746,8 @@ def refresh_tiktok_token(db_path: Optional[Path] = None) -> str:
         if not row:
             raise RuntimeError("No active TikTok credential in secret_profiles")
 
-        cred = json.loads(row[0])
+        from hypogeum.vault import decrypt, encrypt
+        cred = json.loads(decrypt(row[0]))
         refresh_token = cred.get("refresh_token")
         client_key = cred.get("client_key")
         client_secret = cred.get("client_secret")
@@ -783,7 +785,7 @@ def refresh_tiktok_token(db_path: Optional[Path] = None) -> str:
             """UPDATE secret_profiles
                SET credential_data = ?, expires_at = ?, updated_at = ?
                WHERE provider = 'tiktok' AND status = 'active'""",
-            (json.dumps(cred), expires_at, now.isoformat()),
+            (encrypt(json.dumps(cred)), expires_at, now.isoformat()),
         )
         conn.commit()
         return new_access_token

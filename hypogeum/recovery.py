@@ -35,6 +35,7 @@ Restore-safety guarantee:
 from __future__ import annotations
 
 import gzip
+import os
 import hashlib
 import json
 import shutil
@@ -54,6 +55,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_DB_PATH = _PROJECT_ROOT / ".hypogeum-assets" / "hypogeum.db"
 _DEFAULT_BACKUP_DIR = _PROJECT_ROOT / ".hypogeum-assets" / "backups"
 _DEFAULT_ENV_PATH = _PROJECT_ROOT / ".env"
+_ENV_BACKUP_KEEP = 14
 _DEFAULT_RETENTION_COUNT = 14
 
 # publishing_outcomes.publishing_status values that represent a real,
@@ -374,19 +376,25 @@ def backup_env_file(
     backup_dir: Optional[Path] = None,
 ) -> Optional[Path]:
     """
-    Copy .env (bootstrap secrets/config — outside the DB, outside git) into
-    backup_dir with a timestamp. Returns None if no .env exists (nothing to
-    back up is not an error — some deployments run entirely off
-    secret_profiles with no .env at all).
+    Back up .env (bootstrap secrets/config — outside the DB, outside git)
+    into backup_dir with a timestamp, ENCRYPTED with the vault key
+    (hypogeum.vault; 2026-10-04 — the plaintext copies piled up, 170 of them,
+    each a full set of provider keys). Keeps the newest _ENV_BACKUP_KEEP.
+    Restore: vault.decrypt(path.read_text()). Returns None if no .env
+    exists (some deployments run entirely off secret_profiles).
     """
+    from hypogeum import vault
     source = env_path or _DEFAULT_ENV_PATH
     if not source.exists():
         return None
 
     target_dir = _resolve_backup_dir(backup_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
-    dest = target_dir / f"env.{_utc_now_compact()}.backup"
-    shutil.copy2(source, dest)
+    dest = target_dir / f"env.{_utc_now_compact()}.backup.enc"
+    dest.write_text(vault.encrypt(source.read_text(encoding="utf-8")), encoding="utf-8")
+    os.chmod(dest, 0o600)
+    for old in sorted(target_dir.glob("env.*.backup.enc"))[:-_ENV_BACKUP_KEEP]:
+        old.unlink(missing_ok=True)
     return dest
 
 

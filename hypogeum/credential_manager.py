@@ -2,8 +2,11 @@
 hypogeum/credential_manager.py — Credential / Secret Profile Manager
 
 Stores provider credentials in the `secret_profiles` DB table.
-V1 note: credentials stored as plaintext; acceptable for local self-hosted
-single-machine deployment. Encryption is a V2 SaaS concern.
+credential_data is encrypted at rest (hypogeum.vault, 2026-10-04): written
+as enc:v1:<token>, decrypted when read into a SecretProfile. Rows written
+before that stay readable as plaintext until scripts/encrypt_secrets.py
+converts them. Code that reads the column with raw SQL must go through
+vault.decrypt() too.
 
 Public API:
     create_secret_profile(provider, label, credential_type, credential_data,
@@ -52,6 +55,7 @@ from pathlib import Path
 from typing import Optional
 
 from hypogeum.db import get_connection
+from hypogeum import vault
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -146,7 +150,7 @@ def _row_to_profile(row) -> SecretProfile:
         provider=row["provider"],
         label=row["label"],
         credential_type=row["credential_type"],
-        credential_data=row["credential_data"],
+        credential_data=vault.decrypt(row["credential_data"]),
         status=row["status"],
         scope=row["scope"],
         channel_id=row["channel_id"],
@@ -173,9 +177,13 @@ def create_secret_profile(
     secret_profile_id: Optional[str] = None,
     user_id: Optional[str] = None,
     db_path: Optional[Path] = None,
+    workspace_id: Optional[str] = None,
 ) -> SecretProfile:
     """
     Create a new secret profile. Returns the created SecretProfile.
+
+    Owned by `workspace_id`, else by its channel's workspace (channel-specific
+    keys), else by the platform owner — see hypogeum.workspaces.
 
     Raises ValueError for invalid credential_type or scope.
     Raises PermissionDeniedError if user_id is provided but not admin/owner.
@@ -203,12 +211,15 @@ def create_secret_profile(
                 last_tested_at, last_used_at, created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, NULL, NULL, ?, ?)
             """,
-            (pid, provider, label, credential_type, credential_data,
+            (pid, provider, label, credential_type, vault.encrypt(credential_data),
              scope, channel_id, expires_at, now, now),
         )
         conn.commit()
     finally:
         conn.close()
+    from hypogeum.workspaces import assign_new, workspace_of
+    owner = workspace_id or (workspace_of(channel_id, db_path=db_path) if channel_id else None)
+    assign_new("secret_profile", pid, owner, db_path=db_path)
     return SecretProfile(
         secret_profile_id=pid,
         provider=provider,
@@ -342,7 +353,7 @@ def update_secret_profile(
 
     updates: dict = {}
     if credential_data is not None:
-        updates["credential_data"] = credential_data
+        updates["credential_data"] = vault.encrypt(credential_data)
     if expires_at is not None:
         updates["expires_at"] = expires_at
     if label is not None:

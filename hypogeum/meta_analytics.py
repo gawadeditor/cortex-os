@@ -57,7 +57,8 @@ def get_meta_token(platform: str, db_path=None) -> Optional[str]:
             conn.close()
         if not row:
             return None
-        data = row["credential_data"] or ""
+        from hypogeum.vault import decrypt
+        data = decrypt(row["credential_data"]) or ""
         # credential_data may be a raw token string or JSON
         data = data.strip()
         if data.startswith("{"):

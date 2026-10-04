@@ -181,6 +181,17 @@ def _block_guardrail_leakage():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_vault_key(tmp_path_factory):
+    """hypogeum.vault creates/reads its master key at ~/.cortex/vault.key —
+    a test must never create, read or depend on the operator's real key.
+    Every test gets its own throwaway key path."""
+    from hypogeum import vault
+    vault.set_key_path(tmp_path_factory.mktemp("vault") / "vault.key")
+    yield
+    vault.set_key_path(None)
+
+
+@pytest.fixture(autouse=True)
 def _patch_load_dotenv_globally():
     """
     Patch hypogeum.config._load_dotenv to a no-op for every test.

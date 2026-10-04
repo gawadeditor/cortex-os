@@ -88,8 +88,10 @@ def create_client(name: str, *, engagement_mode: str = "observe",
                   monthly_analysis_budget_usd: float = 5.0,
                   stage: str = "active", managed_since: Optional[str] = "today",
                   client_id: Optional[str] = None,
-                  db_path: Optional[Path] = None) -> dict:
-    """Create a client. Returns the stored row. Raises ValueError on a bad
+                  db_path: Optional[Path] = None,
+                  workspace_id: Optional[str] = None) -> dict:
+    """Create a client (owned by `workspace_id`, else the platform owner —
+    hypogeum.workspaces). Returns the stored row. Raises ValueError on a bad
     enum or a client_id collision.
 
     managed_since defaults to the creation date (2026-10-03 general setting):
@@ -124,6 +126,8 @@ def create_client(name: str, *, engagement_mode: str = "observe",
         row = conn.execute("SELECT * FROM clients WHERE client_id=?", (cid,)).fetchone()
     finally:
         conn.close()
+    from hypogeum.workspaces import assign_new
+    assign_new("client", cid, workspace_id, db_path=db_path)
     log.info("client_created", client_id=cid, name=name, engagement_mode=engagement_mode)
     return _client_row(row)
 

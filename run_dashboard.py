@@ -4343,7 +4343,8 @@ def api_tiktok_refresh():
         finally:
             conn.close()
         if row:
-            cred = _json.loads(dict(row)["credential_data"])
+            from hypogeum.vault import decrypt as _vault_decrypt
+            cred = _json.loads(_vault_decrypt(dict(row)["credential_data"]))
             publish_mode = cred.get("publish_mode", "upload_to_inbox")
             video_publish_scope_missing = bool(cred.get("video_publish_scope_missing", True))
     except Exception:

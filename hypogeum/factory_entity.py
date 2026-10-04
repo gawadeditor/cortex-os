@@ -232,9 +232,10 @@ def get_factory(
     Look up a factory by factory_id or factory_slug.
 
     If both are None, returns the single installed factory (the only row in
-    the table). Returns None when no matching row is found. Raises ValueError
-    if both are None and the table has more than one row (ambiguous in
-    multi-tenant deployments — use an explicit factory_id in that case).
+    the table), or — with several workspaces — the one marked
+    workspace_kind='platform_owner'. Returns None when no matching row is
+    found. Raises ValueError if both are None, the table has more than one
+    row and no single platform_owner (use an explicit factory_id then).
     """
     conn = get_connection(_resolve(db_path))
     try:
@@ -257,6 +258,13 @@ def get_factory(
         if len(rows) == 0:
             return None
         if len(rows) > 1:
+            # Multi-tenant Phase 1: with client workspaces present, "the
+            # factory" means the operator's platform_owner workspace — the
+            # one every no-argument caller (policy cascade, run clearance)
+            # meant before workspaces existed. Still ambiguous -> raise.
+            owners = [r for r in rows if (dict(r).get("workspace_kind") or "client") == "platform_owner"]
+            if len(owners) == 1:
+                return _row_to_record(owners[0])
             raise ValueError(
                 f"get_factory() called with no arguments but {len(rows)} factory records "
                 f"exist. Pass factory_id or factory_slug explicitly."
@@ -322,8 +330,8 @@ def get_current_factory_id(db_path: Optional[Path] = None) -> str:
 
     In a single-tenant deployment this is the only row in the factories table.
     Raises FactoryNotFoundError if no factory record exists (bootstrap has not
-    been run yet). Raises ValueError if more than one factory record exists
-    (call get_factory(factory_id=...) explicitly in that case).
+    been run yet). With several workspaces this is the platform_owner one;
+    raises ValueError if that is ambiguous (see get_factory()).
     """
     record = get_factory(db_path=db_path)
     if record is None:

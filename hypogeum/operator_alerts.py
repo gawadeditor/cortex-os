@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS operator_alert_checks (
 
 # per-check minimum interval (seconds) — run_operator_checks is called from
 # every worker iteration (~60s); the network-backed checks run less often.
-_INTERVALS = {"openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
+_INTERVALS = {"adapters": 300, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
               "youtube_covers": 300, "posts": 1800, "accounts": 600, "archive": 300, "disk": 1800}
 _DASHBOARD = "http://127.0.0.1:5001"
 _CREDIT_LOW_USD = 3.0
@@ -306,6 +306,21 @@ def check_production_paused(db_path) -> dict:
     return out
 
 
+def check_adapters(db_path) -> dict:
+    """Gate adapters whose code changed without re-registration: every
+    gated call (writing, research, voice, video) is refused until they're
+    superseded — production can't run at all."""
+    from hypogeum.adapter_registry import stale_registrations
+    stale = stale_registrations(Path(db_path) if db_path else None)
+    if not stale:
+        return {}
+    names = ", ".join(sorted({f"{s['provider']}/{s['provider_operation']}" for s in stale}))
+    return {"system:adapters_stale": (
+        "كود الـ adapters اتغير ومتسجلش",
+        f"{len(stale)} تسجيل قديم ({names}). أي حلقة هتبدأ هتفشل فوراً لحد ما يتسجلوا من جديد.\n"
+        "الحل: python3 scripts/supersede_changed_adapters.py --apply --reason \"...\" (بعد commit للكود).")}
+
+
 def check_worker(db_path, now: datetime) -> dict:
     """The worker writes worker_heartbeat_at once per loop iteration — which
     can't happen while it's inside a pipeline run, so allow a long gap then."""
@@ -501,10 +516,14 @@ def run_operator_checks(*, db_path=None, config=None, now: Optional[datetime] = 
     now = now or _now()
     config = _config(config)
     out: dict = {}
+    just_woke = _note_tick_and_wake(db_path, now)
     checks = [
         ("openrouter_credits", "openrouter:credits", lambda: check_openrouter_credits(config)),
         ("workspace_credits", "openrouter_ws:", lambda: check_workspace_credits(db_path)),
-        ("worker", "worker:", lambda: check_worker(db_path, now)),
+        # right after the machine wakes, the worker hasn't beaten yet either —
+        # don't call it "down" until it's had time to (2026-10-04 false alarm)
+        ("worker", "worker:", lambda: None if just_woke else check_worker(db_path, now)),
+        ("adapters", "system:adapters", lambda: check_adapters(db_path)),
         ("production_paused", "production:", lambda: check_production_paused(db_path)),
         ("blocking_signals", "signal:", lambda: check_blocking_signals(db_path)),
         ("youtube_covers", "cover:", lambda: check_youtube_covers(db_path, now)),
@@ -524,7 +543,63 @@ def run_operator_checks(*, db_path=None, config=None, now: Optional[datetime] = 
             out[name] = len(current)
         except Exception as exc:  # noqa: BLE001
             log.warn("operator_check_failed", check=name, error=str(exc)[:200])
+    try:
+        _retry_unsent(db_path, config, send, now)
+    except Exception as exc:  # noqa: BLE001
+        log.warn("operator_alert_retry_failed", error=str(exc)[:200])
     return out
+
+
+_WAKE_GAP_S = 600      # loop silent this long = the machine was asleep
+_WAKE_GRACE_S = 900    # give the worker this long to beat again after wake
+_RETRY_AFTER_S = 120
+
+
+def _note_tick_and_wake(db_path, now: datetime) -> bool:
+    """Record this loop tick; return True while inside the post-wake grace."""
+    conn = _conn(db_path)
+    try:
+        vals = {r["check_name"]: r["last_run_at"] for r in conn.execute(
+            "SELECT * FROM operator_alert_checks WHERE check_name IN ('loop_tick','awake_since')")}
+        last = vals.get("loop_tick")
+        if last and (now - datetime.fromisoformat(last)).total_seconds() > _WAKE_GAP_S:
+            vals["awake_since"] = now.isoformat()
+            conn.execute("INSERT INTO operator_alert_checks (check_name, last_run_at) VALUES ('awake_since', ?) "
+                         "ON CONFLICT(check_name) DO UPDATE SET last_run_at=excluded.last_run_at", (now.isoformat(),))
+        conn.execute("INSERT INTO operator_alert_checks (check_name, last_run_at) VALUES ('loop_tick', ?) "
+                     "ON CONFLICT(check_name) DO UPDATE SET last_run_at=excluded.last_run_at", (now.isoformat(),))
+        conn.commit()
+    finally:
+        conn.close()
+    aw = vals.get("awake_since")
+    return bool(aw) and (now - datetime.fromisoformat(aw)).total_seconds() < _WAKE_GRACE_S
+
+
+def _retry_unsent(db_path, config, send, now: datetime) -> None:
+    """An open alert whose message never got out (network down right after a
+    wake, Telegram hiccup) is re-sent — otherwise the operator would only
+    ever see its 'resolved' message, or nothing."""
+    conn = _conn(db_path)
+    try:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM operator_alerts WHERE status='open' AND send_ok=0")]
+    finally:
+        conn.close()
+    for r in rows:
+        last = r.get("last_sent_at")
+        if last and (now - datetime.fromisoformat(last)).total_seconds() < _RETRY_AFTER_S:
+            continue
+        ar_text = f"🔴 {r['title']}\n\n{r['body'] or ''}".strip()
+        en_text = f"🔴 {r['title_en']}\n\n{r['body_en'] or ''}".strip() if r.get("title_en") else None
+        ok = bool(send(ar_text)) if send is not None else _deliver(
+            r["alert_key"], r.get("workspace_id"), ar_text, en_text, config, db_path)
+        conn = _conn(db_path)
+        try:
+            conn.execute("UPDATE operator_alerts SET last_sent_at=?, send_ok=? WHERE alert_key=? AND status='open'",
+                         (now.isoformat(), 1 if ok else 0, r["alert_key"]))
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def start_operator_alerts_loop(db_path=None, *, check_every_s: int = 60):

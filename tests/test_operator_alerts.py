@@ -235,3 +235,51 @@ def test_workspace_alert_routing_language_and_checklist(tmp_path, monkeypatch):
     ar.set_alert_types("r1", ["production", "covers"], db_path=db)
     oa.resolve("production:paused:acme", db_path=db, config=cfg)
     assert dict(sent)["111"].startswith("🟢 Resolved: New episode production is paused")
+
+
+def test_stale_adapter_registration_alerts(db):
+    """2026-10-04: adapter code edited without re-registration made every
+    gated call fail. The registry's recorded checksum no longer matching the
+    module must raise a platform alert before any run tries."""
+    from hypogeum import adapter_registry as areg
+    from hypogeum.providers.fake_provider_adapter import FakeProviderAdapter
+    areg.register_adapter("fake", "m1", "op.x", "1.0", FakeProviderAdapter, db_path=db)
+    assert oa.check_adapters(db) == {}
+    conn = get_connection(db)
+    conn.execute("UPDATE adapter_registrations SET adapter_implementation_checksum='old' WHERE provider='fake'")
+    conn.commit()
+    conn.close()
+    got = oa.check_adapters(db)
+    assert "system:adapters_stale" in got and "fake/op.x" in got["system:adapters_stale"][1]
+
+
+def test_unsent_alert_is_retried(db):
+    calls = []
+
+    def flaky(text):
+        calls.append(text)
+        return len(calls) > 1          # first attempt fails (network down)
+    t0 = oa._now()                     # alert() stamps the real clock
+    oa.alert("x:net", "مشكلة", "b", db_path=db, send=flaky)
+    oa._retry_unsent(db, _CFG, flaky, t0 + timedelta(seconds=30))    # too soon
+    assert len(calls) == 1
+    oa._retry_unsent(db, _CFG, flaky, t0 + timedelta(minutes=5))
+    assert len(calls) == 2
+    oa._retry_unsent(db, _CFG, flaky, t0 + timedelta(minutes=10))    # delivered: no more retries
+    assert len(calls) == 2
+
+
+def test_no_worker_down_alert_right_after_wake(db):
+    out = _Outbox()
+    set_worker_control("worker_status", "idle", db_path=db)
+    set_worker_control("worker_heartbeat_at", (NOW - timedelta(hours=8)).isoformat(), db_path=db)
+    oa.run_operator_checks(db_path=db, config=_CFG, now=NOW - timedelta(hours=8), send=out, force=True)
+    out.clear()
+    # first tick after an 8h sleep: heartbeat is stale only because everything slept
+    oa.run_operator_checks(db_path=db, config=_CFG, now=NOW, send=out, force=True)
+    assert not any("worker" in m for m in out)
+    # the loop keeps ticking (every minute in real life); still no beat once
+    # the post-wake grace is over -> a real outage
+    for m in (8, 16):
+        oa.run_operator_checks(db_path=db, config=_CFG, now=NOW + timedelta(minutes=m), send=out, force=True)
+    assert any("الـ worker مش شغال" in m for m in out)

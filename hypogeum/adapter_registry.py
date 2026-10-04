@@ -690,3 +690,29 @@ def supersede_adapter_registration(
         return _row_to_binding(row)
     finally:
         conn.close()
+
+
+def stale_registrations(db_path: Optional[Path] = None) -> list:
+    """Active registrations whose adapter module source no longer matches the
+    recorded checksum — every gated call for them is refused until superseded
+    (scripts/supersede_changed_adapters.py). 2026-10-04: adapters edited
+    without this -> three failed runs before anyone knew. Returns
+    [{provider, model, provider_operation, recorded, live, qualified_name}]."""
+    conn = get_connection(db_path)
+    try:
+        _ensure_tables(conn)
+        rows = [dict(r) for r in conn.execute("SELECT * FROM adapter_registrations WHERE status='active'")]
+    finally:
+        conn.close()
+    out = []
+    for r in rows:
+        try:
+            live = compute_adapter_implementation_checksum(load_adapter_class(r["adapter_qualified_name"]))
+        except Exception as exc:  # noqa: BLE001 — unloadable adapter is stale too
+            live = f"unloadable: {exc}"
+        if live != r["adapter_implementation_checksum"]:
+            out.append({"provider": r["provider"], "model": r["model"],
+                        "provider_operation": r["provider_operation"],
+                        "recorded": r["adapter_implementation_checksum"], "live": live,
+                        "qualified_name": r["adapter_qualified_name"]})
+    return out

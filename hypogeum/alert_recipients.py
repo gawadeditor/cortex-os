@@ -120,7 +120,7 @@ ALERT_TYPES = [
 _PREFIX_TYPE = [("production:", "production"), ("openrouter:", "credits"), ("openrouter_ws:", "credits"), ("cover:", "covers"),
                 ("postcover:", "covers"), ("post:", "posts"), ("account:", "accounts"),
                 ("approval:", "approvals"), ("worker:", "system"), ("disk:", "system"),
-                ("archive:", "system"), ("signal:", "system")]
+                ("archive:", "system"), ("signal:", "system"), ("system:", "system")]
 
 
 def alert_type_of(alert_key: str) -> str:

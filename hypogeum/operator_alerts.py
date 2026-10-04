@@ -61,10 +61,14 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _conn(db_path):
+def _conn(db_path, *, ddl: bool = True):
     from hypogeum.db import get_connection
     c = get_connection(Path(db_path) if db_path else None)
-    c.executescript(_DDL)
+    # wait out a concurrent writer (worker / cover-hold loop / sleep-wake
+    # burst) instead of failing the check with "database is locked"
+    c.execute("PRAGMA busy_timeout = 15000")
+    if ddl:
+        c.executescript(_DDL)
     return c
 
 
@@ -97,16 +101,21 @@ def alert(key: str, title: str, body: str = "", *, db_path=None, config=None,
             row = conn.execute("SELECT status FROM operator_alerts WHERE alert_key=?", (key,)).fetchone()
             if row and row["status"] == "open":
                 return False
-            send = send if send is not None else _sender(_config(config))
-            ok = bool(send(f"🔴 {title}\n\n{body}".strip())) if send is not None else False
+            # Mark open first, then send: if the DB write fails nothing is
+            # sent, so a lock can never turn into a repeated message.
             now = _now().isoformat()
             conn.execute(
                 "INSERT INTO operator_alerts (alert_key, status, title, body, opened_at, resolved_at, last_sent_at, send_ok) "
-                "VALUES (?,?,?,?,?,NULL,?,?) ON CONFLICT(alert_key) DO UPDATE SET status='open', title=excluded.title, "
-                "body=excluded.body, opened_at=excluded.opened_at, resolved_at=NULL, last_sent_at=excluded.last_sent_at, "
-                "send_ok=excluded.send_ok",
-                (key, "open", title, body, now, now if send is not None else None, 1 if ok else 0))
+                "VALUES (?,?,?,?,?,NULL,NULL,0) ON CONFLICT(alert_key) DO UPDATE SET status='open', title=excluded.title, "
+                "body=excluded.body, opened_at=excluded.opened_at, resolved_at=NULL, last_sent_at=NULL, send_ok=0",
+                (key, "open", title, body, now))
             conn.commit()
+            send = send if send is not None else _sender(_config(config))
+            ok = bool(send(f"🔴 {title}\n\n{body}".strip())) if send is not None else False
+            if send is not None:
+                conn.execute("UPDATE operator_alerts SET last_sent_at=?, send_ok=? WHERE alert_key=?",
+                             (_now().isoformat(), 1 if ok else 0, key))
+                conn.commit()
         finally:
             conn.close()
         log.info("operator_alert_opened", key=key, sent=ok)
@@ -126,12 +135,12 @@ def resolve(key: str, note: str = "", *, db_path=None, config=None,
             row = conn.execute("SELECT status, title FROM operator_alerts WHERE alert_key=?", (key,)).fetchone()
             if not row or row["status"] != "open":
                 return False
+            conn.execute("UPDATE operator_alerts SET status='resolved', resolved_at=? WHERE alert_key=?",
+                         (_now().isoformat(), key))
+            conn.commit()   # before sending, as in alert()
             send = send if send is not None else _sender(_config(config))
             if send is not None:
                 send(f"🟢 اتحلت: {row['title']}" + (f"\n{note}" if note else ""))
-            conn.execute("UPDATE operator_alerts SET status='resolved', resolved_at=? WHERE alert_key=?",
-                         (_now().isoformat(), key))
-            conn.commit()
         finally:
             conn.close()
         log.info("operator_alert_resolved", key=key)
@@ -233,8 +242,7 @@ def check_worker(db_path, now: datetime) -> dict:
 
 
 def check_blocking_signals(db_path) -> dict:
-    from hypogeum.db import get_connection
-    conn = get_connection(Path(db_path) if db_path else None)
+    conn = _conn(db_path, ddl=False)
     try:
         rows = conn.execute("SELECT signal_type, channel_id, full_record FROM signal_records "
                             "WHERE blocking=1 AND lifecycle_status='open' ORDER BY ingested_at DESC").fetchall()
@@ -257,8 +265,7 @@ def check_blocking_signals(db_path) -> dict:
 def check_youtube_covers(db_path, now: datetime) -> dict:
     """Held Shorts already uploaded (private) on YouTube and still waiting for
     the operator's cover — the release slot can't go public without it."""
-    from hypogeum.db import get_connection
-    conn = get_connection(Path(db_path) if db_path else None)
+    conn = _conn(db_path, ddl=False)
     try:
         rows = conn.execute(
             "SELECT h.post_id, h.channel_id, h.release_at, h.status FROM youtube_cover_holds h "
@@ -290,9 +297,8 @@ def check_posts(db_path, now: datetime) -> dict:
     (needs_attention), or a live Short whose Studio cover isn't confirmed.
     Only posts slotted in the last 3 days — older failures are history, not
     something the operator can still act on in time."""
-    from hypogeum.db import get_connection
     from hypogeum.dashboard_content_grid import get_content_grid
-    conn = get_connection(Path(db_path) if db_path else None)
+    conn = _conn(db_path, ddl=False)
     try:
         channels = [r[0] for r in conn.execute(
             "SELECT DISTINCT channel_id FROM channel_provider_bindings WHERE channel_id IS NOT NULL")]
@@ -325,8 +331,7 @@ def check_posts(db_path, now: datetime) -> dict:
 
 
 def check_accounts(db_path) -> dict:
-    from hypogeum.db import get_connection
-    conn = get_connection(Path(db_path) if db_path else None)
+    conn = _conn(db_path, ddl=False)
     try:
         rows = conn.execute("SELECT provider_id, platform, display_label FROM provider_accounts "
                             "WHERE needs_reconnection=1 OR status NOT IN ('active')").fetchall()

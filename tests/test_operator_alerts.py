@@ -160,3 +160,15 @@ def test_held_short_not_alerted_twice(db, monkeypatch):
             self.c.close()
     monkeypatch.setattr("hypogeum.db.get_connection", lambda path=None: _Conn(get_connection(path)))
     assert set(oa.check_posts(db, NOW)) == {"postcover:p2"}
+
+
+def test_alert_recorded_before_send_so_a_lock_cannot_cause_a_resend(db):
+    """If the DB write failed after sending, the next check would send the
+    same message again — so the open row must exist before send() runs."""
+    seen = []
+
+    def _send(text):
+        seen.append(oa.open_alert_keys("x:", db))
+        return True
+    oa.alert("x:9", "t", db_path=db, send=_send)
+    assert seen == [{"x:9"}]

@@ -160,3 +160,19 @@ def test_approve_button_press_through_the_bot(env, monkeypatch):
     ar.poll_once(db, http=bot)
     assert pa.get(aid, db)["status"] == "approved"
     assert ("answerCallbackQuery", "Approved ✅") in bot.sent
+
+
+def test_status_command_and_action_button_through_the_bot(env):
+    db, bot = env
+    from hypogeum.db import get_worker_control, set_worker_control
+    set_worker_control("queue_paused", "1", db_path=db)
+    bot.user_says(999, "/status", 1)                       # the operator's .env chat
+    ar.poll_once(db, http=bot)
+    status_msg = [t for c, t in bot.sent if c == "999"][-1]
+    assert "حالة المصنع" in status_msg
+    bot.updates.append({"update_id": 2, "callback_query": {
+        "id": "cq", "data": "act:resume:", "from": {"first_name": "Op"},
+        "message": {"message_id": 5, "chat": {"id": 999, "type": "private"}}}})
+    ar.poll_once(db, http=bot)
+    assert get_worker_control("queue_paused", "0", db_path=db) == "0"
+    assert [t for c, t in bot.sent if c == "999"][-1].startswith("▶️")

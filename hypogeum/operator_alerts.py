@@ -79,7 +79,7 @@ def _conn(db_path, *, ddl: bool = True):
 
 
 def _deliver(key: str, workspace_id: Optional[str], ar_text: str, en_text: Optional[str],
-             config, db_path) -> bool:
+             config, db_path, *, with_buttons: bool = True) -> bool:
     """Send to every chat that should get this alert (hypogeum.alert_recipients):
     the workspace's own chats in the workspace's language, the operator's
     chats in Arabic; each chat's alert-type checklist applies."""
@@ -89,10 +89,18 @@ def _deliver(key: str, workspace_id: Optional[str], ar_text: str, en_text: Optio
     operator_chats = set(ar.chat_ids_for(None, db_path=db_path, config=cfg, alert_type=atype))
     chats = ar.chat_ids_for(workspace_id, db_path=db_path, config=cfg, alert_type=atype)
     lang = ar._lang(workspace_id, db_path) if workspace_id else "ar"
+    # the operator gets buttons that act on the alert (hypogeum.operator_actions);
+    # a client chat gets the message only
+    try:
+        from hypogeum.operator_actions import buttons_for
+        op_buttons = buttons_for(key, db_path) if with_buttons else None
+    except Exception:  # noqa: BLE001
+        op_buttons = None
     ok_any = False
     for chat in chats:
-        text = ar_text if (chat in operator_chats or lang != "en" or not en_text) else en_text
-        ok_any = ar.send_to_chat(chat, text, config=cfg) or ok_any
+        is_op = chat in operator_chats
+        text = ar_text if (is_op or lang != "en" or not en_text) else en_text
+        ok_any = ar.send_to_chat(chat, text, config=cfg, reply_markup=op_buttons if is_op else None) or ok_any
     return ok_any
 
 
@@ -163,10 +171,12 @@ def resolve(key: str, note: str = "", *, db_path=None, config=None,
             conn.commit()   # before sending, as in alert()
             ar_text = f"🟢 اتحلت: {row['title']}" + (f"\n{note}" if note else "")
             en_text = f"🟢 Resolved: {row['title_en']}" if row["title_en"] else None
-            if send is not None:
+            if not row["send_ok"]:
+                pass   # its alert never reached anyone: a lone "resolved" only confuses (2026-10-04)
+            elif send is not None:
                 send(ar_text)
             else:
-                _deliver(key, row["workspace_id"], ar_text, en_text, config, db_path)
+                _deliver(key, row["workspace_id"], ar_text, en_text, config, db_path, with_buttons=False)
         finally:
             conn.close()
         log.info("operator_alert_resolved", key=key)
@@ -318,7 +328,7 @@ def check_adapters(db_path) -> dict:
     return {"system:adapters_stale": (
         "كود الـ adapters اتغير ومتسجلش",
         f"{len(stale)} تسجيل قديم ({names}). أي حلقة هتبدأ هتفشل فوراً لحد ما يتسجلوا من جديد.\n"
-        "الحل: python3 scripts/supersede_changed_adapters.py --apply --reason \"...\" (بعد commit للكود).")}
+        "اضغط «سجّل الـ adapters» (لازم الكود يكون متعمله commit).")}
 
 
 def check_worker(db_path, now: datetime) -> dict:
@@ -339,8 +349,7 @@ def check_worker(db_path, now: datetime) -> dict:
         return {}
     return {"worker:down": ("الـ worker مش شغال",
                             f"آخر نبضة منه من {gap_min:.0f} دقيقة (حالته: {status or '?'}).\n"
-                            "من غيره مفيش حلقات جديدة بتتعمل ولا بتتجدول. "
-                            "شغّله تاني: launchctl kickstart -k gui/$(id -u)/com.hypogeum.worker")}
+                            "من غيره مفيش حلقات جديدة بتتعمل ولا بتتجدول. اضغط «شغّل الـ worker».")}
 
 
 def check_blocking_signals(db_path) -> dict:

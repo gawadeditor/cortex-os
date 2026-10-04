@@ -263,12 +263,13 @@ def disconnect(recipient_id: str, db_path=None) -> bool:
     return bool(n)
 
 
-def send_to_chat(chat_id: str, text: str, *, http=None, config=None) -> bool:
+def send_to_chat(chat_id: str, text: str, *, http=None, config=None, reply_markup=None) -> bool:
     token = getattr(config or _config(), "TELEGRAM_BOT_TOKEN", None)
     if not token:
         return False
     try:
-        return bool(_api("sendMessage", token=token, http=http, chat_id=chat_id, text=text).get("ok"))
+        extra = {"reply_markup": reply_markup} if reply_markup else {}
+        return bool(_api("sendMessage", token=token, http=http, chat_id=chat_id, text=text, **extra).get("ok"))
     except Exception as exc:  # noqa: BLE001
         log.warn("telegram_send_failed", error=str(exc)[:200])
         return False
@@ -395,6 +396,11 @@ def poll_once(db_path=None, *, http=None, timeout: int = 0) -> int:
         try:
             if upd.get("callback_query"):
                 _handle_button(upd["callback_query"], token=token, http=http, db_path=db_path)
+            elif (msg.get("text") or "").strip().lower().startswith(("/status", "/help")):
+                from hypogeum.operator_actions import handle_command
+                res = handle_command(str((msg.get("chat") or {}).get("id", "")), msg.get("text"), db_path=db_path)
+                if res:
+                    send_to_chat(str(msg["chat"]["id"]), res[0], http=http, reply_markup=res[1])
             else:
                 handle_message(msg.get("chat") or {}, msg.get("text") or "", db_path=db_path,
                                reply=lambda cid, t: send_to_chat(cid, t, http=http))
@@ -413,6 +419,18 @@ def _handle_button(cq: dict, *, token, http, db_path) -> None:
     label = " ".join(x for x in (user.get("first_name"), user.get("last_name")) if x) or user.get("username") or chat_id
     data = cq.get("data") or ""
     answer = "Unknown action"
+    if data.startswith("act:"):
+        # operator action from an alert's button: run it, report the outcome
+        # as a message (can be long), acknowledge the press briefly
+        from hypogeum.operator_actions import handle as _act
+        _api("answerCallbackQuery", token=token, http=http, callback_query_id=cq.get("id"), text="⏳")
+        result = _act(chat_id, data, db_path=db_path)
+        markup = None
+        if data.startswith("act:status:"):
+            from hypogeum.operator_actions import status_text
+            result, markup = status_text(db_path)
+        send_to_chat(chat_id, result, http=http, reply_markup=markup)
+        return
     if data.startswith("appr:"):
         from hypogeum.publish_approvals import handle_callback
         answer = handle_callback(chat_id, data, label, db_path=db_path)
@@ -429,6 +447,12 @@ def start_bot_loop(db_path=None) -> Optional[threading.Thread]:
     if not getattr(_config(), "TELEGRAM_BOT_TOKEN", None):
         return None
     stop = threading.Event()
+    try:   # the bot's command menu in Telegram
+        _api("setMyCommands", token=getattr(_config(), "TELEGRAM_BOT_TOKEN", None), commands=[
+            {"command": "status", "description": "حالة المصنع + زراير لأي حاجة محتاجة تدخّل"},
+            {"command": "help", "description": "الأوامر"}])
+    except Exception as exc:  # noqa: BLE001
+        log.warn("telegram_set_commands_failed", error=str(exc)[:200])
 
     def _loop():
         while not stop.is_set():

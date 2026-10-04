@@ -21,7 +21,10 @@ def install_passthrough(monkeypatch):
             payload = {}
         return SimpleNamespace(
             capability=capability,
-            envelope=None,
+            # the real verified context always carries the envelope; adapters
+            # read its channel_id to pick the owning workspace's keys
+            envelope=SimpleNamespace(channel_id=None),
+            _db_path=None,
             operation_payload=payload,
             execution_id=str(payload.get("episode_id", "")),
             idempotency_key=capability.idempotency_key,

@@ -603,6 +603,11 @@ def query_perplexity(
         PerplexityAuthFailure         — HTTP 401 specifically.
         PerplexitySoftFailureExhausted — Soft failure persisted through all retries.
     """
+    # Multi-tenant Phase 2: spend with the keys of the workspace that owns
+    # channel_id (hypogeum.workspace_keys); no channel = caller's config.
+    if channel_id:
+        from hypogeum.workspace_keys import config_for_channel
+        config = config_for_channel(config, channel_id)
     log = get_logger(episode_id=episode_id, agent=agent or "perplexity")
     max_tokens = max_tokens_override or config.PERPLEXITY_MAX_TOKENS or 2048
 

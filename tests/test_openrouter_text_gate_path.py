@@ -270,6 +270,72 @@ class TestGrantDerivedGatePath:
                 assert "lease unavailable" not in str(exc), exc
 
 
+class TestWorkspaceKeyIsolation:
+    """Multi-tenant Phase 2: the key that goes out on the wire is the key of
+    the workspace owning the channel of the VERIFIED envelope — a client
+    channel never spends the operator's balance."""
+
+    def _setup(self, priv, tmp_path, monkeypatch):
+        import hypogeum.db as db
+        from hypogeum import workspaces as ws
+        from hypogeum.factory_entity import create_factory
+        db_path = tmp_path / "auth.db"
+        db.initialize_schema(db_path)
+        _register_grant(priv, db_path)
+        monkeypatch.setattr(db, "_DEFAULT_DB_PATH", db_path)
+        ws._READY.discard(str(db_path))
+        create_factory("operator", "Operator", "operator", db_path=db_path)
+        ws.backfill_platform_workspace(db_path)
+        ws.create_workspace("Acme", workspace_id="acme", db_path=db_path)
+        return db_path
+
+    def _auth_headers(self, cfg, monkeypatch):
+        seen = []
+
+        def _post(url, *a, **kw):
+            seen.append((kw.get("headers") or {}).get("Authorization"))
+            return openrouter_200("ok")
+        with patch("hypogeum.openrouter.requests.post", side_effect=_post), \
+             patch("hypogeum.openrouter.time.sleep"):
+            try:
+                call_claude(SONNET, MINIMAL_MESSAGES, 512, cfg, episode_id="ep_gate_test", channel_id="test_channel")
+            except Exception:  # noqa: BLE001 — a missing key may fail the call; we only inspect the wire
+                pass
+        return seen
+
+    def test_client_channel_uses_client_key_never_operator_key(self, keypair, tmp_path, monkeypatch):
+        from hypogeum import workspaces as ws
+        from hypogeum.credential_manager import create_secret_profile
+        priv, _ = keypair
+        db_path = self._setup(priv, tmp_path, monkeypatch)
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-OPERATOR")
+        ws.assign("channel", "test_channel", "acme", db_path=db_path)
+        create_secret_profile("openrouter", "acme", "api_key", "sk-or-ACME", workspace_id="acme", db_path=db_path)
+
+        seen = self._auth_headers(make_config({"OPENROUTER_API_KEY": "sk-or-OPERATOR"}), monkeypatch)
+        assert seen and all(h == "Bearer sk-or-ACME" for h in seen), seen
+
+    def test_client_without_key_never_falls_back_to_operator(self, keypair, tmp_path, monkeypatch):
+        from hypogeum import workspaces as ws
+        priv, _ = keypair
+        db_path = self._setup(priv, tmp_path, monkeypatch)
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-OPERATOR")
+        ws.assign("channel", "test_channel", "acme", db_path=db_path)
+
+        seen = self._auth_headers(make_config({"OPENROUTER_API_KEY": "sk-or-OPERATOR"}), monkeypatch)
+        assert not any(h and "OPERATOR" in h for h in seen), seen
+
+    def test_operator_channel_keeps_env_key(self, keypair, tmp_path, monkeypatch):
+        from hypogeum import workspaces as ws
+        priv, _ = keypair
+        db_path = self._setup(priv, tmp_path, monkeypatch)
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-OPERATOR")
+        ws.assign("channel", "test_channel", "operator", db_path=db_path)
+
+        seen = self._auth_headers(make_config({"OPENROUTER_API_KEY": "sk-or-OPERATOR"}), monkeypatch)
+        assert seen and all(h == "Bearer sk-or-OPERATOR" for h in seen), seen
+
+
 class TestLegacyGrantStillRoutesThroughGate:
     """Phase 2 correction: a PRE-PHASE-2 historical grant (checksum
     computed before production_plan_content_hash existed; NULL column)

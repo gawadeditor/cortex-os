@@ -70,10 +70,11 @@ def _default_llm(config=None) -> Callable[[str, str, int], tuple]:
         config = Config()
 
     def _run(system: str, user: str, max_tokens: int, *, agent: str, client_id: str) -> tuple:
+        from hypogeum.workspace_keys import config_for_client
         res = call_claude(model_slug=_MODEL,
                           messages=[{"role": "system", "content": system},
                                     {"role": "user", "content": user}],
-                          max_tokens=max_tokens, config=config, agent=agent,
+                          max_tokens=max_tokens, config=config_for_client(config, client_id), agent=agent,
                           episode_id=f"client:{client_id}")
         return res.content, float(getattr(res, "estimated_cost_usd", 0.0) or 0.0)
     return _run

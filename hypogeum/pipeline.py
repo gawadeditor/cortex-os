@@ -888,6 +888,13 @@ def run_pipeline(
         if channel_config.channel.status != "active":
             raise ChannelNotActiveError(channel_id, channel_config.channel.status)
         config.apply_channel_config(channel_config)
+    # Multi-tenant Phase 2: from here on every agent spends with the keys of
+    # the workspace that owns this channel (the gate adapters re-derive the
+    # same from their verified envelope). Raises for an ownerless channel
+    # once client workspaces exist.
+    from hypogeum.workspace_keys import config_for_channel
+    config = config_for_channel(config, channel_id, db_path)
+    if channel_id is not None:
         # ADR-013 Decision 7, item 3: thread the Channel Package's persisted
         # publishing-provider preference into the existing runtime
         # parameter. Only applied when the caller did not already pass an

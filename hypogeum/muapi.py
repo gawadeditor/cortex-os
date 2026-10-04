@@ -1661,6 +1661,11 @@ def submit_scene(
     hypogeum.agents.clip_repair_agent's two repair call sites pass
     True. Has no effect on the legacy (channel_id=None) path.
     """
+    # Multi-tenant Phase 2: spend with the keys of the workspace that owns
+    # channel_id (hypogeum.workspace_keys); no channel = caller's config.
+    if channel_id:
+        from hypogeum.workspace_keys import config_for_channel
+        config = config_for_channel(config, channel_id)
     scene_id = scene_spec["scene_id"]
     short_id = scene_spec.get("short_id")
     visual_spec = scene_spec.get("visual_spec", {})
@@ -2224,6 +2229,11 @@ def generate_reference_image(
         MUAPIBudgetExhausted — Episode budget limit reached (M5.6).
         MUAPIError          — Image generation failed after both attempts.
     """
+    # Multi-tenant Phase 2: spend with the keys of the workspace that owns
+    # channel_id (hypogeum.workspace_keys); no channel = caller's config.
+    if channel_id:
+        from hypogeum.workspace_keys import config_for_channel
+        config = config_for_channel(config, channel_id)
     if video_aspect_ratio not in _VIDEO_TO_REF_ASPECT:
         raise AssetClassError(
             f"Unsupported video_aspect_ratio={video_aspect_ratio!r} for reference image. "
@@ -3170,6 +3180,11 @@ def generate_thumbnail(
         MUAPIBudgetExhausted — Episode budget limit reached (M5.6).
         MUAPIError           — Image generation or download failed.
     """
+    # Multi-tenant Phase 2: spend with the keys of the workspace that owns
+    # channel_id (hypogeum.workspace_keys); no channel = caller's config.
+    if channel_id:
+        from hypogeum.workspace_keys import config_for_channel
+        config = config_for_channel(config, channel_id)
     log = get_logger(episode_id=episode_id, agent=agent or "muapi")
 
     # Provider priority chain: primary → fallback1 → fallback2

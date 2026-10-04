@@ -149,7 +149,9 @@ class ElevenlabsVoiceAdapter:
         from hypogeum.elevenlabs import ElevenLabsError
 
         payload = decode_narration_payload(capability.operation_payload_bytes)
-        config = Config()
+        # keys of the workspace owning the VERIFIED envelope's channel (Phase 2)
+        from hypogeum.workspace_keys import config_for_channel
+        config = config_for_channel(Config(), ctx.envelope.channel_id, ctx._db_path)
         log = get_logger("elevenlabs_voice_adapter")
 
         url = f"{_BASE_URL}/v1/text-to-speech/{payload['voice_id']}/with-timestamps"

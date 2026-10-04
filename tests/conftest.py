@@ -181,6 +181,30 @@ def _block_guardrail_leakage():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_workspace_key_lookup(monkeypatch):
+    """hypogeum.workspace_keys.config_for_channel() looks up the channel's
+    owner in the DB. Provider entry points (call_claude, submit_scene, ...)
+    call it with no db_path, so a test that hasn't redirected the DB would
+    read the PRODUCTION workspace tables. Against the production DB it is a
+    pass-through (config unchanged, today's single-tenant behaviour); any
+    test that redirects hypogeum.db._DEFAULT_DB_PATH or passes a db_path
+    gets the real resolution."""
+    from pathlib import Path as _Path
+    import hypogeum.db as _db_mod
+    import hypogeum.workspace_keys as _wk
+    production = _Path(_db_mod._DEFAULT_DB_PATH).resolve()
+    real = _wk.config_for_channel
+
+    def _guarded(config, channel_id, db_path=None):
+        effective = _Path(db_path).resolve() if db_path else _Path(_db_mod._DEFAULT_DB_PATH).resolve()
+        if effective == production:
+            return config
+        return real(config, channel_id, db_path)
+    monkeypatch.setattr(_wk, "config_for_channel", _guarded)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _isolate_vault_key(tmp_path_factory):
     """hypogeum.vault creates/reads its master key at ~/.cortex/vault.key —
     a test must never create, read or depend on the operator's real key.

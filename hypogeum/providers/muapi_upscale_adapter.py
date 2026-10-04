@@ -185,7 +185,9 @@ class MuapiUpscaleAdapter:
         capability = ctx.capability
 
         t0 = time.time()
-        result = _execute_raw_upscale_http(ctx=ctx, config=Config(), t0=t0)
+        from hypogeum.workspace_keys import config_for_channel  # Phase 2: owner's keys
+        result = _execute_raw_upscale_http(
+            ctx=ctx, config=config_for_channel(Config(), ctx.envelope.channel_id, ctx._db_path), t0=t0)
 
         if not result.success:
             return AdapterResult(

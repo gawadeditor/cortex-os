@@ -155,6 +155,9 @@ def analyze_content_item(content_item: dict, *, config=None, client: Optional[di
         if config is None:
             from hypogeum.config import Config
             config = Config()
+        # spend with the keys of the workspace owning this client (Phase 2)
+        from hypogeum.workspace_keys import config_for_client
+        config = config_for_client(config, (client or {}).get("client_id") or content_item.get("client_id"))
         analyze_fn = _default_analyze_fn(config)
 
     try:

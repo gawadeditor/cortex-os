@@ -124,7 +124,9 @@ class MuapiThumbnailAdapter:
         from hypogeum.muapi import _download_file, _poll_until_complete, _submit_http, _MIN_IMAGE_BYTES
 
         payload = decode_thumbnail_payload(capability.operation_payload_bytes)
-        config = Config()
+        # keys of the workspace owning the VERIFIED envelope's channel (Phase 2)
+        from hypogeum.workspace_keys import config_for_channel
+        config = config_for_channel(Config(), ctx.envelope.channel_id, ctx._db_path)
         log = get_logger("muapi_thumbnail_adapter")
 
         deliverable_id = payload["deliverable_id"]

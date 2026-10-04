@@ -877,6 +877,11 @@ def call_claude(
                              level (FailurePolicy.TRANSIENT by default) —
                              never falls through to Anthropic direct.
     """
+    # Multi-tenant Phase 2: spend with the keys of the workspace that owns
+    # channel_id (hypogeum.workspace_keys); no channel = caller's config.
+    if channel_id:
+        from hypogeum.workspace_keys import config_for_channel
+        config = config_for_channel(config, channel_id)
     global _use_anthropic_for_run
     log = get_logger(episode_id=episode_id, agent=agent)
 

@@ -156,7 +156,9 @@ class OpenrouterTextAdapter:
         )
 
         payload = decode_text_payload(capability.operation_payload_bytes)
-        config = Config()
+        # keys of the workspace owning the VERIFIED envelope's channel (Phase 2)
+        from hypogeum.workspace_keys import config_for_channel
+        config = config_for_channel(Config(), ctx.envelope.channel_id, ctx._db_path)
         log = get_logger("openrouter_text_adapter")
         start_ms = int(time.monotonic() * 1000)
 

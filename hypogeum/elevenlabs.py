@@ -879,6 +879,11 @@ def generate_narration_segment(
         ElevenLabsRateLimitError — 429 after retry.
         ElevenLabsError          — Any other generation failure.
     """
+    # Multi-tenant Phase 2: spend with the keys of the workspace that owns
+    # channel_id (hypogeum.workspace_keys); no channel = caller's config.
+    if channel_id:
+        from hypogeum.workspace_keys import config_for_channel
+        config = config_for_channel(config, channel_id)
     log = get_logger(episode_id=episode_id, agent=agent or "elevenlabs")
 
     # Weekly reservation boundary -- established BEFORE the gate branch so
@@ -1767,6 +1772,11 @@ def generate_music_track(
                                      without music. This is a non-blocking failure path.
         ElevenLabsAuthFailure      — HTTP 401 (hard failure; no further music generation).
     """
+    # Multi-tenant Phase 2: spend with the keys of the workspace that owns
+    # channel_id (hypogeum.workspace_keys); no channel = caller's config.
+    if channel_id:
+        from hypogeum.workspace_keys import config_for_channel
+        config = config_for_channel(config, channel_id)
     log = get_logger(episode_id=episode_id, agent=agent or "elevenlabs_music")
 
     # Per-channel override (ModelProfile.music_provider) beats the global

@@ -128,3 +128,35 @@ def test_raw_signals_not_routed_to_telegram_by_default(monkeypatch):
     from hypogeum.config import Config
     monkeypatch.delenv("TELEGRAM_RAW_SIGNALS", raising=False)
     assert Config().TELEGRAM_RAW_SIGNALS is False
+
+
+
+def test_held_short_not_alerted_twice(db, monkeypatch):
+    """A held Short's private upload looks 'published' to the Content Grid,
+    which flags youtube_cover_pending — check_youtube_covers already owns it."""
+    conn = get_connection(db)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS youtube_cover_holds (post_id TEXT PRIMARY KEY, channel_id TEXT,
+            episode_id TEXT, release_at TEXT, upload_at TEXT, status TEXT, held_at TEXT,
+            released_at TEXT, last_error TEXT);
+        INSERT INTO youtube_cover_holds VALUES ('p1','hypogeum','ep','2026-10-05T10:00:00Z',
+            '2026-10-04T10:00:00Z','held','x',NULL,NULL);
+    """)
+    conn.commit()
+    conn.close()
+    import hypogeum.dashboard_content_grid as grid
+    items = [{"post_id": p, "display_title": p, "scheduled_for": "2026-10-04T09:00:00Z",
+              "needs_attention": False, "youtube_cover_pending": True} for p in ("p1", "p2")]
+    monkeypatch.setattr(grid, "get_content_grid", lambda ch, db_path=None: items)
+
+    class _Conn:   # channel list -> just hypogeum; everything else hits the real test DB
+        def __init__(self, c):
+            self.c = c
+
+        def execute(self, sql, *a):
+            return [("hypogeum",)] if "channel_provider_bindings" in sql else self.c.execute(sql, *a)
+
+        def close(self):
+            self.c.close()
+    monkeypatch.setattr("hypogeum.db.get_connection", lambda path=None: _Conn(get_connection(path)))
+    assert set(oa.check_posts(db, NOW)) == {"postcover:p2"}

@@ -296,6 +296,11 @@ def check_posts(db_path, now: datetime) -> dict:
     try:
         channels = [r[0] for r in conn.execute(
             "SELECT DISTINCT channel_id FROM channel_provider_bindings WHERE channel_id IS NOT NULL")]
+        try:   # a held Short is check_youtube_covers' job — don't alert it twice
+            held = {r[0] for r in conn.execute(
+                "SELECT post_id FROM youtube_cover_holds WHERE status IN ('held','late','release_failed')")}
+        except Exception:  # noqa: BLE001
+            held = set()
     finally:
         conn.close()
     since = (now - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%S")
@@ -311,7 +316,7 @@ def check_posts(db_path, now: datetime) -> dict:
                     f"بوست على {ch} مانزلش صح",
                     f"«{title}»\nحالته في Zernio: {it.get('status')} — المنصات اللي لسه: {stuck}\n"
                     f"{_DASHBOARD}/channel/{ch}/grid")
-            if it.get("youtube_cover_pending"):
+            if it.get("youtube_cover_pending") and it["post_id"] not in held:
                 out[f"postcover:{it['post_id']}"] = (
                     f"شورت {ch} نزل على يوتيوب من غير تأكيد الغلاف",
                     f"«{title}»\nارفع الغلاف من YouTube Studio واضغط Done في الـ Content Grid:\n"

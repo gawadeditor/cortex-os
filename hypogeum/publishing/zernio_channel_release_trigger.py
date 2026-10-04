@@ -1054,6 +1054,33 @@ def process_channel_ready_bundles(
                     ))
                 continue
 
+        # Approval before publishing (multi-tenant Phase 4d,
+        # hypogeum.publish_approvals): when the channel's workspace requires
+        # it, nothing is staged or posted -- not even the early private
+        # YouTube upload -- until someone approves (Telegram buttons or the
+        # Workspaces page). Off by default; a no-op for channels without it.
+        try:
+            from hypogeum.publish_approvals import gate as _approval_gate
+            _preview_d = package.shorts[0] if package.shorts else package.main_episode
+            _decision = _approval_gate(channel_id, item.item_id, {
+                "title": _preview_d.title, "description": _preview_d.description,
+                "cover_path": _preview_d.thumbnail_local_path, "video_path": _preview_d.local_path,
+            }, db_path=db_path)
+        except Exception as exc:  # noqa: BLE001 — unknown approval state: hold, never publish blind
+            resolved_log.error("publish_approval_gate_error", channel_id=channel_id,
+                               item_id=item.item_id, error=str(exc)[:200])
+            _decision = "hold"
+        if _decision != "proceed":
+            for platform in resolved_platforms:
+                results.append(ReadyBundle(
+                    item_id=item.item_id, platform=platform,
+                    result=ReleasePublishResult(
+                        channel_id=channel_id, episode_id=item.item_id, platforms=[platform],
+                        status="awaiting_approval", blocked_reason="waiting for approval before publishing",
+                    ),
+                ))
+            continue
+
         # Cross-platform readiness — called ONCE per item, BEFORE any
         # staging/intent/provider call for ANY platform below. A failed
         # (deliverable, platform) combination is removed from that

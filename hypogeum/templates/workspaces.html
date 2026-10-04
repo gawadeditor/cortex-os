@@ -33,6 +33,14 @@
     .status-line.is-good { color: var(--good); }
     .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
     .note { font-size: 12.5px; color: var(--faint); margin-top: 8px; }
+    .approvals { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
+    .appr-form { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+    .appr-field { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted, var(--faint));
+                  text-transform: none; letter-spacing: normal; font-weight: 400; }
+    .appr-field select, .appr-field input { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border);
+                  background: var(--overlay); color: var(--text); font: inherit; font-size: 13px; min-height: 36px; }
+    .appr-field input { width: 80px; }
+    .appr-cover { border-radius: 6px; object-fit: cover; border: 1px solid var(--border); }
     .types { flex-basis: 100%; border: 0; padding: 4px 0 0; margin: 0; display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
     .types legend { padding: 0; margin-bottom: 4px; }
     .type-opt { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text);
@@ -149,6 +157,35 @@
       </div>
       <p class="note">Alerts arrive once per problem and once more when it’s resolved: production paused, provider credits running out, covers or posts that need action. {% if w.kind != 'platform_owner' %}You (the platform) also receive every alert for this workspace.{% endif %}</p>
     </div>
+
+    <div class="alerts approvals">
+      <h3>{{ icon('review') }} Approval before publishing</h3>
+      <form method="post" action="/workspaces/{{ w.workspace_id }}/approvals/settings" class="appr-form">
+        <label class="type-opt"><input type="checkbox" name="required" {{ 'checked' if w.approval_settings.required }}>
+          <span>New episodes need approval before they’re published</span></label>
+        <label class="appr-field">If nobody answers
+          <select name="on_timeout">
+            <option value="hold" {{ 'selected' if w.approval_settings.on_timeout == 'hold' }}>Keep waiting — never publish without approval</option>
+            <option value="publish" {{ 'selected' if w.approval_settings.on_timeout == 'publish' }}>Publish automatically after the time below</option>
+          </select>
+        </label>
+        <label class="appr-field">Hours
+          <input type="number" name="timeout_hours" min="1" max="336" step="1" value="{{ '%g' % w.approval_settings.timeout_hours }}">
+        </label>
+        <button class="btn btn-sm" type="submit">{{ icon('check') }} Save</button>
+      </form>
+      <p class="note">The request goes to this workspace’s Telegram chats (and yours) with the video, title and description, and two buttons: Approve / Reject. With “keep waiting” a reminder is sent after the hours above; with “publish automatically” a reminder goes out halfway.</p>
+      {% for a in w.approvals %}
+      <div class="rcpt" id="a-{{ a.approval_id }}">
+        {% if a.cover_path %}<img class="appr-cover" src="/approvals/{{ a.approval_id }}/cover" alt="Cover of {{ a.title or a.episode_id }}" width="54" height="96" loading="lazy">{% endif %}
+        <span class="who">{{ a.title or a.episode_id }}<br><span class="when">{{ a.channel_id }} · waiting since {{ a.requested_at[:16].replace('T', ' ') }} UTC</span></span>
+        <button class="btn btn-primary btn-sm" type="button" data-decide="{{ a.approval_id }}" data-decision="approved">{{ icon('check') }} Approve</button>
+        <button class="btn btn-sm" type="button" data-decide="{{ a.approval_id }}" data-decision="rejected">{{ icon('x') }} Reject</button>
+      </div>
+      {% else %}
+      <div class="empty">Nothing waiting for approval.</div>
+      {% endfor %}
+    </div>
   </section>
 {% endfor %}
 </div>
@@ -212,6 +249,18 @@
         btn.disabled = false;
         document.getElementById('ts-' + id).textContent = d.ok ? 'Saved' : 'Could not save';
       });
+    });
+  });
+  document.querySelectorAll('[data-decide]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var id = btn.getAttribute('data-decide');
+      document.querySelectorAll('[data-decide="' + id + '"]').forEach(function (b) { b.disabled = true; });
+      fetch('/approvals/' + id + '/decide', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ decision: btn.getAttribute('data-decision') }) })
+        .then(function (r) { return r.json(); }).then(function (d) {
+          var row = document.getElementById('a-' + id);
+          row.querySelector('.who .when').textContent = d.status ? ('now ' + d.status.replace('_', ' ')) : 'could not save';
+        });
     });
   });
   document.querySelectorAll('[data-disconnect]').forEach(function (btn) {

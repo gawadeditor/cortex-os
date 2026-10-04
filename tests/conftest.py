@@ -205,6 +205,27 @@ def _isolate_workspace_key_lookup(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_publish_approval_gate(monkeypatch):
+    """hypogeum.publish_approvals.gate() sits in the Zernio release path and
+    reads/creates its tables in the DB. Against the PRODUCTION DB (a test that
+    didn't redirect) it is a pass-through 'proceed' — today's behaviour for
+    every channel without approval required — and never touches that DB."""
+    from pathlib import Path as _Path
+    import hypogeum.db as _db_mod
+    import hypogeum.publish_approvals as _pa
+    production = _Path(_db_mod._DEFAULT_DB_PATH).resolve()
+    real = _pa.gate
+
+    def _guarded(channel_id, episode_id, preview, *, db_path=None, **kw):
+        effective = _Path(db_path).resolve() if db_path else _Path(_db_mod._DEFAULT_DB_PATH).resolve()
+        if effective == production:
+            return "proceed"
+        return real(channel_id, episode_id, preview, db_path=db_path, **kw)
+    monkeypatch.setattr(_pa, "gate", _guarded)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _isolate_vault_key(tmp_path_factory):
     """hypogeum.vault creates/reads its master key at ~/.cortex/vault.key —
     a test must never create, read or depend on the operator's real key.

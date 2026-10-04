@@ -384,7 +384,7 @@ def poll_once(db_path=None, *, http=None, timeout: int = 0) -> int:
     if not token and http is None:
         return 0
     offset = int(get_worker_control("telegram_update_offset", "0", db_path=_p(db_path)) or 0)
-    params = {"timeout": timeout, "allowed_updates": ["message"]}
+    params = {"timeout": timeout, "allowed_updates": ["message", "callback_query"]}
     if offset:
         params["offset"] = offset
     updates = _api("getUpdates", token=token, http=http, **params).get("result", [])
@@ -393,13 +393,36 @@ def poll_once(db_path=None, *, http=None, timeout: int = 0) -> int:
         offset = max(offset, upd["update_id"] + 1)
         msg = upd.get("message") or {}
         try:
-            handle_message(msg.get("chat") or {}, msg.get("text") or "", db_path=db_path,
-                           reply=lambda cid, t: send_to_chat(cid, t, http=http))
+            if upd.get("callback_query"):
+                _handle_button(upd["callback_query"], token=token, http=http, db_path=db_path)
+            else:
+                handle_message(msg.get("chat") or {}, msg.get("text") or "", db_path=db_path,
+                               reply=lambda cid, t: send_to_chat(cid, t, http=http))
             handled += 1
         except Exception as exc:  # noqa: BLE001
             log.warn("telegram_update_failed", error=str(exc)[:200])
         set_worker_control("telegram_update_offset", str(offset), db_path=_p(db_path))
     return handled
+
+
+def _handle_button(cq: dict, *, token, http, db_path) -> None:
+    """Inline-button press (publish approval: data 'appr:<id>:a|r')."""
+    msg = cq.get("message") or {}
+    chat_id = str((msg.get("chat") or {}).get("id", ""))
+    user = cq.get("from") or {}
+    label = " ".join(x for x in (user.get("first_name"), user.get("last_name")) if x) or user.get("username") or chat_id
+    data = cq.get("data") or ""
+    answer = "Unknown action"
+    if data.startswith("appr:"):
+        from hypogeum.publish_approvals import handle_callback
+        answer = handle_callback(chat_id, data, label, db_path=db_path)
+    _api("answerCallbackQuery", token=token, http=http, callback_query_id=cq.get("id"), text=answer[:190])
+    if msg.get("message_id") and chat_id:
+        try:   # the decision is made (or refused): drop the buttons from this copy
+            _api("editMessageReplyMarkup", token=token, http=http, chat_id=chat_id,
+                 message_id=msg["message_id"], reply_markup={"inline_keyboard": []})
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def start_bot_loop(db_path=None) -> Optional[threading.Thread]:

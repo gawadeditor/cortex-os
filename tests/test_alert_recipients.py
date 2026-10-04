@@ -23,6 +23,9 @@ class FakeBot:
         if method == "sendMessage":
             self.sent.append((str(params["chat_id"]), params["text"]))
             return {"ok": True}
+        if method in ("answerCallbackQuery", "editMessageReplyMarkup"):
+            self.sent.append((method, params.get("text") or params.get("reply_markup")))
+            return {"ok": True}
         if method == "getUpdates":
             off = params.get("offset", 0)
             return {"ok": True, "result": [u for u in self.updates if u["update_id"] >= off]}
@@ -137,3 +140,23 @@ def test_alert_key_to_type():
     assert ar.alert_type_of("production:paused:acme") == "production"
     assert ar.alert_type_of("cover:abc") == "covers" and ar.alert_type_of("postcover:x") == "covers"
     assert ar.alert_type_of("disk:low") == "system"
+
+
+def test_approve_button_press_through_the_bot(env, monkeypatch):
+    db, bot = env
+    from hypogeum import publish_approvals as pa
+    monkeypatch.setattr(pa, "_telegram_notify", lambda row, kind: None)   # no real network in tests
+    from hypogeum import workspaces as ws
+    ws.assign("channel", "acme_ch", "acme", db_path=db)
+    link = ar.create_link("acme", db_path=db, http=bot)
+    bot.user_says(111, f"/start {link['code']}", 1)
+    ar.poll_once(db, http=bot)
+    pa.set_settings("workspace", "acme", required=True, db_path=db)
+    pa.gate("acme_ch", "ep1", {"title": "t"}, db_path=db, notify=lambda r, k: None)
+    aid = pa.list_for("acme", db_path=db)[0]["approval_id"]
+    bot.updates.append({"update_id": 2, "callback_query": {
+        "id": "cq1", "data": f"appr:{aid}:a", "from": {"first_name": "Client"},
+        "message": {"message_id": 7, "chat": {"id": 111, "type": "private"}}}})
+    ar.poll_once(db, http=bot)
+    assert pa.get(aid, db)["status"] == "approved"
+    assert ("answerCallbackQuery", "Approved ✅") in bot.sent

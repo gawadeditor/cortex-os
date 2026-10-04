@@ -10,6 +10,9 @@ registered by run_dashboard.py.
     POST /alerts/recipients/<rid>/disconnect          -> {ok}
     POST /alerts/recipients/<rid>/types  {types:[…]}  -> {ok}   (alert checklist)
     POST /workspaces/<id>/resume                      redirect back
+    POST /workspaces/<id>/approvals/settings          approval-before-publish settings
+    POST /approvals/<aid>/decide  {decision}          -> {ok, status}
+    GET  /approvals/<aid>/cover                       the episode's cover image
 
 Operator-only today (the dashboard has no login yet — Phase 6); the page is
 how the operator connects each client's Telegram in the managed-service
@@ -31,6 +34,7 @@ def _db():
 
 def _workspace_rows(db) -> list[dict]:
     from hypogeum import alert_recipients as ar
+    from hypogeum import publish_approvals as pa
     from hypogeum import workspace_controls as wsc
     from hypogeum.workspaces import list_workspaces, resources_of
     paused = wsc.paused_workspaces(db)
@@ -45,6 +49,8 @@ def _workspace_rows(db) -> list[dict]:
             "paused": wid in paused or (w["kind"] == "platform_owner" and wsc.operator_production_paused(db)),
             "pause_reason": paused.get(wid, ""),
             "recipients": [{**r, "types": ar._types(r)} for r in ar.recipients_for(wid, db)],
+            "approval_settings": pa.get_settings("workspace", wid, db) or dict(pa.DEFAULTS),
+            "approvals": pa.list_for(wid, statuses=("pending",), db_path=db),
         })
     out.sort(key=lambda r: (r["kind"] != "platform_owner", r["name"].lower()))
     return out
@@ -125,3 +131,39 @@ def workspace_resume(workspace_id):
     else:
         clear_breaker(db_path=db, workspace_id=workspace_id)
     return redirect("/workspaces?scope=factory")
+
+
+@bp.route("/workspaces/<workspace_id>/approvals/settings", methods=["POST"])
+def workspace_approval_settings(workspace_id):
+    from flask import request
+    from hypogeum import publish_approvals as pa
+    f = request.form
+    try:
+        pa.set_settings("workspace", workspace_id, required=f.get("required") == "on",
+                        on_timeout=f.get("on_timeout", "hold"),
+                        timeout_hours=float(f.get("timeout_hours") or 24), db_path=_db())
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    return redirect(f"/workspaces?scope=factory#ws-{workspace_id}-title")
+
+
+@bp.route("/approvals/<approval_id>/decide", methods=["POST"])
+def approval_decide(approval_id):
+    from flask import request
+    from hypogeum import publish_approvals as pa
+    decision = (request.get_json(silent=True) or {}).get("decision") or request.form.get("decision")
+    if decision not in ("approved", "rejected"):
+        return jsonify({"ok": False, "error": "decision must be approved or rejected"}), 400
+    ok = pa.decide(approval_id, decision, "dashboard:operator", db_path=_db())
+    return jsonify({"ok": ok, "status": (pa.get(approval_id, _db()) or {}).get("status")})
+
+
+@bp.route("/approvals/<approval_id>/cover")
+def approval_cover(approval_id):
+    from flask import abort, send_file
+    from hypogeum import publish_approvals as pa
+    row = pa.get(approval_id, _db())
+    path = Path(row["cover_path"]) if row and row.get("cover_path") else None
+    if not path or not path.is_file():
+        abort(404)
+    return send_file(path)

@@ -172,3 +172,19 @@ def test_alert_recorded_before_send_so_a_lock_cannot_cause_a_resend(db):
         return True
     oa.alert("x:9", "t", db_path=db, send=_send)
     assert seen == [{"x:9"}]
+
+
+def test_archive_down_alerts_only_after_grace(db, monkeypatch):
+    import hypogeum.archive_storage as arch
+    monkeypatch.setattr(arch, "_raw_configured_root", lambda db_path=None: ("/Volumes/Archive/Cortex", "db"))
+    assert oa.check_archive(db, NOW, mounted=False) is None                         # starts the clock
+    assert oa.check_archive(db, NOW + timedelta(minutes=10), mounted=False) is None  # sleep blip
+    assert "archive:down" in oa.check_archive(db, NOW + timedelta(minutes=40), mounted=False)
+    assert oa.check_archive(db, NOW + timedelta(minutes=45), mounted=True) == {}     # resolves + resets
+    assert oa.check_archive(db, NOW + timedelta(minutes=50), mounted=False) is None  # fresh clock
+
+
+def test_archive_check_skipped_for_local_archive(db, monkeypatch):
+    import hypogeum.archive_storage as arch
+    monkeypatch.setattr(arch, "_raw_configured_root", lambda db_path=None: ("/tmp/x", "default"))
+    assert oa.check_archive(db, NOW, mounted=False) is None

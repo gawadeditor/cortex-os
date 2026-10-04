@@ -22,6 +22,7 @@ Never raises.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -51,7 +52,7 @@ CREATE TABLE IF NOT EXISTS operator_alert_checks (
 # per-check minimum interval (seconds) — run_operator_checks is called from
 # every worker iteration (~60s); the network-backed checks run less often.
 _INTERVALS = {"openrouter_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
-              "youtube_covers": 300, "posts": 1800, "accounts": 600, "disk": 1800}
+              "youtube_covers": 300, "posts": 1800, "accounts": 600, "archive": 300, "disk": 1800}
 _DASHBOARD = "http://127.0.0.1:5001"
 _CREDIT_LOW_USD = 3.0
 _DISK_LOW_GB, _DISK_OK_GB = 30.0, 40.0
@@ -344,6 +345,49 @@ def check_accounts(db_path) -> dict:
         f"{r['display_label'] or ''}\nالنشر على الحساب ده هيفشل لحد ما يتربط من جديد.") for r in rows}
 
 
+_ARCHIVE_GRACE_MIN = 30
+
+
+def check_archive(db_path, now: datetime, *, mounted=None) -> Optional[dict]:
+    """The episode archive is an SMB share on the NAS (scripts/
+    mount_archive_share.sh retries every 5 min). Laptop sleep drops it for a
+    few minutes routinely; down for 30+ min means the NAS is off or off the
+    network and finished episodes can't be archived (2026-10-04: down for
+    hours with nobody told). None = not a NAS-backed archive / unknown."""
+    try:
+        from hypogeum.archive_storage import _raw_configured_root
+        raw, source = _raw_configured_root(Path(db_path) if db_path else None)
+        parts = Path(raw).expanduser().parts
+    except Exception:  # noqa: BLE001
+        return None
+    if source == "default" or len(parts) < 3 or parts[1] != "Volumes":
+        return None
+    mount_point = Path(parts[0], parts[1], parts[2])
+    is_up = os.path.ismount(mount_point) if mounted is None else mounted
+    conn = _conn(db_path)
+    try:
+        if is_up:
+            conn.execute("DELETE FROM operator_alert_checks WHERE check_name='archive_down_since'")
+            conn.commit()
+            return {}
+        row = conn.execute("SELECT last_run_at FROM operator_alert_checks WHERE check_name='archive_down_since'").fetchone()
+        if not row:
+            conn.execute("INSERT INTO operator_alert_checks (check_name, last_run_at) VALUES ('archive_down_since', ?)",
+                         (now.isoformat(),))
+            conn.commit()
+            return None
+        since = datetime.fromisoformat(row["last_run_at"])
+    finally:
+        conn.close()
+    mins = (now - since).total_seconds() / 60
+    if mins < _ARCHIVE_GRACE_MIN:
+        return None
+    return {"archive:down": ("أرشيف الـ NAS مش متوصّل",
+                             f"الماك مش شايف الـ NAS ({mount_point}) من حوالي {mins:.0f} دقيقة.\n"
+                             "الحلقات اللي بتخلص مش هتتنقل للأرشيف لحد ما يرجع. "
+                             "اتأكد إن الـ NAS شغال وعلى نفس الشبكة.")}
+
+
 def check_disk(path: str = "/System/Volumes/Data", *, usage=None) -> dict:
     try:
         u = usage or shutil.disk_usage(path if Path(path).exists() else "/")
@@ -372,6 +416,7 @@ def run_operator_checks(*, db_path=None, config=None, now: Optional[datetime] = 
         ("posts", "post", lambda: check_posts(db_path, now)),
         ("accounts", "account:", lambda: check_accounts(db_path)),
         ("disk", "disk:", lambda: check_disk()),
+        ("archive", "archive:", lambda: check_archive(db_path, now)),
     ]
     for name, prefix, fn in checks:
         try:

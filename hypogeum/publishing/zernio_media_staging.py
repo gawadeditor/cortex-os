@@ -243,7 +243,7 @@ class ZernioMediaStagingProvider:
     def stage(self, source: SourceMedia, *, db_path: Optional[Path] = None) -> StagedMediaResult:
         _validate_source(source)
 
-        credential = _resolve_zernio_credential(db_path)
+        credential = _resolve_zernio_credential(db_path, channel_id=getattr(source, "channel_id", None))
         if credential is None:
             raise ZernioMediaCredentialNotFoundError(
                 "no active provider='zernio' secret profile found in Credential Manager"

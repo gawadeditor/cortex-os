@@ -66,7 +66,7 @@ def _seed_cache_row(db_path, *, post_id, channel_id, episode_id, deliverable_id=
 class _FailingProvider:
     """Simulates a Zernio outage: every get_post raises."""
 
-    def get_post(self, post_id, *, db_path=None, timeout=None):
+    def get_post(self, post_id, *, db_path=None, timeout=None, channel_id=None):
         raise RuntimeError("simulated Zernio outage")
 
 
@@ -79,7 +79,7 @@ class _CountingProvider:
         self.thumbnail_url = thumbnail_url
         self.calls = 0
 
-    def get_post(self, post_id, *, db_path=None, timeout=None):
+    def get_post(self, post_id, *, db_path=None, timeout=None, channel_id=None):
         self.calls += 1
         return {
             "status_code": 200,
@@ -181,7 +181,7 @@ def test_partial_status_flagged_needs_attention(tmp_path, monkeypatch):
     _seed_post(db_path, channel_id="twinkle_mini_tales", episode_id="ep_1", post_id="post_partial")
 
     class _PartialProvider:
-        def get_post(self, post_id, *, db_path=None, timeout=None):
+        def get_post(self, post_id, *, db_path=None, timeout=None, channel_id=None):
             return {
                 "status_code": 200,
                 "post": {

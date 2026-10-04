@@ -281,7 +281,14 @@ class RequestsZernioTransport:
 # Credential resolution -- Credential Manager only, never an env fallback
 # ---------------------------------------------------------------------------
 
-def _resolve_zernio_credential(db_path) -> Optional[str]:
+def _owner_kw(channel_id: Optional[str]) -> dict:
+    """Pass channel_id to the resolver only when there is one (a resolver
+    override taking just db_path keeps working for operator-level calls)."""
+    return {"channel_id": channel_id} if channel_id else {}
+
+
+def _resolve_zernio_credential(db_path, channel_id: Optional[str] = None,
+                               workspace_id: Optional[str] = None) -> Optional[str]:
     """
     Resolve the active provider='zernio' secret profile's credential_data
     through hypogeum.credential_manager -- the sole source (ADR-013
@@ -292,14 +299,12 @@ def _resolve_zernio_credential(db_path) -> Optional[str]:
     Authorization header on one transport call) and is never logged,
     returned in any adapter result dict, or persisted anywhere.
     """
-    profiles = list_secret_profiles(provider="zernio", scope="factory", db_path=db_path)
-    active = [p for p in profiles if p.status == "active"]
-    if not active:
-        return None
-    # resolve_credential() (not just reading .credential_data off the list
-    # result) is the canonical "this credential is about to be used" path --
-    # it re-validates status and updates last_used_at bookkeeping.
-    return resolve_credential(active[0].secret_profile_id, db_path=db_path)
+    # Multi-tenant Phase 5: the key of the workspace owning channel_id (or
+    # workspace_id; neither = the platform owner) — never "the first active
+    # zernio profile", which with a client's key stored could post the
+    # operator's episodes to the client's account or vice versa.
+    from hypogeum.workspace_keys import publishing_key
+    return publishing_key("zernio", channel_id=channel_id, workspace_id=workspace_id, db_path=db_path)
 
 
 # ---------------------------------------------------------------------------
@@ -670,7 +675,7 @@ class ZernioProvider:
     def supports_platform(self, platform: str) -> bool:
         return platform in self.supported_platforms
 
-    def get_post(self, provider_post_id: str, *, db_path: Optional[Path] = None,
+    def get_post(self, provider_post_id: str, *, db_path: Optional[Path] = None, channel_id: Optional[str] = None,
                  timeout: float = _DEFAULT_TIMEOUT_SECONDS) -> dict:
         """
         Read-only GET /v1/posts/{postId} -- returns the parsed Post
@@ -695,7 +700,7 @@ class ZernioProvider:
         caller to interpret; this method itself never raises on a
         provider-side error response, only on a transport failure.
         """
-        credential = _resolve_zernio_credential(db_path)
+        credential = _resolve_zernio_credential(db_path, **_owner_kw(channel_id))
         if credential is None:
             raise ZernioCredentialNotFoundError(
                 "no active provider='zernio' secret profile found in Credential Manager"
@@ -710,7 +715,7 @@ class ZernioProvider:
     def update_platform_entry(self, provider_post_id: str, platform: str, *,
                               scheduled_for: Optional[str] = None,
                               platform_specific_data: Optional[dict] = None,
-                              db_path: Optional[Path] = None) -> dict:
+                              db_path: Optional[Path] = None, channel_id: Optional[str] = None) -> dict:
         """
         PUT /v1/posts/{id} changing ONE platform's own entry on a scheduled
         post -- its per-platform `scheduledFor` and/or a shallow merge into
@@ -724,7 +729,7 @@ class ZernioProvider:
         `before` is the pre-PUT post, for that comparison or a restore.
         Raises ZernioTransportError on a network failure.
         """
-        current = self.get_post(provider_post_id, db_path=db_path)
+        current = self.get_post(provider_post_id, db_path=db_path, channel_id=channel_id)
         before = current.get("post")
         if current.get("status_code") != 200 or not before:
             return {"status_code": current.get("status_code"), "error": current.get("error"), "before": None}
@@ -761,7 +766,7 @@ class ZernioProvider:
             if before.get(key) is not None:
                 body[key] = before[key]
 
-        credential = _resolve_zernio_credential(db_path)
+        credential = _resolve_zernio_credential(db_path, **_owner_kw(channel_id))
         if credential is None:
             raise ZernioCredentialNotFoundError(
                 "no active provider='zernio' secret profile found in Credential Manager"
@@ -776,7 +781,7 @@ class ZernioProvider:
                 "error": None if ok else response.json_body, "before": before}
 
     def set_youtube_privacy(self, provider_post_id: str, privacy_status: str, *,
-                            db_path: Optional[Path] = None) -> dict:
+                            db_path: Optional[Path] = None, channel_id: Optional[str] = None) -> dict:
         """POST /v1/posts/{id}/update-metadata {platform: youtube, privacyStatus} --
         Zernio's "Update post metadata" (YouTube-only), used to release a
         video uploaded private once its Shorts cover is confirmed in Studio.
@@ -784,7 +789,7 @@ class ZernioProvider:
         network failure."""
         if privacy_status not in ("public", "private", "unlisted"):
             raise ValueError(f"invalid privacy_status {privacy_status!r}")
-        credential = _resolve_zernio_credential(db_path)
+        credential = _resolve_zernio_credential(db_path, **_owner_kw(channel_id))
         if credential is None:
             raise ZernioCredentialNotFoundError(
                 "no active provider='zernio' secret profile found in Credential Manager"
@@ -805,7 +810,7 @@ class ZernioProvider:
                       profile_id: Optional[str] = None,
                       from_date: Optional[str] = None,
                       to_date: Optional[str] = None,
-                      db_path: Optional[Path] = None) -> dict:
+                      db_path: Optional[Path] = None, channel_id: Optional[str] = None) -> dict:
         """
         Read-only GET /v1/analytics (operationId `getAnalytics`) -- one
         page of the account's published-post performance, exactly as
@@ -835,7 +840,7 @@ class ZernioProvider:
         Returns {status_code, data, error}. Never raises on a provider-side
         error response, only on a transport failure (ZernioTransportError).
         """
-        credential = _resolve_zernio_credential(db_path)
+        credential = _resolve_zernio_credential(db_path, **_owner_kw(channel_id))
         if credential is None:
             raise ZernioCredentialNotFoundError(
                 "no active provider='zernio' secret profile found in Credential Manager"
@@ -1152,7 +1157,7 @@ class ZernioProvider:
         binding, account = self._resolve_approved_binding(
             channel_id=channel_id, platform=platform, logical_alias=logical_alias, db_path=db_path,
         )
-        credential = _resolve_zernio_credential(db_path)
+        credential = _resolve_zernio_credential(db_path, **_owner_kw(channel_id))
         if credential is None:
             raise ZernioCredentialNotFoundError(
                 "no active provider='zernio' secret profile found in Credential Manager"
@@ -1357,7 +1362,7 @@ class ZernioProvider:
             )
             accounts[p] = account
 
-        credential = _resolve_zernio_credential(db_path)
+        credential = _resolve_zernio_credential(db_path, **_owner_kw(channel_id))
         if credential is None:
             raise ZernioCredentialNotFoundError(
                 "no active provider='zernio' secret profile found in Credential Manager"
@@ -1427,7 +1432,7 @@ class ZernioProvider:
             # CURRENT platforms[] is fetched first and the new entries are
             # appended to it, never sent as a bare partial list that could
             # silently drop the already-succeeded platforms.
-            get_result = self.get_post(existing_post_id, db_path=db_path)
+            get_result = self.get_post(existing_post_id, db_path=db_path, channel_id=channel_id)
             existing_post = get_result.get("post")
             if not isinstance(existing_post, dict) or not isinstance(existing_post.get("platforms"), list):
                 for p, g in to_submit.items():
@@ -1614,7 +1619,7 @@ class ZernioProvider:
             )
             accounts[p] = account
 
-        credential = _resolve_zernio_credential(db_path)
+        credential = _resolve_zernio_credential(db_path, **_owner_kw(channel_id))
         if credential is None:
             raise ZernioCredentialNotFoundError(
                 "no active provider='zernio' secret profile found in Credential Manager"
@@ -1637,7 +1642,7 @@ class ZernioProvider:
         already_succeeded = {p: g for p, g in guards.items() if g.action == "use_existing"}
         to_submit = {p: g for p, g in guards.items() if g.action == "proceed"}
 
-        get_result = self.get_post(provider_post_id, db_path=db_path)
+        get_result = self.get_post(provider_post_id, db_path=db_path, channel_id=channel_id)
         existing_post = get_result.get("post")
         results: Dict[str, dict] = {}
         if not isinstance(existing_post, dict) or not isinstance(existing_post.get("platforms"), list):

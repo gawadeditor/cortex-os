@@ -188,7 +188,7 @@ def _local_episode_title(conn, episode_id: str) -> str:
 
 
 def _fetch_live(provider, post_id: str, *, known_thumbnail_url: Optional[str] = None,
-                 known_is_landscape: Optional[bool] = None) -> dict:
+                 known_is_landscape: Optional[bool] = None, channel_id: Optional[str] = None) -> dict:
     """One GET /posts/{id}, normalised into the row shape this module
     caches and the template renders. Never raises -- a transport failure
     lands in `fetch_error`; the caller preserves the previous cached
@@ -200,7 +200,9 @@ def _fetch_live(provider, post_id: str, *, known_thumbnail_url: Optional[str] = 
     `_is_landscape`'s docstring, actually enforced here rather than just
     described."""
     try:
-        res = provider.get_post(post_id, timeout=_LIVE_FETCH_TIMEOUT_SECONDS)
+        # the key of the workspace owning this channel (multi-tenant Phase 5)
+        res = (provider.get_post(post_id, timeout=_LIVE_FETCH_TIMEOUT_SECONDS, channel_id=channel_id)
+               if channel_id else provider.get_post(post_id, timeout=_LIVE_FETCH_TIMEOUT_SECONDS))
     except Exception as exc:  # noqa: BLE001
         return {"fetch_error": str(exc)[:200]}
     post = res.get("post") or {}
@@ -338,6 +340,7 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
                     known_is_landscape=(lambda v: bool(v) if v is not None else None)(
                         (cached_by_post.get(p["post_id"]) or {}).get("thumb_is_landscape")
                     ),
+                    channel_id=channel_id,
                 ): p
                 for p in to_fetch
             }

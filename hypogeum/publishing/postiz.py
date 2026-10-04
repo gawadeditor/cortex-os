@@ -188,14 +188,13 @@ class RequestsPostizTransport:
 # Pure helpers
 # ---------------------------------------------------------------------------
 
-def _resolve_postiz_credential(db_path) -> Optional[str]:
-    """Active provider='postiz' secret from Credential Manager, else None.
-    Callers fail closed on None — never an env fallback."""
-    profiles = list_secret_profiles(provider="postiz", scope="factory", db_path=db_path)
-    active = [p for p in profiles if p.status == "active"]
-    if not active:
-        return None
-    return resolve_credential(active[0].secret_profile_id, db_path=db_path)
+def _resolve_postiz_credential(db_path, channel_id: Optional[str] = None,
+                               workspace_id: Optional[str] = None) -> Optional[str]:
+    """Active provider='postiz' key of the owning workspace (multi-tenant
+    Phase 5, hypogeum.workspace_keys.publishing_key), else None. Callers fail
+    closed on None — never an env fallback."""
+    from hypogeum.workspace_keys import publishing_key
+    return publishing_key("postiz", channel_id=channel_id, workspace_id=workspace_id, db_path=db_path)
 
 
 def _to_postiz_html(text: Optional[str]) -> str:
@@ -408,8 +407,8 @@ class PostizProvider:
 
     # -- low-level -----------------------------------------------------------
 
-    def _headers(self, db_path) -> dict:
-        credential = _resolve_postiz_credential(db_path)
+    def _headers(self, db_path, channel_id: Optional[str] = None) -> dict:
+        credential = _resolve_postiz_credential(db_path, channel_id=channel_id)
         if credential is None:
             raise PostizCredentialNotFoundError(
                 "no active provider='postiz' secret profile found in Credential Manager"
@@ -529,7 +528,7 @@ class PostizProvider:
         _binding, account = self._resolve_approved_binding(
             channel_id=channel_id, platform=platform, logical_alias=logical_alias, db_path=db_path,
         )
-        headers = self._headers(db_path)
+        headers = self._headers(db_path, channel_id=channel_id)
 
         guard = guard_and_prepare_attempt(
             db_path, channel_id=channel_id, episode_id=episode_id,

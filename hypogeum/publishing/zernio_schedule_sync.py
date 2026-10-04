@@ -135,21 +135,54 @@ def sync_zernio_schedule(
             _ZERNIO_POSTS_URL, _DEFAULT_TIMEOUT_SECONDS,
         )
 
-        cred = _resolve_zernio_credential(db_path)
-        if cred is None:
+        # Multi-tenant Phase 5: each workspace's own Zernio account is read
+        # with its own key, and its posts may only fill slots of channels
+        # that workspace owns (owner_of_post below).
+        accounts = []
+        try:
+            from hypogeum.workspaces import list_workspaces
+            _ws_ids = [w["workspace_id"] for w in list_workspaces(db_path)]
+        except Exception:  # noqa: BLE001 — install without workspaces
+            _ws_ids = []
+        for _wid in _ws_ids:
+            _c = _resolve_zernio_credential(db_path, workspace_id=_wid)
+            if _c:
+                accounts.append((_wid, _c))
+        if not _ws_ids:
+            _c = _resolve_zernio_credential(db_path)
+            if _c:
+                accounts.append((None, _c))
+        if not accounts:
             out["error"] = "no active zernio credential"
             return out
         tp = transport or RequestsZernioTransport()
-        resp = tp.get(
-            url=f"{_ZERNIO_POSTS_URL}?limit={_ZERNIO_LIST_LIMIT}",
-            headers={"Authorization": f"Bearer {cred}"},
-            timeout=_DEFAULT_TIMEOUT_SECONDS,
-        )
-        del cred
-        if resp.status_code != 200 or not isinstance(resp.json_body, dict):
-            out["error"] = f"zernio list HTTP {resp.status_code}"
-            return out
-        posts = resp.json_body.get("posts", []) or []
+        posts, owner_of_post = [], {}
+        for ws_id, cred in accounts:
+            resp = tp.get(
+                url=f"{_ZERNIO_POSTS_URL}?limit={_ZERNIO_LIST_LIMIT}",
+                headers={"Authorization": f"Bearer {cred}"},
+                timeout=_DEFAULT_TIMEOUT_SECONDS,
+            )
+            if resp.status_code != 200 or not isinstance(resp.json_body, dict):
+                out["error"] = f"zernio list HTTP {resp.status_code}"
+                return out
+            for p in resp.json_body.get("posts", []) or []:
+                posts.append(p)
+                owner_of_post[id(p)] = ws_id
+        del accounts
+        try:
+            from hypogeum.workspace_controls import _client_channels
+            from hypogeum.workspaces import platform_workspace_id
+            _clients = _client_channels(db_path)
+            _platform = platform_workspace_id(db_path)
+        except Exception:  # noqa: BLE001
+            _clients, _platform = {}, None
+
+        def _channel_ok(channel_id, ws_id) -> bool:
+            if ws_id is None:            # install without workspaces
+                return True
+            owner = _clients.get(channel_id, _platform)
+            return owner == ws_id
 
         now = datetime.now(timezone.utc)
         floor = now - timedelta(days=max(0, window_days_back))
@@ -178,7 +211,7 @@ def sync_zernio_schedule(
                 post_id = str(p.get("_id") or "")
                 title = (p.get("title") or "").strip()
                 channel_id, episode_id = _resolve_channel_and_episode(conn, post_id, title, p)
-                if not channel_id:
+                if not channel_id or not _channel_ok(channel_id, owner_of_post.get(id(p))):
                     out["unattributed"] += 1
                     continue
                 marker_ep = episode_id or f"zernio:{post_id}"

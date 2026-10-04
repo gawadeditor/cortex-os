@@ -119,7 +119,7 @@ def apply_hold(post_id: str, channel_id: str, episode_id: Optional[str] = None, 
     now = now or _now()
     z = _provider(provider)
     try:
-        post = z.get_post(post_id, db_path=db_path).get("post")
+        post = z.get_post(post_id, db_path=db_path, channel_id=channel_id).get("post")
         yt = _entry(post or {}, "youtube")
         if not post or yt is None:
             return {"ok": False, "reason": "no_youtube_entry"}
@@ -133,12 +133,12 @@ def apply_hold(post_id: str, channel_id: str, episode_id: Optional[str] = None, 
 
         res = z.update_platform_entry(post_id, "youtube", scheduled_for=_zernio_ts(upload_at),
                                       platform_specific_data={"visibility": "private"},
-                                      db_path=db_path)
+                                      db_path=db_path, channel_id=channel_id)
         if res.get("error"):
             log.error("youtube_cover_hold_put_failed", post_id=post_id, error=str(res["error"])[:300])
             return {"ok": False, "reason": "put_failed", "error": str(res["error"])[:300]}
 
-        after = z.get_post(post_id, db_path=db_path).get("post") or {}
+        after = z.get_post(post_id, db_path=db_path, channel_id=channel_id).get("post") or {}
         ya = _entry(after, "youtube") or {}
         yt_ok = (ya.get("scheduledFor") and _parse(ya["scheduledFor"]) == upload_at
                  and (ya.get("platformSpecificData") or {}).get("visibility") == "private")
@@ -154,7 +154,7 @@ def apply_hold(post_id: str, channel_id: str, episode_id: Optional[str] = None, 
             # reported for a human -- never guessed at.
             z.update_platform_entry(post_id, "youtube", scheduled_for=_zernio_ts(release_at),
                                     platform_specific_data={"visibility": original_visibility},
-                                    db_path=db_path)
+                                    db_path=db_path, channel_id=channel_id)
             log.error("youtube_cover_hold_verify_failed", post_id=post_id, youtube_ok=bool(yt_ok),
                       drift=drift)
             return {"ok": False, "reason": "verify_failed", "youtube_ok": bool(yt_ok), "drift": drift}
@@ -206,7 +206,7 @@ def release_due(*, provider=None, db_path=None, now: Optional[datetime] = None) 
             continue
         try:
             z = z or _provider(provider)
-            res = z.set_youtube_privacy(pid, "public", db_path=db_path)
+            res = z.set_youtube_privacy(pid, "public", db_path=db_path, channel_id=h["channel_id"])
             err = res.get("error")
         except Exception as exc:  # noqa: BLE001
             err = str(exc)

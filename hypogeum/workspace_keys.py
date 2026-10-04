@@ -6,6 +6,8 @@ balance) of the Workspace that owns the channel. Multi-tenant plan, Phase 2
     config_for_channel(config, channel_id, db_path=None) -> Config
     config_for_workspace(config, workspace_id, db_path=None) -> Config
     config_for_client(config, client_id, db_path=None) -> Config   # Cortex Advisory
+    publishing_key(provider, *, channel_id=None, workspace_id=None, db_path=None)  # Phase 5
+    workspaces_with_key(provider, db_path=None) -> list[(workspace_id, key)]
     workspace_key(provider, workspace_id, db_path=None) -> Optional[str]
 
 Both return a shallow COPY of `config` with the provider-key fields replaced;
@@ -131,3 +133,52 @@ def config_for_client(config, client_id: Optional[str], db_path=None):
             raise OwnerlessChannelError(f"client {client_id!r} belongs to no workspace")
         return config
     return config_for_workspace(config, ws, db_path)
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: publishing-provider keys (zernio / postiz) — vault only, by owner
+# ---------------------------------------------------------------------------
+
+def publishing_key(provider: str, *, channel_id: Optional[str] = None, workspace_id: Optional[str] = None,
+                   db_path=None) -> Optional[str]:
+    """The active `provider` key (secret_profiles) owned by the workspace
+    that owns `channel_id` — or `workspace_id` — or, with neither, the
+    platform owner (operator-level calls: content grid, analytics, cover
+    hold). Never another workspace's key: before 2026-10-05 the resolver
+    took the first active profile, so a client's Zernio key could have been
+    used for the operator's posts or vice versa. Ownerless channel on a
+    multi-workspace install -> OwnerlessChannelError (fail closed)."""
+    from hypogeum.workspaces import platform_workspace_id, workspace_of
+    ws = workspace_id
+    if ws is None and channel_id:
+        ws = workspace_of(channel_id, db_path=_p(db_path))
+        if ws is None and _has_client_workspaces(db_path):
+            raise OwnerlessChannelError(f"channel {channel_id!r} belongs to no workspace")
+    if ws is None:
+        ws = platform_workspace_id(_p(db_path))
+    if ws is None:   # install without workspaces at all: the single active key, as before
+        from hypogeum.credential_manager import list_secret_profiles, resolve_credential
+        active = [p for p in list_secret_profiles(provider=provider, scope="factory", db_path=_p(db_path))
+                  if p.status == "active"]
+        return resolve_credential(active[0].secret_profile_id, db_path=_p(db_path)) if active else None
+    return workspace_key(provider, ws, db_path)
+
+
+def workspaces_with_key(provider: str, db_path=None) -> list:
+    """[(workspace_id, key)] for every workspace holding an active `provider`
+    key — for account-wide syncs that must read each workspace's own account."""
+    from hypogeum.workspaces import list_workspaces
+    out = []
+    try:
+        workspaces = list_workspaces(_p(db_path))
+    except Exception:  # noqa: BLE001
+        workspaces = []
+    for w in workspaces:
+        k = workspace_key(provider, w["workspace_id"], db_path)
+        if k:
+            out.append((w["workspace_id"], k))
+    if not workspaces:
+        k = publishing_key(provider, db_path=db_path)
+        if k:
+            out.append((None, k))
+    return out

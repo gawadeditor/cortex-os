@@ -151,7 +151,12 @@ def list_workspaces(db_path=None) -> list[dict]:
             counts.setdefault(r["workspace_id"], {})[r["kind"]] = r["n"]
     finally:
         conn.close()
-    return [{"workspace_id": r["factory_id"], "name": r["factory_name"], "kind": _kind_of(r),
+    # effective kind: an unmarked single-factory install is its own platform
+    # owner (same rule as platform_workspace_id) — the column defaults to
+    # 'client', which must not make a single-tenant install look multi-tenant
+    single = len(rows) == 1 and not any(_kind_of(r) == "platform_owner" for r in rows)
+    return [{"workspace_id": r["factory_id"], "name": r["factory_name"],
+             "kind": "platform_owner" if single else _kind_of(r),
              "status": r["status"], "language": r["default_language"],
              "counts": counts.get(r["factory_id"], {})} for r in rows]
 

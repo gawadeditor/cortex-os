@@ -2077,6 +2077,15 @@ def insert_queue_item(
     )
 
 
+def _blocked_channels_for(conn: sqlite3.Connection) -> dict:
+    """{channel_id: reason} blocked by hypogeum.workspace_controls, for the DB
+    file `conn` is open on. Raises on failure: a claim must not proceed on an
+    unknown budget/pause state (it simply claims nothing this tick)."""
+    db_file = conn.execute("PRAGMA database_list").fetchone()[2]
+    from hypogeum.workspace_controls import blocked_channels
+    return blocked_channels(db_path=Path(db_file)) if db_file else {}
+
+
 def claim_next_queue_item(
     conn: sqlite3.Connection,
     worker_id: str,
@@ -2134,11 +2143,19 @@ def claim_next_queue_item(
     # Regular items: FIFO (queued_at ASC as final tiebreaker).
     # next_attempt_at gates auto-retry items until their backoff elapses —
     # NULL (every other item type) is always immediately claimable.
+    # Multi-tenant Phase 3: never claim work for a channel whose workspace
+    # is paused (its own spend breaker / operator) or over its monthly
+    # ceiling — enforced here so every claim path (scheduled, rerun,
+    # bounded) honours it. Computed against this same DB file.
+    blocked = _blocked_channels_for(conn)
+    excl = ""
+    if blocked:
+        excl = " AND (channel_id IS NULL OR channel_id NOT IN (%s))" % ",".join("?" * len(blocked))
     candidate = conn.execute(
         """
         SELECT queue_id FROM run_queue
         WHERE status = 'queued'
-          AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+          AND (next_attempt_at IS NULL OR next_attempt_at <= ?)""" + excl + """
         ORDER BY
             priority ASC,
             CASE WHEN source = 'rerun' THEN 0 ELSE 1 END ASC,
@@ -2146,7 +2163,7 @@ def claim_next_queue_item(
             queued_at ASC
         LIMIT 1
         """,
-        (claimed_at,),
+        (claimed_at, *sorted(blocked)),
     ).fetchone()
     if candidate is None:
         return None

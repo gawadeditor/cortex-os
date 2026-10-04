@@ -773,6 +773,17 @@ def _get_month_cost_and_ceiling(db_path: Path, factory_id: str) -> tuple[float, 
         ceiling configured", which callers must treat as "no budget gate
         applies."
     """
+    # Multi-tenant Phase 3: a workspace's own spend and ceiling
+    # (hypogeum.workspace_controls) — for the platform owner identical to
+    # the factory-wide numbers below while there are no client workspaces.
+    try:
+        from hypogeum import workspace_controls as _wsc
+        from hypogeum.workspaces import platform_workspace_id
+        if platform_workspace_id(db_path) is not None:
+            return _wsc.month_spend(factory_id, db_path), _wsc.month_ceiling(factory_id, db_path)
+    except Exception:  # noqa: BLE001 — fall through to the pre-workspace computation
+        pass
+
     from hypogeum.factory_entity import get_factory_policies
     from hypogeum.config import Config
     try:
@@ -1167,6 +1178,7 @@ def check_run_clearance(
     db_path:         Optional[Path] = None,
     channel_id:      Optional[str]  = None,
     validation_mode: bool           = False,
+    include_budget:  bool           = True,
 ) -> RunClearanceDecision:
     """
     Fast-path clearance check: only the checks that can block a new run.
@@ -1177,9 +1189,14 @@ def check_run_clearance(
 
     Args:
         db_path:    Override SQLite path. None = production default.
-        channel_id: Unused by any check below today (no per-channel blocking
-            check exists yet) — accepted for forward-compatible signature
-            parity with callers that already pass it (e.g. run_worker.py).
+        channel_id: Selects WHICH workspace's monthly budget the ceiling
+            check uses (the workspace owning the channel); None = the
+            platform owner's (multi-tenant Phase 3).
+        include_budget: False skips the monthly-ceiling check entirely —
+            the worker's global gate passes False because per-workspace
+            budgets are enforced inside the queue claim itself
+            (hypogeum.workspace_controls.blocked_channels), so one
+            workspace over its ceiling never stops another's production.
         validation_mode: Narrow, explicit exemption for supervised validation
             runs ONLY (added 2026-07-18, per explicit product decision — see
             RunClearanceDecision.validation_exemption's own docstring).
@@ -1270,10 +1287,17 @@ def check_run_clearance(
     # _get_month_cost_and_ceiling() computation — never a second,
     # independently-maintained copy of the budget logic.
     try:
-        # check_run_clearance() has no factory_id parameter of its own
-        # (single-factory deployment today) -- "hypogeum" matches
-        # assess_factory()'s own default factory_id.
-        month_cost, ceiling = _get_month_cost_and_ceiling(resolved, "hypogeum")
+        # The workspace owning channel_id, else the platform owner
+        # ("hypogeum" on an install without workspaces, as before).
+        _budget_ws = "hypogeum"
+        try:
+            from hypogeum.workspaces import platform_workspace_id, workspace_of
+            _budget_ws = ((workspace_of(channel_id, db_path=resolved) if channel_id else None)
+                          or platform_workspace_id(resolved) or "hypogeum")
+        except Exception:  # noqa: BLE001
+            pass
+        month_cost, ceiling = (_get_month_cost_and_ceiling(resolved, _budget_ws)
+                               if include_budget else (0.0, 0.0))
         if ceiling > 0 and month_cost >= ceiling:
             if validation_mode:
                 # Narrow, explicit exemption (2026-07-18) -- ONLY this one

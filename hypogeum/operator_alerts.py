@@ -212,12 +212,24 @@ def check_openrouter_credits(config, *, http_get=None) -> Optional[dict]:
 
 def check_production_paused(db_path) -> dict:
     from hypogeum.db import get_worker_control
-    if get_worker_control("queue_paused", "0", db_path=Path(db_path) if db_path else None) != "1":
-        return {}
-    reason = get_worker_control("queue_paused_reason", "", db_path=Path(db_path) if db_path else None) or "سبب غير مكتوب"
-    return {"production:paused": ("الإنتاج واقف",
-                                  f"المصنع وقّف إنتاج الحلقات الجديدة. النشر شغال عادي.\nالسبب: {reason}\n"
-                                  "لازم السبب يتحل الأول، وبعدين الإنتاج يرجع.")}
+    dbp = Path(db_path) if db_path else None
+    out = {}
+    if get_worker_control("queue_paused", "0", db_path=dbp) == "1":
+        reason = get_worker_control("queue_paused_reason", "", db_path=dbp) or "سبب غير مكتوب"
+        out["production:paused"] = ("الإنتاج واقف",
+                                    f"المصنع وقّف إنتاج الحلقات الجديدة. النشر شغال عادي.\nالسبب: {reason}\n"
+                                    "لازم السبب يتحل الأول، وبعدين الإنتاج يرجع.")
+    # multi-tenant: a workspace's own spend breaker pauses only that workspace
+    try:
+        from hypogeum.workspace_controls import paused_workspaces
+        for wid, reason in paused_workspaces(dbp).items():
+            out[f"production:paused:{wid}"] = (
+                f"الإنتاج واقف لـ {wid}",
+                f"إنتاج الحلقات الجديدة لقنوات {wid} واقف (باقي المساحات شغالة). النشر شغال عادي.\n"
+                f"السبب: {reason or 'سبب غير مكتوب'}")
+    except Exception:  # noqa: BLE001
+        pass
+    return out
 
 
 def check_worker(db_path, now: datetime) -> dict:

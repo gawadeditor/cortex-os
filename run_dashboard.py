@@ -796,7 +796,8 @@ def create_page():
     try:
         from hypogeum.db import get_worker_control
         worker_running = get_worker_control("worker_status", "stopped", db_path=db) in ("running", "claiming", "idle")
-        queue_paused   = get_worker_control("queue_paused", "0", db_path=db) == "1"
+        from hypogeum.workspace_controls import operator_production_paused
+        queue_paused   = operator_production_paused(db)
     except Exception:  # noqa: BLE001
         worker_running, queue_paused = False, False
     return render_template(
@@ -10175,10 +10176,15 @@ def api_worker_pause_queue():
 
 @app.route("/api/worker/resume-queue", methods=["POST"])
 def api_worker_resume_queue():
-    """Resume a paused queue — the worker resumes claiming jobs normally."""
-    from hypogeum.db import set_worker_control
+    """Resume a paused queue — the worker resumes claiming jobs normally.
+
+    Goes through clear_breaker() (not a bare queue_paused=0): it also clears
+    the operator's own workspace pause and stamps breaker_cleared_at, so the
+    spend breaker doesn't immediately re-trip on the failures that caused
+    the pause. A client workspace's pause is never cleared here."""
+    from hypogeum.muapi_spend_breaker import clear_breaker
     try:
-        set_worker_control("queue_paused", "0", db_path=_db_path())
+        clear_breaker(db_path=_db_path())
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
     return jsonify({

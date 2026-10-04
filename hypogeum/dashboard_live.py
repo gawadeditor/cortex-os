@@ -55,6 +55,19 @@ def _row(r) -> dict:
 # Active runs
 # ===========================================================================
 
+def _operator_paused(wc: dict, db_path: Optional[Path]) -> bool:
+    """Global switch, or the platform owner's own workspace pause (the
+    multi-tenant spend breaker pauses a workspace, not the whole factory)."""
+    if str(wc.get("queue_paused", "0")) == "1":
+        return True
+    try:
+        from hypogeum.workspaces import platform_workspace_id
+        pid = platform_workspace_id(_db(db_path))
+        return bool(pid) and str(wc.get(f"ws_paused:{pid}", "0")) == "1"
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def get_active_runs(db_path: Optional[Path] = None) -> list[dict]:
     """
     All runs currently executing (status='running') with their active stage.
@@ -497,7 +510,7 @@ def get_factory_pulse(
                 "status": wc.get("worker_status") or "unknown",
                 "alive": bool(_has_live_run or (age is not None and age <= _WORKER_ALIVE_SECONDS)),
                 "heartbeat_age_s": round(age) if age is not None else None,
-                "paused": str(wc.get("queue_paused", "0")) == "1",
+                "paused": _operator_paused(wc, db_path),
                 "stop_requested": str(wc.get("stop_requested", "0")) == "1",
             }
 

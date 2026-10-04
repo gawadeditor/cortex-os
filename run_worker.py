@@ -978,6 +978,14 @@ def _check_and_refill_queue(
     return result
 
 
+def _has_client_workspaces(db_path) -> bool:
+    try:
+        from hypogeum.workspace_controls import has_client_workspaces
+        return has_client_workspaces(db_path)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def run_iteration(
     worker_id: str,
     db_path: Path,
@@ -1077,6 +1085,11 @@ def run_iteration(
     from hypogeum.factory_director import check_run_clearance
     clearance = check_run_clearance(
         db_path=db_path, channel_id=channel_id, validation_mode=validation_mode,
+        # With client workspaces, monthly ceilings are per workspace and
+        # enforced in the queue claim (workspace_controls.blocked_channels) —
+        # a global budget block here would let one workspace's overspend
+        # stop every other's production. Single-tenant: unchanged.
+        include_budget=not _has_client_workspaces(db_path),
     )
     if clearance.validation_exemption:
         log.warning(

@@ -205,6 +205,35 @@ def _isolate_workspace_key_lookup(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_telegram(monkeypatch):
+    """No test may ever reach the real Telegram API. Importing run_dashboard
+    at collection time instantiates Config(), which loads .env into
+    os.environ — so a later Config() in a test sees the operator's REAL bot
+    token and chat id (2026-10-05: test runs messaged the operator's phone).
+    Drop those from the environment for every test, and fail loudly if
+    anything still tries to call api.telegram.org."""
+    for var in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+        monkeypatch.delenv(var, raising=False)
+    import urllib.request as _ur
+    import requests as _rq
+    real_urlopen, real_post = _ur.urlopen, _rq.post
+
+    def _guard_urlopen(req, *a, **kw):
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        if "api.telegram.org" in url:
+            raise AssertionError(f"TEST ISOLATION VIOLATION: real Telegram call {url.split('/bot')[0]}/bot…")
+        return real_urlopen(req, *a, **kw)
+
+    def _guard_post(url, *a, **kw):
+        if "api.telegram.org" in str(url):
+            raise AssertionError("TEST ISOLATION VIOLATION: real Telegram call via requests.post")
+        return real_post(url, *a, **kw)
+    monkeypatch.setattr(_ur, "urlopen", _guard_urlopen)
+    monkeypatch.setattr(_rq, "post", _guard_post)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _isolate_publish_approval_gate(monkeypatch):
     """hypogeum.publish_approvals.gate() sits in the Zernio release path and
     reads/creates its tables in the DB. Against the PRODUCTION DB (a test that

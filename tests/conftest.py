@@ -76,6 +76,8 @@ import pytest
 # All vars that appear in the production .env but are not consistently included
 # in every test helper's env-var clear list.
 _GUARDRAIL_VARS = [
+    # OpenRouter drain key (2026-10-05): never let the real one into tests
+    "OPENROUTER_DRAIN_KEY",
     # Brand Guardian
     "BGA_ENABLED",
     # Finance Agent
@@ -682,3 +684,10 @@ def _forbid_production_schema_mutation():
                 except Exception:
                     continue
             yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_openrouter_drain_flag(tmp_path, monkeypatch):
+    """The drain-key 'exhausted' flag lives in ~/.cortex; tests use their own."""
+    import hypogeum.openrouter_drain as _od
+    monkeypatch.setattr(_od, "FLAG", tmp_path / "openrouter_drain_exhausted")

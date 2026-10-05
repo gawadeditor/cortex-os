@@ -237,9 +237,36 @@ def _ws_extra(channel_id: Optional[str], db_path, en: tuple) -> dict:
 # checks — each returns {key: (title, body)} for what needs the operator now
 # ---------------------------------------------------------------------------
 
+def _drain_balance_check(config, http_get) -> None:
+    """While the old drain key is in use, switch to the main key before its
+    leftover balance runs out (hypogeum/openrouter_drain.py)."""
+    if not (config is not None and getattr(config, "OPENROUTER_DRAIN_ACTIVE", False) is True):
+        return
+    try:
+        if http_get is None:
+            import urllib.request
+            req = urllib.request.Request("https://openrouter.ai/api/v1/credits",
+                                         headers={"Authorization": f"Bearer {config.OPENROUTER_API_KEY}"})
+            data = json.load(urllib.request.urlopen(req, timeout=15)).get("data") or {}
+        else:
+            data = http_get()
+        left = float(data.get("total_credits") or 0) - float(data.get("total_usage") or 0)
+    except Exception:  # noqa: BLE001
+        return
+    from hypogeum.openrouter_drain import DRAIN_SWITCH_BELOW_USD, mark_exhausted
+    if left < DRAIN_SWITCH_BELOW_USD:
+        mark_exhausted(f"balance_${left:.2f}")
+        config.OPENROUTER_API_KEY = config.OPENROUTER_MAIN_KEY
+        config.OPENROUTER_DRAIN_ACTIVE = False
+
+
 def check_openrouter_credits(config, *, http_get=None) -> Optional[dict]:
     """None = couldn't tell (network) -> leave state unchanged."""
-    key = getattr(config, "OPENROUTER_API_KEY", None) if config else None
+    _drain_balance_check(config, http_get)
+    # The low-balance alert is about the MAIN key: the drain key running low
+    # is expected and just switches over.
+    key = (getattr(config, "OPENROUTER_MAIN_KEY", None) or getattr(config, "OPENROUTER_API_KEY", None)) \
+        if config else None
     if not key:
         return None
     try:

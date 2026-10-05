@@ -1254,6 +1254,19 @@ def _call_openrouter(
     if resp.status_code == 401:
         raise _AuthError()
 
+    if resp.status_code == 402 and getattr(config, "OPENROUTER_DRAIN_ACTIVE", False) is True:
+        # The drain key's leftover balance is spent: switch every process to
+        # the main key and retry this same call on it (openrouter_drain.py).
+        from hypogeum.openrouter_drain import mark_exhausted
+        mark_exhausted("http_402")
+        config.OPENROUTER_API_KEY = config.OPENROUTER_MAIN_KEY
+        config.OPENROUTER_DRAIN_ACTIVE = False
+        log.info("openrouter_drain_switched_to_main_key", trigger="http_402")
+        resp = requests.post(OPENROUTER_CHAT_URL, headers=_build_headers(config), json=body,
+                             timeout=REQUEST_TIMEOUT)
+        if resp.status_code == 401:
+            raise _AuthError()
+
     if resp.status_code == 402:
         log.error(
             "openrouter_hard_failure",

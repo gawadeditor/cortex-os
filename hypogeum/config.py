@@ -462,6 +462,17 @@ class Config:
             "OPENROUTER_API_KEY",
             "Routes all LLM calls via OpenRouter (required by all 9 agents)"
         )
+        # Drain key (2026-10-05): an old key whose leftover balance is spent
+        # first; OPENROUTER_MAIN_KEY takes over once it's marked exhausted.
+        # See hypogeum/openrouter_drain.py.
+        self.OPENROUTER_MAIN_KEY = self.OPENROUTER_API_KEY
+        self.OPENROUTER_DRAIN_ACTIVE = False
+        _drain = _get_optional("OPENROUTER_DRAIN_KEY", default="") or ""
+        if _drain and _drain != self.OPENROUTER_API_KEY:
+            from hypogeum.openrouter_drain import is_exhausted as _drain_exhausted
+            if not _drain_exhausted():
+                self.OPENROUTER_API_KEY = _drain
+                self.OPENROUTER_DRAIN_ACTIVE = True
         self.OPENROUTER_SONNET_MODEL_ID = _get_optional(
             "OPENROUTER_SONNET_MODEL_ID", default=_DEFAULT_SONNET_SLUG
         )

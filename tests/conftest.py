@@ -691,3 +691,4 @@ def _isolate_openrouter_drain_flag(tmp_path, monkeypatch):
     """The drain-key 'exhausted' flag lives in ~/.cortex; tests use their own."""
     import hypogeum.openrouter_drain as _od
     monkeypatch.setattr(_od, "FLAG", tmp_path / "openrouter_drain_exhausted")
+    monkeypatch.setattr(_od, "BASELINE", tmp_path / "openrouter_drain_total_credits")

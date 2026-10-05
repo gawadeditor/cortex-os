@@ -18,7 +18,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 FLAG = Path.home() / ".cortex" / "openrouter_drain_exhausted"
+BASELINE = Path.home() / ".cortex" / "openrouter_drain_total_credits"
 DRAIN_SWITCH_BELOW_USD = 1.5
+
+
+def purchase_detected(total_credits: float) -> bool:
+    """True if the drain account's total purchased credits went UP since we
+    started using it -- i.e. its card was charged (auto top-up). The operator
+    wants that account used only while it never charges the card, so the
+    caller switches away at once and alerts. First call records the
+    baseline."""
+    try:
+        if not BASELINE.exists():
+            BASELINE.parent.mkdir(parents=True, exist_ok=True)
+            BASELINE.write_text(f"{total_credits}\n")
+            return False
+        return total_credits > float(BASELINE.read_text().strip() or 0) + 0.01
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def is_exhausted() -> bool:

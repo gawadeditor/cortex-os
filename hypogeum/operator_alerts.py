@@ -253,7 +253,21 @@ def _drain_balance_check(config, http_get) -> None:
         left = float(data.get("total_credits") or 0) - float(data.get("total_usage") or 0)
     except Exception:  # noqa: BLE001
         return
-    from hypogeum.openrouter_drain import DRAIN_SWITCH_BELOW_USD, mark_exhausted
+    from hypogeum.openrouter_drain import DRAIN_SWITCH_BELOW_USD, mark_exhausted, purchase_detected
+    if purchase_detected(float(data.get("total_credits") or 0)):
+        # The old account bought credits on its own (auto top-up): stop using
+        # it right away -- the operator never wants that card charged.
+        mark_exhausted("auto_topup_detected")
+        config.OPENROUTER_API_KEY = config.OPENROUTER_MAIN_KEY
+        config.OPENROUTER_DRAIN_ACTIVE = False
+        try:
+            alert("openrouter:drain_charged", "حساب OpenRouter القديم اتشحن من البطاقة",
+                  "رصيد الحساب القديم زاد لوحده، يعني الـ Auto Top-Up شغال عليه وخصم من بطاقتك.\n"
+                  "وقفت استخدامه فوراً والمصنع نقل على المفتاح الأساسي. اقفل Auto Top-Up أو امسح البطاقة "
+                  "من openrouter.ai ← Credits في الحساب القديم.")
+        except Exception:  # noqa: BLE001
+            pass
+        return
     if left < DRAIN_SWITCH_BELOW_USD:
         mark_exhausted(f"balance_${left:.2f}")
         config.OPENROUTER_API_KEY = config.OPENROUTER_MAIN_KEY

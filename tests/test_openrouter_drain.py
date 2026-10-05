@@ -50,3 +50,16 @@ def test_402_on_the_drain_key_retries_the_same_call_on_the_main_key(keys, monkey
         openrouter._call_openrouter("m", [{"role": "user", "content": "x"}], 10, c,
                                     openrouter.get_logger(agent="t"), 0)
     assert seen == ["Bearer sk-old", "Bearer sk-main"] and od.is_exhausted()
+
+
+def test_a_card_charge_on_the_old_account_stops_it_at_once(keys, monkeypatch):
+    from hypogeum import operator_alerts as oa
+    from hypogeum.config import Config
+    sent = []
+    monkeypatch.setattr(oa, "alert", lambda key, *a, **k: sent.append(key))
+    c = Config()
+    oa._drain_balance_check(c, lambda: {"total_credits": 470, "total_usage": 457})   # baseline
+    assert c.OPENROUTER_DRAIN_ACTIVE and not od.is_exhausted()
+    oa._drain_balance_check(c, lambda: {"total_credits": 480, "total_usage": 468})   # auto top-up
+    assert od.is_exhausted() and c.OPENROUTER_API_KEY == "sk-main"
+    assert sent == ["openrouter:drain_charged"]

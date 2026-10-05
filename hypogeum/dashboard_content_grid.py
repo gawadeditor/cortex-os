@@ -187,6 +187,17 @@ def _local_episode_title(conn, episode_id: str) -> str:
     return row["title"] or row["topic"] or episode_id
 
 
+
+def _plain_fetch_error(exc: Exception) -> str:
+    """What the operator sees on a card when a live refresh failed. The
+    data shown is the last good copy, so say that plainly instead of a raw
+    urllib3 traceback (2026-10-05: a network drop put a NameResolutionError
+    on every card and it looked like the posts were broken)."""
+    text = str(exc)
+    if any(k in text for k in ("NameResolution", "Max retries", "ConnectionError", "timed out", "Timeout")):
+        return "Couldn't reach Zernio (network) — showing the last saved copy; it refreshes on its own."
+    return f"Couldn't refresh from Zernio ({text[:120]}) — showing the last saved copy."
+
 def _fetch_live(provider, post_id: str, *, known_thumbnail_url: Optional[str] = None,
                  known_is_landscape: Optional[bool] = None, channel_id: Optional[str] = None) -> dict:
     """One GET /posts/{id}, normalised into the row shape this module
@@ -204,7 +215,7 @@ def _fetch_live(provider, post_id: str, *, known_thumbnail_url: Optional[str] = 
         res = (provider.get_post(post_id, timeout=_LIVE_FETCH_TIMEOUT_SECONDS, channel_id=channel_id)
                if channel_id else provider.get_post(post_id, timeout=_LIVE_FETCH_TIMEOUT_SECONDS))
     except Exception as exc:  # noqa: BLE001
-        return {"fetch_error": str(exc)[:200]}
+        return {"fetch_error": _plain_fetch_error(exc)}
     post = res.get("post") or {}
     if res.get("status_code") != 200 or not post:
         return {"fetch_error": f"status={res.get('status_code')} error={res.get('error')!r}"[:200]}
@@ -349,7 +360,7 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
                 try:
                     live = future.result()
                 except Exception as exc:  # noqa: BLE001
-                    live = {"fetch_error": str(exc)[:200]}
+                    live = {"fetch_error": _plain_fetch_error(exc)}
                 if live.get("fetch_error"):
                     # A transient Zernio failure must not blank out data we
                     # already had -- keep the last known-good fields for

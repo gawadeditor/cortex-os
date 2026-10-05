@@ -144,12 +144,12 @@
         {% for fp in it.failed_platforms %}
         <div class="cg-manual-note">
           <strong>{{ fp.platform }}:</strong> {{ fp.error or 'Zernio marked it failed.' }}
-          {% if fp.error and 'published externally' in fp.error %}Check the {{ fp.platform }} page — don't re-publish before checking, or it posts twice.{% endif %}
+          {% if fp.error and 'published externally' in fp.error %}Re-publishing without checking would post it twice.{% endif %}
         </div>
         <form method="post" action="/channel/{{ channel_id }}/grid/platform-live" class="cg-done-form">
           <input type="hidden" name="post_id" value="{{ it.post_id }}">
           <input type="hidden" name="platform" value="{{ fp.platform }}">
-          <button type="submit" class="btn">{{ icon('check') }} Checked — it's live on {{ fp.platform }}</button>
+          <button type="submit" class="btn" style="white-space:normal;max-width:100%;">{{ icon('check') }} It's live on {{ fp.platform }}</button>
         </form>
         {% endfor %}
         {% endif %}

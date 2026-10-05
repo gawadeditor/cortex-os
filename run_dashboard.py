@@ -6013,7 +6013,14 @@ def episode_detail_page(episode_id):
     active_tab = request.args.get("tab", "production")
     if active_tab not in valid_tabs:
         active_tab = "production"
-    return render_template("episode_detail.html", d=d, active_tab=active_tab)
+    compare = None
+    if active_tab == "analytics":
+        try:
+            from hypogeum.episode_compare import compare as _compare_episode
+            compare = _compare_episode(episode_id, db_path=_db_path())
+        except Exception:  # noqa: BLE001
+            compare = None
+    return render_template("episode_detail.html", d=d, active_tab=active_tab, compare=compare)
 
 
 def _load_disk_pkg(episode_id: str, stem: str) -> dict:

@@ -1932,6 +1932,40 @@ function resumeEpisode(episodeId, kind) {
    ANALYTICS TAB
 ════════════════════════════════════════════════════════════════ #}
 {% if active_tab == 'analytics' %}
+{# Same-age comparison with the channel's earlier episodes (2026-10-05) #}
+{% if compare %}
+<div class="card" style="margin-bottom:var(--gap);">
+  <div class="card-title">Compared with earlier episodes at the same age</div>
+  {% if compare.ages %}
+  <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">
+    Public {{ compare.release[:16] | replace('T', ' ') }} UTC · {{ compare.age_days }} days old{% if compare.hook_pattern %} · opening: {{ compare.hook_pattern | replace('_', ' ') }}{% endif %}
+  </div>
+  <table style="width:100%; font-size:13px; border-collapse:collapse;">
+    <thead><tr style="text-align:left; color:var(--muted);">
+      <th>Age</th><th>Views</th><th>Earlier episodes (median)</th><th>Rank</th><th>Engagement (median)</th><th>YouTube watched %</th>
+    </tr></thead>
+    <tbody>
+    {% for day, x in compare.ages.items() %}
+    <tr>
+      <td>Day {{ day }}</td>
+      <td><strong>{{ x.views }}</strong></td>
+      <td>{{ x.peer_median_views | int if x.peer_median_views is not none else '—' }}</td>
+      <td>{{ x.rank }}</td>
+      <td>{{ x.engagement }} ({{ x.peer_median_eng | int if x.peer_median_eng is not none else '—' }})</td>
+      <td>{{ '%.0f' % x.yt_avg_view_pct if x.yt_avg_view_pct else '—' }}{% if x.peer_median_yt_avg_view_pct %} ({{ '%.0f' % x.peer_median_yt_avg_view_pct }}){% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% elif compare.note %}
+  <div style="font-size:13px; color:var(--muted);">Not public yet — the comparison starts one day after it goes public.</div>
+  {% elif compare.error %}
+  <div style="font-size:13px; color:var(--muted);">Not published yet.</div>
+  {% else %}
+  <div style="font-size:13px; color:var(--muted);">Less than a day public — the first comparison appears at day 1.</div>
+  {% endif %}
+</div>
+{% endif %}
 {% set anl = d.analytics %}
 {% set ov  = anl.overview %}
 

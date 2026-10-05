@@ -109,6 +109,7 @@ def reconcile_orphaned_runs(
     orphaned_ids: list[str] = []
     orphaned_episode_ids: list[str] = []
     now = _now_iso()
+    worker_episode = _worker_active_episode(db_path) if legacy_worker_is_running_pipeline else None
 
     for row in rows:
         run_id = row["run_id"]
@@ -116,6 +117,13 @@ def reconcile_orphaned_runs(
 
         if run_lease_is_live(run_id, at=now, db_path=db_path):
             continue  # legitimately owned right now -- never orphaned
+
+        # The lease is wall-clock: a Mac asleep longer than its TTL wakes
+        # with the lease "expired" while the worker process -- suspended,
+        # not dead -- carries on with this very run. The live worker saying
+        # it is running THIS episode wins (2026-10-05).
+        if worker_episode and worker_episode == episode_id:
+            continue
 
         has_lease_row = _has_ever_had_a_lease(run_id, db_path)
         if not has_lease_row and legacy_worker_is_running_pipeline:
@@ -149,6 +157,23 @@ def reconcile_orphaned_runs(
         pass
 
     return orphaned_ids
+
+
+def _worker_active_episode(db_path: Optional[Path]) -> Optional[str]:
+    """The episode the worker says it is producing right now, or None."""
+    from hypogeum.db import get_connection, get_worker_control
+    try:
+        qid = get_worker_control("active_queue_id", "", db_path=db_path)
+        if not qid:
+            return None
+        conn = get_connection(db_path)
+        try:
+            r = conn.execute("SELECT episode_id FROM run_queue WHERE queue_id = ?", (qid,)).fetchone()
+            return r["episode_id"] if r and r["episode_id"] else None
+        finally:
+            conn.close()
+    except Exception:
+        return None
 
 
 def _reconcile_queue_and_stage_state(

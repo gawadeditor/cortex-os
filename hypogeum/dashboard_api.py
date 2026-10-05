@@ -502,6 +502,18 @@ def get_run_health(db_path: Optional[Path] = None) -> RunHealthSummary:
                     MAX(started_at)                                AS last_run_at
                 FROM runs
             """).fetchone()
+            # Last 14 days -- queried BEFORE the close: it used to run on the
+            # closed connection, always raised, and showed "0 runs" (2026-10-05).
+            try:
+                rc = conn.execute("""
+                    SELECT SUM(CASE WHEN status IN ('complete','completed') THEN 1 ELSE 0 END) AS c,
+                           SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS f
+                    FROM runs WHERE started_at >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-14 days')
+                """).fetchone()
+                r_c = (rc["c"] or 0) if rc else 0
+                r_f = (rc["f"] or 0) if rc else 0
+            except Exception:  # noqa: BLE001
+                r_c = r_f = 0
         finally:
             conn.close()
 
@@ -511,17 +523,6 @@ def get_run_health(db_path: Optional[Path] = None) -> RunHealthSummary:
         complete = row["complete"] or 0
         failed   = row["failed"]   or 0
         running  = row["running"]  or 0
-
-        try:
-            rc = conn.execute("""
-                SELECT SUM(CASE WHEN status IN ('complete','completed') THEN 1 ELSE 0 END) AS c,
-                       SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS f
-                FROM runs WHERE started_at >= datetime('now','-14 days')
-            """).fetchone()
-            r_c = (rc["c"] or 0) if rc else 0
-            r_f = (rc["f"] or 0) if rc else 0
-        except Exception:  # noqa: BLE001
-            r_c = r_f = 0
 
         return RunHealthSummary(
             total_runs                    = row["total"],

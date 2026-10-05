@@ -347,9 +347,35 @@ def get_executive_overview(db_path: Optional[Path] = None) -> dict:
     result["failed_run_id"] = failed_run_id
 
     # ── Views trend (pre-normalised for chart rendering) ──────────────────────
-    result["views_chart"] = _build_views_chart(result["recent_episodes"])
+    result["views_chart"] = _build_views_chart(_published_episode_views(db))
 
     return result
+
+
+def _published_episode_views(db) -> list:
+    """The last 12 published episodes, oldest first, with their real total
+    views (latest snapshot per platform). The recent-episodes list is mostly
+    not-yet-published work, so the chart was always empty."""
+    try:
+        from hypogeum.db import get_connection
+        conn = get_connection(db)
+        try:
+            rows = conn.execute(
+                """SELECT pa.episode_id, SUM(pa.views) AS v, MIN(pa.snapshot_date) AS first_seen,
+                          (SELECT title FROM episodes e WHERE e.episode_id = pa.episode_id) AS title
+                   FROM (SELECT pa.* FROM platform_analytics pa
+            JOIN (SELECT episode_id, platform, MAX(snapshot_date) AS d FROM platform_analytics
+                  WHERE source != 'mock' GROUP BY episode_id, platform) latest
+              ON latest.episode_id = pa.episode_id AND latest.platform = pa.platform
+             AND latest.d = pa.snapshot_date
+            WHERE pa.source != 'mock') pa
+                   GROUP BY pa.episode_id ORDER BY first_seen DESC LIMIT 12"""
+            ).fetchall()
+        finally:
+            conn.close()
+        return [{"title": r["title"] or r["episode_id"], "views": int(r["v"] or 0)} for r in reversed(rows)]
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _build_views_chart(episodes: list) -> list:
@@ -524,13 +550,20 @@ def _load_real_analytics_summary(conn, result: dict) -> None:
     format (h/m/s) so short-form content doesn't collapse to 0.0h.
     """
     try:
+        # Latest snapshot per (episode, platform), every platform: snapshots
+        # are daily CUMULATIVE counts, so summing all of them counted each
+        # video once per tracked day (82,585 "views" vs a real 24.6K, the
+        # same page's Factory tile -- 2026-10-05).
         row = conn.execute(
             """
-            SELECT SUM(views)           AS total_views,
-                   AVG(avg_watch_time_s) AS avg_watch_s
-            FROM platform_analytics
-            WHERE platform = 'youtube'
-              AND source   != 'mock'
+            SELECT SUM(pa.views)            AS total_views,
+                   AVG(pa.avg_watch_time_s) AS avg_watch_s
+            FROM (SELECT pa.* FROM platform_analytics pa
+            JOIN (SELECT episode_id, platform, MAX(snapshot_date) AS d FROM platform_analytics
+                  WHERE source != 'mock' GROUP BY episode_id, platform) latest
+              ON latest.episode_id = pa.episode_id AND latest.platform = pa.platform
+             AND latest.d = pa.snapshot_date
+            WHERE pa.source != 'mock') pa
             """
         ).fetchone()
         if row and row["total_views"]:
@@ -542,5 +575,14 @@ def _load_real_analytics_summary(conn, result: dict) -> None:
             result["analytics"]["watch_time_h"] = (
                 round(avg_s / 3600, 2) if avg_s >= 60 else None
             )
+        # Followers across every channel and platform (the latest Zernio
+        # follower stats) -- this tile said "No real data" while the numbers
+        # were already synced (2026-10-05).
+        from hypogeum.monetization_eligibility import _latest_follower_stats
+        total = 0
+        for (ch,) in conn.execute("SELECT DISTINCT channel_id FROM channel_platform_insights"):
+            total += sum(v for v in _latest_follower_stats(ch, conn).values() if isinstance(v, (int, float)))
+        if total:
+            result["analytics"]["subscribers"] = int(total)
     except Exception:
         pass

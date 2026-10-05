@@ -635,7 +635,7 @@
       <div class="kpi-val">
         {% if anl.subscribers %}{{ "{:,}".format(anl.subscribers) }}{% else %}<span class="dash-val">—</span>{% endif %}
       </div>
-      <div class="kpi-lbl">Subscribers</div>
+      <div class="kpi-lbl">Followers (all platforms)</div>
       <div class="kpi-source {{ 'kpi-source-real' if anl.subscribers else 'kpi-source-none' }}">
         {{ "Real data" if anl.subscribers else "No real data" }}
       </div>
@@ -644,7 +644,7 @@
       <div class="kpi-val">
         {% if anl.views %}{{ "{:,}".format(anl.views) }}{% else %}<span class="dash-val">—</span>{% endif %}
       </div>
-      <div class="kpi-lbl">Total Views</div>
+      <div class="kpi-lbl">Total Views (all platforms)</div>
       <div class="kpi-source {{ 'kpi-source-real' if anl.views else 'kpi-source-none' }}">
         {{ "Real data" if anl.views else "No real data" }}
       </div>

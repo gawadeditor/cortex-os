@@ -735,6 +735,33 @@ def get_run_workflow_binding(run_id: str, db_path: Optional[Path] = None) -> Opt
     return json.loads(row["workflow_binding_json"])
 
 
+def _close_earlier_failure_signals(run_id: str, db_path: Optional[Path]) -> None:
+    """A completed run shows its channel is producing again: close the open
+    run_failed signals raised for that channel before it. They otherwise sat
+    open for weeks and kept the factory "DEGRADED" ("32 older than a week",
+    2026-10-05). Never raises."""
+    try:
+        from hypogeum.ois import auto_resolve_signal
+        conn = get_connection(_db_path(db_path))
+        try:
+            row = conn.execute("SELECT channel_id, started_at FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+            if not row or not row["channel_id"]:
+                return
+            # run_failed signals carry the run_id, not the channel -- match
+            # through the failed run (or a NULL-run signal of the channel).
+            ids = [r[0] for r in conn.execute(
+                "SELECT s.signal_id FROM signal_records s LEFT JOIN runs f ON f.run_id = s.run_id "
+                "WHERE s.signal_type = 'run_failed' AND s.lifecycle_status = 'open' "
+                "AND COALESCE(f.channel_id, s.channel_id) = ? AND s.ingested_at <= ?",
+                (row["channel_id"], row["started_at"]))]
+        finally:
+            conn.close()
+        for sid in ids:
+            auto_resolve_signal(sid, "channel_completed_a_later_run", db_path=_db_path(db_path))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def complete_run(
     run_id: str,
     episode_id: str,
@@ -789,6 +816,7 @@ def complete_run(
         pass
 
     _append_index(run_id, episode_id, "completed", rdir)
+    _close_earlier_failure_signals(run_id, db_path)
 
     # Ensure an episodes-table row exists for this episode. Only
     # hypogeum.production_launcher's dashboard-manual /create/launch flow

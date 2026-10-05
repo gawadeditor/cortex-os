@@ -427,9 +427,10 @@ class TestExecutiveKPIsExcludeMock:
         """With 1 mock + 1 real youtube row, views must equal real row only (5000)."""
         from hypogeum.dashboard_executive import get_executive_overview
         result = get_executive_overview(db_path=db_with_mixed)
-        # youtube: 1 mock (seeded) + 1 real csv (views=5000)
-        # real_views = 5000, NOT 5000 + seeded_mock_views
-        assert result["analytics"]["views"] == 5000
+        # youtube: 1 mock (seeded) + 1 real csv (views=5000); tiktok real 800.
+        # The tile is all platforms since 2026-10-05 (matches the Factory
+        # total): 5800 real, never the seeded mock views.
+        assert result["analytics"]["views"] == 5800
 
     def test_demo_warning_set_when_mock_only(self, db_with_mock):
         from hypogeum.dashboard_executive import get_executive_overview

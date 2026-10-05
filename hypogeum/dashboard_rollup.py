@@ -234,11 +234,19 @@ def _channel_view_series(conn, episode_ids: Optional[set]) -> list:
     try:
         ph = ",".join("?" * len(episode_ids))
         rows = conn.execute(
+            # Latest snapshot per (episode, platform): snapshots are daily
+            # cumulative counts, so summing them all counted each video's views
+            # once per day it had been tracked (2026-10-05).
             f"""SELECT pa.episode_id, COALESCE(SUM(pa.views),0) AS v
-                FROM platform_analytics pa
-                WHERE pa.source='api' AND pa.episode_id IN ({ph})
+                FROM (SELECT pa.* FROM platform_analytics pa
+            JOIN (SELECT episode_id, platform, MAX(snapshot_date) AS d FROM platform_analytics
+                  WHERE source = 'api' GROUP BY episode_id, platform) latest
+              ON latest.episode_id = pa.episode_id AND latest.platform = pa.platform
+             AND latest.d = pa.snapshot_date
+            WHERE pa.source = 'api') pa
+                WHERE pa.episode_id IN ({ph})
                 GROUP BY pa.episode_id
-                ORDER BY MAX(pa.snapshot_date) ASC LIMIT 12""",
+                ORDER BY MIN(pa.snapshot_date) ASC LIMIT 12""",
             list(episode_ids),
         ).fetchall()
         return [int(r["v"] or 0) for r in rows]

@@ -405,3 +405,33 @@ class TestRunAllChecks:
             conn.close()
         assert row is not None
         assert row[0] == "worker_offline"
+
+
+class TestCompletedRunClosesEarlierFailures:
+    def test_completed_run_closes_its_channels_earlier_run_failed_signals(self, tmp_path):
+        from hypogeum.db import get_connection, initialize_schema
+        from hypogeum.run_registry import _close_earlier_failure_signals
+        db = tmp_path / "t.db"
+        initialize_schema(db)
+        conn = get_connection(db)
+        for rid, ch, st, t in (("f1", "a", "failed", "2026-10-01T00:00:00+00:00"),
+                               ("g1", "b", "failed", "2026-10-01T00:00:00+00:00"),
+                               ("ok", "a", "completed", "2026-10-02T00:00:00+00:00")):
+            conn.execute("INSERT INTO runs (run_id, episode_id, channel_id, status, started_at) VALUES (?,?,?,?,?)",
+                         (rid, f"ep_{rid}", ch, st, t))
+        conn.commit()
+        conn.close()
+        conn = get_connection(db)
+        for sid, rid in (("sa", "f1"), ("sb", "g1")):
+            conn.execute("INSERT INTO signal_records (signal_id, episode_id, signal_type, severity, run_id, "
+                         "lifecycle_status, ingested_at, source_system, blocking) "
+                         "VALUES (?, 'ep', 'run_failed', 'WARNING', ?, 'open', '2026-10-01T01:00:00+00:00', 'run_registry', 0)",
+                         (sid, rid))
+        conn.commit()
+        conn.close()
+        sa, sb = "sa", "sb"
+        _close_earlier_failure_signals("ok", db)
+        conn = get_connection(db)
+        st = dict(conn.execute("SELECT signal_id, lifecycle_status FROM signal_records").fetchall())
+        conn.close()
+        assert st[sa] == "auto_resolved" and st[sb] == "open"      # other channel untouched

@@ -74,6 +74,7 @@ _STALE_APPROVAL_HOURS    = 72
 _CREDENTIAL_EXPIRY_DAYS  = 7
 _CREDENTIAL_RETEST_DAYS  = 30
 _STORAGE_WARN_PCT        = 80      # warn when used% > this
+_STORAGE_MIN_FREE_GB = 20.0
 _QUEUE_WARN_DEPTH        = 5
 _ARCHIVE_WARN_ROWS       = 50_000
 _FAILURE_RATE_WARN_PCT   = 0.50    # warn when recent failure rate > 50%
@@ -920,7 +921,10 @@ def _assess_factory_capacity(db_path: Path, factory_id: str) -> DomainHealth:
             usage = shutil.disk_usage(_ASSETS_DIR)
             used_pct = (usage.used / usage.total * 100) if usage.total > 0 else 0
             free_gb  = usage.free / (1024 ** 3)
-            if used_pct > _STORAGE_WARN_PCT:
+            # Low only when the GB free is small too: 97% used on a 1.8TB
+            # personal disk still leaves ~55GB, plenty for production
+            # (2026-10-05; same rule as observability.check_disk_usage).
+            if used_pct > _STORAGE_WARN_PCT and free_gb < _STORAGE_MIN_FREE_GB:
                 checks.append(_fail(
                     "storage_pressure", f"Disk usage <{_STORAGE_WARN_PCT}%",
                     False,
@@ -929,7 +933,7 @@ def _assess_factory_capacity(db_path: Path, factory_id: str) -> DomainHealth:
                 ))
             else:
                 checks.append(_ok(
-                    "storage_pressure", f"Disk usage <{_STORAGE_WARN_PCT}%", False,
+                    "storage_pressure", f"Disk usage <{_STORAGE_WARN_PCT}% or {_STORAGE_MIN_FREE_GB:.0f}GB+ free", False,
                     f"Disk {used_pct:.1f}% used, {free_gb:.1f} GB free",
                 ))
         else:

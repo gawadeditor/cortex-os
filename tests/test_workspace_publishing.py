@@ -77,3 +77,30 @@ def test_schedule_sync_reads_each_account_and_keeps_posts_in_their_workspace(db,
     assert sorted(seen) == ["Bearer z-ACME", "Bearer z-OP"]
     assert out["ok"] and sorted(out["channels"]) == ["acme_ch", "op_ch"]
     assert out["unattributed"] == 1                   # p3: client account post claiming an operator channel
+
+
+def test_operator_manages_workspaces_from_the_dashboard(db):
+    import run_dashboard as server
+    from hypogeum import workspace_controls as wsc
+    from hypogeum.credential_manager import list_secret_profiles
+    old = server.app.config.get("DB_PATH")
+    server.app.config["DB_PATH"] = str(db)
+    try:
+        c = server.app.test_client()
+        assert c.post("/workspaces/new", data={"name": "Beta Media"}).status_code == 302
+        assert "beta" in "".join(w["workspace_id"] for w in ws.list_workspaces(db))
+        assert c.post("/workspaces/acme/channels", data={"channel_id": "op_ch"}).status_code == 302
+        assert ws.workspace_of("op_ch", db) == "acme"
+        assert c.post("/workspaces/acme/ceiling", data={"ceiling": "75"}).status_code == 302
+        assert wsc.month_ceiling("acme", db) == 75
+        assert c.post("/workspaces/acme/keys", data={"provider": "openrouter", "key": "short"}).status_code == 400
+        assert c.post("/workspaces/acme/keys", data={"provider": "openrouter", "key": "sk-or-" + "x" * 30}).status_code == 302
+        c.post("/workspaces/acme/keys", data={"provider": "openrouter", "key": "sk-or-" + "y" * 30})
+        owned = set(ws.resources_of("acme", "secret_profile", db))
+        active = [p for p in list_secret_profiles(provider="openrouter", db_path=db)
+                  if p.secret_profile_id in owned and p.status == "active"]
+        assert len(active) == 1                                    # replaced, not duplicated
+        page = c.get("/workspaces?scope=factory").get_data(as_text=True)
+        assert "sk-or-" not in page and "Save key" in page          # never shown back
+    finally:
+        server.app.config["DB_PATH"] = old

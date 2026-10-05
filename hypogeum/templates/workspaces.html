@@ -66,6 +66,20 @@
      pill_class='is-good' if bot else 'is-warn') %}
 {% endcall %}
 
+<section class="card" aria-labelledby="ws-new-title" style="margin-bottom:var(--gap, 16px);">
+  <h2 id="ws-new-title">{{ icon('plus') }} New workspace</h2>
+  <form method="post" action="/workspaces/new" class="appr-form">
+    <label class="appr-field">Client name
+      <input type="text" name="name" required maxlength="80">
+    </label>
+    <label class="appr-field">Alert language
+      <select name="language"><option value="en">English</option><option value="ar">Arabic</option></select>
+    </label>
+    <button class="btn btn-sm" type="submit">{{ icon('plus') }} Create</button>
+  </form>
+  <p class="note">Then move its channel into it, add its provider keys and connect its Telegram below.</p>
+</section>
+
 <div class="ws-list">
 {% for w in workspaces %}
   <section class="card" aria-labelledby="ws-{{ w.workspace_id }}-title">
@@ -108,6 +122,42 @@
       <button class="btn btn-sm" type="submit">{{ icon('play') }} Resume production</button>
     </form>
     {% endif %}
+
+    <div class="alerts">
+      <h3>{{ icon('settings') }} Manage</h3>
+      <form method="post" action="/workspaces/{{ w.workspace_id }}/ceiling" class="appr-form">
+        <label class="appr-field">Monthly spending ceiling ($)
+          <input type="number" name="ceiling" min="0" step="1" value="{{ '%.0f' % w.ceiling }}">
+        </label>
+        <button class="btn btn-sm" type="submit">{{ icon('check') }} Save</button>
+      </form>
+      <p class="note">0 = no ceiling. When this month’s spend reaches it, this workspace’s production pauses on its own.{% if w.kind == 'platform_owner' %} With 0 here, the .env ceiling applies.{% endif %}</p>
+      <form method="post" action="/workspaces/{{ w.workspace_id }}/channels" class="appr-form">
+        <label class="appr-field">Move a channel into this workspace
+          <select name="channel_id" required>
+            <option value="">Choose a channel…</option>
+            {% for ch in all_channels if ch not in w.channels %}<option value="{{ ch }}">{{ ch }}</option>{% endfor %}
+          </select>
+        </label>
+        <button class="btn btn-sm" type="submit">{{ icon('arrow-right') }} Move</button>
+      </form>
+      <div class="when" style="margin-top:8px;">Provider keys:
+        {% for k in w.provider_keys %}<span class="badge">{{ k.provider }}</span> {% else %}none yet{% endfor %}
+        {% if w.kind == 'platform_owner' %}— your .env keys are used first for this workspace.{% endif %}
+      </div>
+      <form method="post" action="/workspaces/{{ w.workspace_id }}/keys" class="appr-form" autocomplete="off">
+        <label class="appr-field">Provider
+          <select name="provider" required>
+            {% for p in key_providers %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
+          </select>
+        </label>
+        <label class="appr-field">API key
+          <input type="password" name="key" required minlength="16" autocomplete="new-password" spellcheck="false">
+        </label>
+        <button class="btn btn-sm" type="submit">{{ icon('key') }} Save key</button>
+      </form>
+      <p class="note">Stored encrypted and never shown again. Saving a key for a provider replaces this workspace’s old one. This workspace’s channels only ever spend with its own keys.</p>
+    </div>
 
     <div class="alerts">
       <h3>{{ icon('bolt') }} Telegram alerts</h3>

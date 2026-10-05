@@ -33,6 +33,35 @@ def _db():
     return Path(p) if p else None
 
 
+KEY_PROVIDERS = ("openrouter", "muapi", "elevenlabs", "perplexity", "anthropic", "zernio", "postiz")
+
+
+def _keys_of(workspace_id: str, db) -> list[dict]:
+    """The workspace's provider keys: provider, status, date — never a value."""
+    from hypogeum.credential_manager import list_secret_profiles
+    from hypogeum.workspaces import resources_of
+    try:
+        owned = set(resources_of(workspace_id, "secret_profile", db_path=db))
+        return [{"provider": p.provider, "status": p.status, "updated_at": (p.updated_at or "")[:10]}
+                for p in list_secret_profiles(db_path=db)
+                if p.secret_profile_id in owned and p.status == "active"]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _all_channels(db) -> list[str]:
+    from hypogeum.db import get_connection
+    try:
+        conn = get_connection(db)
+        try:
+            return [r[0] for r in conn.execute(
+                "SELECT DISTINCT channel_id FROM schedules WHERE channel_id IS NOT NULL ORDER BY 1")]
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _workspace_rows(db) -> list[dict]:
     from hypogeum import alert_recipients as ar
     from hypogeum import publish_approvals as pa
@@ -53,6 +82,7 @@ def _workspace_rows(db) -> list[dict]:
             "approval_settings": pa.get_settings("workspace", wid, db) or dict(pa.DEFAULTS),
             "approvals": pa.list_for(wid, statuses=("pending",), db_path=db),
             "production_start": wsc.production_start(wid, db),
+            "provider_keys": _keys_of(wid, db),
         })
     out.sort(key=lambda r: (r["kind"] != "platform_owner", r["name"].lower()))
     return out
@@ -74,6 +104,7 @@ def workspaces_page():
     msg = request.args.get("bot_msg")
     return render_template("workspaces.html", workspaces=_workspace_rows(db), bot=bot,
                            alert_types=ar.ALERT_TYPES, scope="factory",
+                           all_channels=_all_channels(db), key_providers=KEY_PROVIDERS,
                            bot_switch_msg=msg, bot_switch_ok=request.args.get("bot_ok") == "1")
 
 
@@ -136,6 +167,81 @@ def workspace_resume(workspace_id):
     else:
         clear_breaker(db_path=db, workspace_id=workspace_id)
     return redirect("/workspaces?scope=factory")
+
+
+# ── Operator management (2026-10-05): until now creating a workspace,
+# moving a channel, setting the monthly ceiling or adding a client's key
+# needed scripts/workspaces.py in a terminal. The operator does it here; the
+# client-facing login/onboarding stays Phases 6-7.
+
+@bp.route("/workspaces/new", methods=["POST"])
+def workspace_create():
+    from flask import request
+    from hypogeum.workspaces import WorkspaceError, create_workspace
+    name = (request.form.get("name") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "name is required"}), 400
+    try:
+        w = create_workspace(name, language=request.form.get("language") or "en", db_path=_db())
+    except (WorkspaceError, ValueError) as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    return redirect(f"/workspaces?scope=factory#ws-{w['workspace_id']}-title")
+
+
+@bp.route("/workspaces/<workspace_id>/channels", methods=["POST"])
+def workspace_assign_channel(workspace_id):
+    from flask import request
+    from hypogeum.workspaces import assign
+    ch = (request.form.get("channel_id") or "").strip()
+    if not ch:
+        return jsonify({"ok": False, "error": "channel_id is required"}), 400
+    try:
+        assign("channel", ch, workspace_id, move=True, db_path=_db())
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    return redirect(f"/workspaces?scope=factory#ws-{workspace_id}-title")
+
+
+@bp.route("/workspaces/<workspace_id>/ceiling", methods=["POST"])
+def workspace_ceiling(workspace_id):
+    from flask import request
+    from hypogeum.factory_entity import update_factory_policies
+    try:
+        value = float(request.form.get("ceiling") or 0)
+        if value < 0:
+            raise ValueError("ceiling can't be negative")
+        update_factory_policies(workspace_id, {"monthly_ceiling_usd": value},
+                                reason="monthly ceiling set from the Workspaces page", db_path=_db())
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    return redirect(f"/workspaces?scope=factory#ws-{workspace_id}-title")
+
+
+@bp.route("/workspaces/<workspace_id>/keys", methods=["POST"])
+def workspace_set_key(workspace_id):
+    """Store (or replace) a provider key for the workspace — encrypted at
+    rest, never shown again. Same logic as scripts/workspaces.py set-key."""
+    from flask import request
+    from hypogeum.credential_manager import (create_secret_profile, list_secret_profiles,
+                                             revoke_secret_profile)
+    from hypogeum.workspaces import list_workspaces, resources_of
+    provider = (request.form.get("provider") or "").strip()
+    key = (request.form.get("key") or "").strip()
+    if provider not in KEY_PROVIDERS:
+        return jsonify({"ok": False, "error": "unknown provider"}), 400
+    if not key or " " in key or len(key) < 16:
+        return jsonify({"ok": False, "error": "that doesn't look like an API key"}), 400
+    db = _db()
+    if workspace_id not in {w["workspace_id"] for w in list_workspaces(db)}:
+        return jsonify({"ok": False, "error": "unknown workspace"}), 404
+    owned = set(resources_of(workspace_id, "secret_profile", db_path=db))
+    for p in list_secret_profiles(provider=provider, db_path=db):
+        if p.secret_profile_id in owned and p.status == "active":
+            revoke_secret_profile(p.secret_profile_id, db_path=db)
+    create_secret_profile(provider, f"{workspace_id} {provider}", "api_key", key,
+                          scope="factory", workspace_id=workspace_id, db_path=db)
+    del key
+    return redirect(f"/workspaces?scope=factory#ws-{workspace_id}-title")
 
 
 @bp.route("/workspaces/<workspace_id>/production-start", methods=["POST"])

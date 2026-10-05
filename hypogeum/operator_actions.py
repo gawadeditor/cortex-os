@@ -274,7 +274,9 @@ def status_text(db_path=None) -> tuple:
             opened = []
         try:
             covers = conn.execute("SELECT COUNT(*) FROM youtube_cover_holds WHERE status IN ('held','late') "
-                                  "AND post_id NOT IN (SELECT post_id FROM youtube_cover_confirmations)").fetchone()[0]
+                                  "AND upload_at <= ? "
+                                  "AND post_id NOT IN (SELECT post_id FROM youtube_cover_confirmations)",
+                                  (datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),)).fetchone()[0]
         except Exception:  # noqa: BLE001
             covers = 0
     finally:
@@ -283,7 +285,7 @@ def status_text(db_path=None) -> tuple:
         lines.append(_last_run_line(dict(run), dbp))
     lines += _outlook_lines(dbp)
     if covers:
-        lines.append(f"• أغلفة يوتيوب مستنية: {covers}")
+        lines.append(f"• أغلفة يوتيوب محتاجاك دلوقتي: {covers}")
     lines.append("• تنبيهات مفتوحة: " + ("، ".join(opened) if opened else "مفيش"))
     return "\n".join(lines), ({"inline_keyboard": rows} if rows else None)
 
@@ -426,7 +428,13 @@ def _upcoming_text(db_path) -> tuple:
 
 
 def _covers_text(db_path) -> tuple:
+    """Covers that need the operator NOW (Short already uploaded private, no
+    cover yet) — with Studio link + 'cover uploaded' — separately from the
+    ones coming up (not uploaded yet: nothing to do until then). 2026-10-05:
+    one mixed list made four future covers look overdue."""
+    from datetime import datetime, timezone
     from hypogeum.db import get_connection
+    now = datetime.now(timezone.utc)
     conn = get_connection(_p(db_path))
     try:
         rows = [dict(r) for r in conn.execute(
@@ -438,18 +446,36 @@ def _covers_text(db_path) -> tuple:
         rows = []
     finally:
         conn.close()
+
+    def _uploaded(r) -> bool:
+        try:
+            return datetime.fromisoformat(r["upload_at"].replace("Z", "+00:00")) <= now
+        except Exception:  # noqa: BLE001
+            return False
+    now_rows = [r for r in rows if _uploaded(r)]
+    later = [r for r in rows if not _uploaded(r)]
     if not rows:
         return "🎬 مفيش أغلفة مستنياك.", None
-    lines, kb = ["🎬 أغلفة يوتيوب المستنية:"], []
-    for i, r in enumerate(rows, 1):
-        lines.append(f"{i}. {r['channel_id']} — {(r.get('title') or r['post_id'])[:60]}\n"
-                     f"   تترفع private {_local(r['upload_at'])}، وتنزل {_local(r['release_at'])}")
-        row = [_btn(f"✅ {i} رفعت الغلاف", "cover_done", r["post_id"])]
-        studio = _studio_url(r["post_id"], db_path)
-        if studio:
-            row.insert(0, _url(f"🎬 {i} Studio", studio))
-        kb.append(row)
-    return "\n".join(lines), {"inline_keyboard": kb}
+    lines, kb = [], []
+    if now_rows:
+        lines.append("🎬 محتاجة غلاف دلوقتي:")
+        for i, r in enumerate(now_rows, 1):
+            late = " ⚠️ فات ميعادها" if r["status"] != "held" else ""
+            lines.append(f"{i}. {r['channel_id']} — {(r.get('title') or r['post_id'])[:60]}\n"
+                         f"   بتنزل للعامة {_local(r['release_at'])}{late}")
+            row = [_btn(f"✅ {i} رفعت الغلاف", "cover_done", r["post_id"])]
+            studio = _studio_url(r["post_id"], db_path)
+            if studio:
+                row.insert(0, _url(f"🎬 {i} Studio", studio))
+            kb.append(row)
+    else:
+        lines.append("✅ مفيش غلاف مطلوب منك دلوقتي.")
+    if later:
+        lines.append("\n📅 جاية (لسه ما اترفعتش على يوتيوب — مفيش حاجة تتعمل قبل كده):")
+        for r in later:
+            lines.append(f"• {r['channel_id']} — {(r.get('title') or r['post_id'])[:55]}\n"
+                         f"   تترفع {_local(r['upload_at'])}، والغلاف مطلوب قبل {_local(r['release_at'])}")
+    return "\n".join(lines), ({"inline_keyboard": kb} if kb else None)
 
 
 def _spend_text(db_path) -> tuple:

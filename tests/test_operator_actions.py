@@ -107,3 +107,16 @@ def test_menu_buttons(db, monkeypatch):
     assert "مفيش" in oa.handle_command("999", oa.M_COVERS, db_path=db)[0]
     assert oa.handle_command("999", oa.M_UPCOMING, db_path=db)[0].startswith("📅")
     assert oa.handle_command("999", "hello", db_path=db) is None
+
+
+def test_covers_split_now_vs_upcoming(db):
+    conn = get_connection(db)
+    conn.executescript("""CREATE TABLE IF NOT EXISTS youtube_cover_holds (post_id TEXT PRIMARY KEY, channel_id TEXT,
+        episode_id TEXT, release_at TEXT, upload_at TEXT, status TEXT, held_at TEXT, released_at TEXT, last_error TEXT);
+        INSERT INTO youtube_cover_holds VALUES ('due','hypogeum','e1','2099-01-02T10:00:00Z','2000-01-01T10:00:00Z','held','h',NULL,NULL);
+        INSERT INTO youtube_cover_holds VALUES ('soon','hypogeum','e2','2099-01-05T10:00:00Z','2099-01-04T10:00:00Z','held','h',NULL,NULL);""")
+    conn.commit()
+    conn.close()
+    text, kb = oa._covers_text(db)
+    assert text.index("محتاجة غلاف دلوقتي") < text.index("جاية")
+    assert _cb(kb) == ["act:cover_done:due"]          # a button only for the one already uploaded

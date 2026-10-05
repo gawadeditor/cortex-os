@@ -30,6 +30,15 @@ Now:
     budget_status(workspace_id) -> dict
     blocked_channels(db_path=None) -> dict[channel_id, reason]
     has_client_workspaces(db_path=None) -> bool
+    production_start(workspace_id) -> "HH:MM"  /  set_production_start(...)
+
+Production start time (2026-10-05): each workspace picks the local hour its
+production day begins (worker_control ws_production_start:<id>, "HH:MM" in
+each channel's own timezone; default 00:00). The scheduler's daily ceiling
+counts from that moment, so a channel's next episode can't start before it
+-- the operator's laptop is usually closed at midnight, so theirs is 02:00.
+If the machine is still closed then, the worker starts it at its first tick
+once the machine is awake.
 """
 from __future__ import annotations
 
@@ -69,6 +78,47 @@ def resume(workspace_id: str, db_path=None, now: Optional[datetime] = None) -> N
     set_worker_control(_key("ws_breaker_cleared_at", workspace_id),
                        (now or datetime.now(timezone.utc)).isoformat(), db_path=_p(db_path))
     log.info("workspace_resumed", workspace_id=workspace_id)
+
+
+DEFAULT_PRODUCTION_START = "00:00"
+
+
+def _parse_hhmm(value: str) -> tuple:
+    h, m = (int(x) for x in str(value).strip().split(":", 1))
+    if not (0 <= h < 24 and 0 <= m < 60):
+        raise ValueError(f"not a time of day: {value!r}")
+    return h, m
+
+
+def production_start(workspace_id: Optional[str], db_path=None) -> str:
+    """The workspace's production start time, "HH:MM" local (default 00:00)."""
+    if not workspace_id:
+        return DEFAULT_PRODUCTION_START
+    from hypogeum.db import get_worker_control
+    raw = get_worker_control(_key("ws_production_start", workspace_id), "", db_path=_p(db_path))
+    try:
+        h, m = _parse_hhmm(raw)
+        return f"{h:02d}:{m:02d}"
+    except Exception:  # noqa: BLE001
+        return DEFAULT_PRODUCTION_START
+
+
+def set_production_start(workspace_id: str, value: str, db_path=None) -> str:
+    from hypogeum.db import set_worker_control
+    h, m = _parse_hhmm(value)
+    norm = f"{h:02d}:{m:02d}"
+    set_worker_control(_key("ws_production_start", workspace_id), norm, db_path=_p(db_path))
+    log.info("workspace_production_start_set", workspace_id=workspace_id, start=norm)
+    return norm
+
+
+def production_start_for_channel(channel_id: str, db_path=None) -> tuple:
+    """(hour, minute) the channel's production day begins, from its workspace."""
+    try:
+        from hypogeum.workspaces import workspace_of
+        return _parse_hhmm(production_start(workspace_of(channel_id, _p(db_path)), db_path))
+    except Exception:  # noqa: BLE001
+        return (0, 0)
 
 
 def is_paused(workspace_id: str, db_path=None) -> bool:

@@ -52,6 +52,7 @@ def _workspace_rows(db) -> list[dict]:
             "recipients": [{**r, "types": ar._types(r)} for r in ar.recipients_for(wid, db)],
             "approval_settings": pa.get_settings("workspace", wid, db) or dict(pa.DEFAULTS),
             "approvals": pa.list_for(wid, statuses=("pending",), db_path=db),
+            "production_start": wsc.production_start(wid, db),
         })
     out.sort(key=lambda r: (r["kind"] != "platform_owner", r["name"].lower()))
     return out
@@ -135,6 +136,17 @@ def workspace_resume(workspace_id):
     else:
         clear_breaker(db_path=db, workspace_id=workspace_id)
     return redirect("/workspaces?scope=factory")
+
+
+@bp.route("/workspaces/<workspace_id>/production-start", methods=["POST"])
+def workspace_production_start(workspace_id):
+    from flask import request
+    from hypogeum import workspace_controls as wsc
+    try:
+        wsc.set_production_start(workspace_id, request.form.get("start", ""), db_path=_db())
+    except (ValueError, TypeError) as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    return redirect(f"/workspaces?scope=factory#ws-{workspace_id}-title")
 
 
 @bp.route("/workspaces/<workspace_id>/approvals/settings", methods=["POST"])

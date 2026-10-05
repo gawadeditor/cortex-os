@@ -194,8 +194,19 @@ def _channel_local_day_start_utc(
             tz = ZoneInfo(tz_name)  # type: ignore[assignment]
     except Exception:  # noqa: BLE001
         tz = timezone.utc
+    # The production day begins at the workspace's chosen start time, not
+    # midnight (2026-10-05: the operator's laptop is closed at midnight, so a
+    # run starting then never finished) -- see workspace_controls.
+    try:
+        from hypogeum.workspace_controls import production_start_for_channel  # noqa: PLC0415
+        h, m = production_start_for_channel(channel_id, db_path)
+    except Exception:  # noqa: BLE001
+        h, m = 0, 0
     local = now.astimezone(tz)
-    return local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+    start = local.replace(hour=h, minute=m, second=0, microsecond=0)
+    if local < start:
+        start -= timedelta(days=1)
+    return start.astimezone(timezone.utc)
 
 
 def _scheduled_runs_since(channel_id: str, conn, since_iso: str) -> int:

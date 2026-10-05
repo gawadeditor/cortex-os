@@ -185,6 +185,17 @@
     </div>
 
     <div class="alerts approvals">
+      <h3>{{ icon('clock') }} Production start time</h3>
+      <form method="post" action="/workspaces/{{ w.workspace_id }}/production-start" class="appr-form">
+        <label class="appr-field">New episodes start from
+          <input type="time" name="start" step="1800" value="{{ w.production_start }}" required>
+        </label>
+        <button class="btn btn-sm" type="submit">{{ icon('check') }} Save</button>
+      </form>
+      <p class="note">Each channel’s daily production starts at this time (in the channel’s own time zone) — pick a time this computer is usually on. If it’s off then, production starts as soon as it’s back on.</p>
+    </div>
+
+    <div class="alerts approvals">
       <h3>{{ icon('review') }} Approval before publishing</h3>
       <form method="post" action="/workspaces/{{ w.workspace_id }}/approvals/settings" class="appr-form">
         <label class="type-opt"><input type="checkbox" name="required" {{ 'checked' if w.approval_settings.required }}>

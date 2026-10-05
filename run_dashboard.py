@@ -7767,6 +7767,18 @@ def channel_content_grid_youtube_cover_done(channel_id):
     return redirect(f"/channel/{channel_id}/grid?scope={channel_id}", 303)
 
 
+@app.route("/channel/<channel_id>/grid/platform-live", methods=["POST"])
+def channel_content_grid_platform_live(channel_id):
+    """Operator checked the platform: the post IS live there although Zernio
+    reported it failed (a timeout that published anyway)."""
+    post_id = (request.form.get("post_id") or "").strip()
+    platform = (request.form.get("platform") or "").strip()
+    if post_id and platform:
+        from hypogeum.dashboard_content_grid import mark_platform_live
+        mark_platform_live(post_id, platform, channel_id, db_path=_db_path())
+    return redirect(f"/channel/{channel_id}/grid?scope={channel_id}", 303)
+
+
 @app.route("/channel/<channel_id>/settings")
 def channel_settings_page(channel_id):
     """One place for this channel's brand / models / publishing / production

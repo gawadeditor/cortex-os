@@ -345,3 +345,23 @@ def test_held_post_with_a_genuinely_failed_platform_still_needs_attention(tmp_pa
     conn.close()
     _hold(db_path, "post_fail")
     assert cg.get_content_grid("hypogeum", db_path=db_path)[0]["needs_attention"] is True
+
+
+def test_failed_platform_confirmed_live_by_hand_stops_needing_attention(tmp_path):
+    # 2026-10-05: Zernio marked Pip the Tiny Star "failed" on Facebook after a
+    # timeout, but the reel was live — the card nagged forever.
+    db_path = tmp_path / "test.db"
+    _seed_live_youtube_short(db_path, post_id="post_pip")
+    err = "Publishing timed out during platform API call. The post may have been published externally."
+    conn = get_connection(db_path)
+    conn.execute("UPDATE content_grid_cache SET status='partial', platforms_json=? WHERE post_id='post_pip'",
+                 (json.dumps([{"platform": "youtube", "status": "published"},
+                              {"platform": "facebook", "status": "failed", "error": err}]),))
+    conn.commit()
+    conn.close()
+    item = cg.get_content_grid("hypogeum", db_path=db_path)[0]
+    assert item["needs_attention"] is True
+    assert item["failed_platforms"] == [{"platform": "facebook", "error": err}]
+    cg.mark_platform_live("post_pip", "facebook", "hypogeum", db_path=db_path)
+    item = cg.get_content_grid("hypogeum", db_path=db_path)[0]
+    assert item["needs_attention"] is False and item["failed_platforms"] == []

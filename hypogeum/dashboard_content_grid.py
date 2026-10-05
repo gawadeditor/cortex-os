@@ -129,6 +129,26 @@ def mark_youtube_cover_done(post_id: str, channel_id: str, db_path=None) -> None
     log.info("youtube_cover_marked_done", post_id=post_id, channel_id=channel_id)
 
 
+def _live_confirmations(conn) -> set:
+    return {(r["post_id"], r["platform"]) for r in conn.execute(
+        "SELECT post_id, platform FROM grid_live_confirmations")}
+
+
+def mark_platform_live(post_id: str, platform: str, channel_id: str, db_path=None) -> None:
+    """Record that the operator checked `platform` and the post IS live there,
+    although Zernio reported it failed (see schema.sql: grid_live_confirmations)."""
+    initialize_schema(db_path)
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO grid_live_confirmations (post_id, platform, channel_id, confirmed_at) "
+            "VALUES (?, ?, ?, ?)", (post_id, platform, channel_id, _now_iso()))
+        conn.commit()
+    finally:
+        conn.close()
+    log.info("grid_platform_marked_live", post_id=post_id, platform=platform, channel_id=channel_id)
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -233,6 +253,7 @@ def _fetch_live(provider, post_id: str, *, known_thumbnail_url: Optional[str] = 
             "status": p.get("status"),
             "url": p.get("platformPostUrl"),
             "published_at": p.get("publishedAt"),
+            "error": (p.get("errorMessage") or "")[:300] or None,
         })
     return {
         "title": post.get("title"),
@@ -397,6 +418,7 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
     try:
         yt_confirmed = _confirmed_youtube_covers(conn)
         yt_holds = {r["post_id"]: dict(r) for r in conn.execute("SELECT * FROM youtube_cover_holds")}
+        live_ok = _live_confirmations(conn)
         out = []
         for p in posts:
             row = rows_for_display[p["post_id"]]
@@ -417,11 +439,19 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
             # file as the poster image, since it's the accurate one now.
             has_cover = zernio_has_cover or resolved_manually
             status = row.get("status")
+            # A platform the operator checked by hand and confirmed live
+            # counts as published, whatever Zernio's record says.
+            for pl in platforms:
+                if (p["post_id"], pl.get("platform")) in live_ok:
+                    pl["status"] = "published"
+                    pl["confirmed_by_hand"] = True
             not_yet_live_platforms = [
                 p.get("platform") for p in platforms
                 if p.get("platform") and p.get("status") not in ("published", None)
             ]
             needs_attention = bool(status) and status not in _OK_STATUSES
+            if needs_attention and status != "failed" and not not_yet_live_platforms:
+                needs_attention = False
             # A YouTube cover hold uploads YouTube ~24h before the other
             # platforms, so Zernio may report the post mid-way (e.g. partial)
             # while nothing is wrong -- only flag it if a platform actually failed.
@@ -447,6 +477,10 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
                 "status": status,
                 "needs_attention": needs_attention,
                 "not_yet_live_platforms": not_yet_live_platforms if needs_attention else [],
+                # failed platforms with Zernio's own reason, for the card
+                "failed_platforms": [{"platform": pl.get("platform"), "error": pl.get("error")}
+                                     for pl in platforms if pl.get("status") == "failed"]
+                if needs_attention else [],
                 "scheduled_for": row.get("scheduled_for"),
                 "published_at": row.get("published_at"),
                 "thumbnail_url": row.get("thumbnail_url"),

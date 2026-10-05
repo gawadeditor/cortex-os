@@ -2507,6 +2507,23 @@ CREATE TABLE IF NOT EXISTS youtube_cover_confirmations (
 );
 
 -- ---------------------------------------------------------------------------
+-- grid_live_confirmations (2026-10-05)
+-- Zernio sometimes marks a platform "failed" after a timeout although the
+-- post DID go live ("may have been published externally" -- Pip the Tiny
+-- Star on Facebook, 2026-09-25). Retrying would post it twice, and Zernio's
+-- record never learns the truth, so the operator checks the platform and
+-- presses "It's live" on the Content Grid card; that writes a row here and
+-- the card stops asking for attention for that platform.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS grid_live_confirmations (
+    post_id       TEXT NOT NULL,              -- Zernio post id
+    platform      TEXT NOT NULL,
+    channel_id    TEXT NOT NULL,
+    confirmed_at  TEXT NOT NULL,
+    PRIMARY KEY (post_id, platform)
+);
+
+-- ---------------------------------------------------------------------------
 -- youtube_cover_holds (2026-09-29)
 -- Operator rule: no YouTube Short goes public without its designed cover.
 -- Since that cover can only be set in Studio on an already-uploaded video,

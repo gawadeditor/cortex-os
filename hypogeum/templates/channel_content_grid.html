@@ -141,6 +141,17 @@
           Zernio status is "{{ it.status }}", not published — check it live and re-verify the thumbnail once it settles.
           {% if it.not_yet_live_platforms %}Not yet live on: {{ it.not_yet_live_platforms|join(', ') }}.{% endif %}
         </div>
+        {% for fp in it.failed_platforms %}
+        <div class="cg-manual-note">
+          <strong>{{ fp.platform }}:</strong> {{ fp.error or 'Zernio marked it failed.' }}
+          {% if fp.error and 'published externally' in fp.error %}Check the {{ fp.platform }} page — don't re-publish before checking, or it posts twice.{% endif %}
+        </div>
+        <form method="post" action="/channel/{{ channel_id }}/grid/platform-live" class="cg-done-form">
+          <input type="hidden" name="post_id" value="{{ it.post_id }}">
+          <input type="hidden" name="platform" value="{{ fp.platform }}">
+          <button type="submit" class="btn">{{ icon('check') }} Checked — it's live on {{ fp.platform }}</button>
+        </form>
+        {% endfor %}
         {% endif %}
         {% if it.youtube_hold_status == 'held' and not it.youtube_cover_pending %}
         <div class="cg-manual-note">

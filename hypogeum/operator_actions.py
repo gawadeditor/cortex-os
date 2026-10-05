@@ -204,7 +204,7 @@ def _adapters(arg: str, db_path) -> str:
         f"⚠️ مقدرتش أسجّلهم (لازم الكود يكون متعمله commit): {(r.stderr or '').strip()[-200:]}"
 
 
-ACTIONS = {"resume": _resume, "restart_worker": _restart_worker, "mount_archive": _mount_archive,
+ACTIONS = {"cancel": lambda arg, db_path: "تمام، ما عملتش حاجة.", "resume": _resume, "restart_worker": _restart_worker, "mount_archive": _mount_archive,
            "disk": _disk, "cover_done": _cover_done, "adapters": _adapters}
 
 
@@ -367,17 +367,150 @@ def _outlook_lines(dbp) -> list:
     return out
 
 
-_HELP = ("أوامر البوت:\n/status — حالة المصنع وزراير لأي حاجة محتاجة تدخّل\n/help — الأوامر دي\n\n"
+# ---------------------------------------------------------------------------
+# the menu: a persistent button keyboard under the chat (no typing commands)
+# ---------------------------------------------------------------------------
+
+M_STATUS, M_UPCOMING, M_COVERS = "📋 حالة المصنع", "📅 النشر الجاي", "🎬 أغلفة مستنية"
+M_SPEND, M_PAUSE, M_RESUME, M_HELP = "💰 المصاريف", "⏸ وقّف الإنتاج", "▶️ شغّل الإنتاج", "❓ مساعدة"
+
+MENU = {"keyboard": [[{"text": M_STATUS}, {"text": M_UPCOMING}],
+                     [{"text": M_COVERS}, {"text": M_SPEND}],
+                     [{"text": M_PAUSE}, {"text": M_RESUME}],
+                     [{"text": M_HELP}]],
+        "resize_keyboard": True, "is_persistent": True}
+
+_HELP = ("الزراير اللي تحت:\n"
+         f"{M_STATUS} — الـ worker والإنتاج وآخر حلقة واللي جاهز قدام لكل قناة\n"
+         f"{M_UPCOMING} — اللي هينزل الأسبوع ده\n"
+         f"{M_COVERS} — أغلفة يوتيوب اللي مستنياك، بلينك Studio وزرار «رفعت الغلاف»\n"
+         f"{M_SPEND} — صرف الشهر لكل Workspace قدام السقف، ورصيد OpenRouter\n"
+         f"{M_PAUSE} / {M_RESUME} — إيقاف أو تشغيل إنتاج الحلقات الجديدة (النشر بيفضل شغال)\n\n"
          "وكل تنبيه بييجي معاه زراير تحل المشكلة من هنا.")
 
 
+def _upcoming_text(db_path) -> tuple:
+    from datetime import datetime, timedelta, timezone
+    from hypogeum.db import get_connection
+    now = datetime.now(timezone.utc)
+    conn = get_connection(_p(db_path))
+    try:
+        slots = [dict(r) for r in conn.execute("SELECT channel_id, slot_utc, episode_id FROM channel_publish_slots")]
+        titles = {r["episode_id"]: r["title"] for r in conn.execute(
+            "SELECT episode_id, title FROM content_grid_cache WHERE title IS NOT NULL")}
+        try:
+            confirmed = {r[0] for r in conn.execute("SELECT post_id FROM youtube_cover_confirmations")}
+            holds = {r["episode_id"]: r["post_id"] for r in conn.execute("SELECT episode_id, post_id FROM youtube_cover_holds")}
+        except Exception:  # noqa: BLE001
+            confirmed, holds = set(), {}
+    finally:
+        conn.close()
+
+    def _dt(v):
+        try:
+            return datetime.fromisoformat(v.replace("Z", "+00:00"))
+        except Exception:  # noqa: BLE001
+            return None
+    week = [x for x in slots if _dt(x["slot_utc"]) and now <= _dt(x["slot_utc"]) <= now + timedelta(days=7)]
+    week.sort(key=lambda x: x["slot_utc"])
+    if not week:
+        return "📅 مفيش نشر متجدول الأسبوع ده.", None
+    lines = ["📅 النشر الجاي (7 أيام):"]
+    for x in week:
+        cover = ""
+        if x["episode_id"] in holds:
+            cover = " — 🎬 الغلاف " + ("اترفع ✅" if holds[x["episode_id"]] in confirmed else "لسه")
+        title = (titles.get(x["episode_id"]) or x["episode_id"])[:70]
+        lines.append(f"• {_local(x['slot_utc'])} — {x['channel_id']}\n   {title}{cover}")
+    return "\n".join(lines), None
+
+
+def _covers_text(db_path) -> tuple:
+    from hypogeum.db import get_connection
+    conn = get_connection(_p(db_path))
+    try:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT h.post_id, h.channel_id, h.release_at, h.upload_at, h.status, c.title FROM youtube_cover_holds h "
+            "LEFT JOIN content_grid_cache c ON c.post_id = h.post_id "
+            "WHERE h.status IN ('held','late','release_failed') "
+            "AND h.post_id NOT IN (SELECT post_id FROM youtube_cover_confirmations) ORDER BY h.release_at")]
+    except Exception:  # noqa: BLE001
+        rows = []
+    finally:
+        conn.close()
+    if not rows:
+        return "🎬 مفيش أغلفة مستنياك.", None
+    lines, kb = ["🎬 أغلفة يوتيوب المستنية:"], []
+    for i, r in enumerate(rows, 1):
+        lines.append(f"{i}. {r['channel_id']} — {(r.get('title') or r['post_id'])[:60]}\n"
+                     f"   تترفع private {_local(r['upload_at'])}، وتنزل {_local(r['release_at'])}")
+        row = [_btn(f"✅ {i} رفعت الغلاف", "cover_done", r["post_id"])]
+        studio = _studio_url(r["post_id"], db_path)
+        if studio:
+            row.insert(0, _url(f"🎬 {i} Studio", studio))
+        kb.append(row)
+    return "\n".join(lines), {"inline_keyboard": kb}
+
+
+def _spend_text(db_path) -> tuple:
+    import json
+    import urllib.request
+    from hypogeum import workspace_controls as wsc
+    from hypogeum.workspaces import list_workspaces
+    lines = ["💰 المصاريف (الشهر ده):"]
+    for w in list_workspaces(_p(db_path)):
+        st = wsc.budget_status(w["workspace_id"], _p(db_path))
+        cap = f"من ${st['ceiling_usd']:.0f}" if st["ceiling_usd"] else "من غير سقف"
+        lines.append(f"• {w['name']}: ${st['month_spend_usd']:.2f} {cap}" + (" ⚠️ عدّى السقف" if st["over"] else ""))
+    try:
+        from hypogeum.config import Config
+        key = Config().OPENROUTER_API_KEY
+        if key:
+            req = urllib.request.Request("https://openrouter.ai/api/v1/credits", headers={"Authorization": f"Bearer {key}"})
+            d = json.load(urllib.request.urlopen(req, timeout=15)).get("data") or {}
+            lines.append(f"• رصيد OpenRouter: ${float(d.get('total_credits') or 0) - float(d.get('total_usage') or 0):.2f}")
+    except Exception:  # noqa: BLE001
+        lines.append("• رصيد OpenRouter: مقدرتش أجيبه دلوقتي")
+    return "\n".join(lines), {"inline_keyboard": [[_url("💳 اشحن OpenRouter", "https://openrouter.ai/settings/credits")]]}
+
+
+def _pause(arg: str, db_path) -> str:
+    from hypogeum.db import set_worker_control
+    set_worker_control("queue_paused", "1", db_path=_p(db_path))
+    set_worker_control("queue_paused_reason", "وقّفته من تليجرام", db_path=_p(db_path))
+    return "⏸ وقّفت إنتاج الحلقات الجديدة. النشر شغال عادي. دوس «▶️ شغّل الإنتاج» لما تحب ترجّعه."
+
+
+ACTIONS["pause"] = _pause
+
+
 def handle_command(chat_id: str, text: str, *, db_path=None) -> Optional[tuple]:
-    """(reply, reply_markup) for an operator command, or None if not one."""
-    cmd = (text or "").strip().split()[0].lower() if (text or "").strip() else ""
-    if cmd not in ("/status", "/help"):
+    """(reply, reply_markup) for a menu button / command, or None if the text
+    isn't one. Operator chats only."""
+    t = (text or "").strip()
+    low = t.lower()
+    known = {"/status", "/help", "/start", "/menu", M_STATUS, M_UPCOMING, M_COVERS, M_SPEND, M_PAUSE, M_RESUME, M_HELP}
+    if t not in known and low.split(" ")[0] not in known:
         return None
+    if low.startswith("/start") and len(t.split()) > 1:
+        return None                     # /start <code>: a workspace link, handled elsewhere
     if str(chat_id) not in _operator_chats(db_path):
+        if low.startswith("/start"):
+            return None
         return ("This chat only receives its workspace's alerts and approvals.", None)
-    if cmd == "/help":
-        return (_HELP, None)
-    return status_text(db_path)
+    if t in (M_HELP, "/help", "/start", "/menu"):
+        return (_HELP, MENU)
+    if t in (M_STATUS, "/status"):
+        return status_text(db_path)
+    if t == M_UPCOMING:
+        return _upcoming_text(db_path)
+    if t == M_COVERS:
+        return _covers_text(db_path)
+    if t == M_SPEND:
+        return _spend_text(db_path)
+    if t == M_PAUSE:
+        return ("متأكد؟ ده هيوقف إنتاج الحلقات الجديدة لكل القنوات (النشر بيفضل شغال).",
+                {"inline_keyboard": [[_btn("⏸ أيوه وقّف", "pause"), _btn("إلغاء", "cancel")]]})
+    if t == M_RESUME:
+        return (_resume("", db_path), None)
+    return None

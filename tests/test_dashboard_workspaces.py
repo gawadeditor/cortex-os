@@ -43,3 +43,29 @@ def test_page_and_approval_flow(client):
     assert d == {"ok": True, "status": "approved"}
     assert pa.gate("acme_ch", "ep1", {"title": "Ep 1"}, db_path=db) == "proceed"
     assert c.get(f"/approvals/{aid}/cover").status_code == 404      # no cover file on this one
+
+
+def test_change_bot_never_saves_an_unverified_token(client):
+    from pathlib import Path
+    c, db = client
+    env = Path(__file__).resolve().parent.parent / ".env"
+    before = env.read_bytes() if env.exists() else None
+    r = c.post("/workspaces/bot", data={"token": "not-a-token"})
+    assert r.status_code == 302 and "look%20like" in r.headers["Location"]
+    # well-formed but Telegram can't confirm it (tests can't reach Telegram)
+    r = c.post("/workspaces/bot", data={"token": "123456789:" + "A" * 35})
+    assert "rejected" in r.headers["Location"]
+    assert (env.read_bytes() if env.exists() else None) == before
+
+
+def test_connected_workspace_shows_add_another_chat(client):
+    from hypogeum import alert_recipients as ar
+    c, db = client
+    page = c.get("/workspaces").data.decode()
+    assert "Connect Telegram" in page and "Add another chat" not in page
+    conn = ar._conn(db)
+    conn.execute("INSERT INTO alert_recipients (recipient_id, workspace_id, channel, address, status, created_at, "
+                 "updated_at) VALUES ('r1','acme','telegram','111','active','x','x')")
+    conn.commit()
+    conn.close()
+    assert "Add another chat" in c.get("/workspaces").data.decode()

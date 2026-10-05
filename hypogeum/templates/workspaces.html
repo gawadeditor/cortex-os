@@ -136,10 +136,36 @@
       </div>
 
       <div class="actions">
+        {% if w.recipients %}
+        <button class="btn btn-sm" type="button" data-connect="{{ w.workspace_id }}" {{ 'disabled' if not bot }}>
+          {{ icon('plus') }} Add another chat
+        </button>
+        {% else %}
         <button class="btn btn-primary btn-sm" type="button" data-connect="{{ w.workspace_id }}" {{ 'disabled' if not bot }}>
           {{ icon('link') }} Connect Telegram
         </button>
+        {% endif %}
+        {% if w.kind == 'platform_owner' %}
+        <button class="btn btn-sm" type="button" id="change-bot-toggle" aria-expanded="false" aria-controls="change-bot">
+          {{ icon('robot') }} Change bot
+        </button>
+        {% endif %}
       </div>
+      {% if w.kind == 'platform_owner' %}
+      <form class="connect-panel" id="change-bot" hidden method="post" action="/workspaces/bot" autocomplete="off">
+        <strong>Switch to a different Telegram bot</strong>
+        <ol>
+          <li>In Telegram open <strong>@BotFather</strong> → <code>/newbot</code> (or <code>/token</code> for an existing bot) and copy the token.</li>
+          <li>Paste it below and press Verify &amp; switch. Cortex checks it with Telegram before saving anything.</li>
+          <li>Open the new bot and press <strong>Start</strong> so it can message you. Client chats need a new link too.</li>
+        </ol>
+        <div class="link-box">
+          <input type="password" name="token" required minlength="30" placeholder="123456789:AA…" aria-label="New bot token" autocomplete="off" spellcheck="false">
+          <button class="btn btn-primary btn-sm" type="submit">{{ icon('check') }} Verify &amp; switch</button>
+        </div>
+        {% if bot_switch_msg %}<div class="status-line {{ 'is-good' if bot_switch_ok }}" role="status">{{ bot_switch_msg }}</div>{% endif %}
+      </form>
+      {% endif %}
 
       <div class="connect-panel" id="panel-{{ w.workspace_id }}" hidden>
         <strong>Connect a Telegram chat to {{ w.name }}</strong>
@@ -221,6 +247,15 @@
       }).catch(function () { btn.disabled = false; setStatus(ws, 'Network error — try again.'); });
     });
   });
+  var cbt = document.getElementById('change-bot-toggle');
+  if (cbt) {
+    var cbf = document.getElementById('change-bot');
+    if (cbf.querySelector('.status-line')) { cbf.hidden = false; cbt.setAttribute('aria-expanded', 'true'); }
+    cbt.addEventListener('click', function () {
+      cbf.hidden = !cbf.hidden; cbt.setAttribute('aria-expanded', String(!cbf.hidden));
+      if (!cbf.hidden) { cbf.querySelector('input').focus(); }
+    });
+  }
   function alertBox(ws, msg) { document.getElementById('panel-' + ws).hidden = false; setStatus(ws, msg); }
   document.querySelectorAll('[data-copy]').forEach(function (btn) {
     btn.addEventListener('click', function () {

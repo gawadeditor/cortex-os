@@ -1196,9 +1196,16 @@ def process_next(
                             if scheduled_run is not None and scheduled_run.get("scheduled_for")
                             else _now_utc()  # defensive fallback only — should not happen
                         )
-                        slot = compute_next_publish_slot(
-                            profile.publishing_schedule, profile.timezone, anchor_dt,
-                        )
+                        # The SAME policy the release-time schedule compiler books
+                        # against (deliverable_schedule_policy, e.g. weekly_slots),
+                        # not the legacy single publishing_schedule: 2026-10-04 the
+                        # target came from "thursday 18:00" while the compiler used
+                        # Mon/Wed/Sat slots >= that target, so a Wednesday slot was
+                        # skipped and the episode went out Saturday.
+                        _dsp = getattr(profile, "deliverable_schedule_policy", None) or {}
+                        _policy = (_dsp.get("main_episode") or next(iter(_dsp.values()), None)
+                                   if isinstance(_dsp, dict) and _dsp else None) or profile.publishing_schedule
+                        slot = compute_next_publish_slot(_policy, profile.timezone, anchor_dt)
                         if slot is not None:
                             set_topic_target_publish_at(topic_id, _iso(slot), db_path=db_path)
                 except Exception as exc:

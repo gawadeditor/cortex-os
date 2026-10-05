@@ -1341,6 +1341,30 @@ class TestConsumer:
         assert result.status == "completed"
         assert get_topic(topic_id, db_path=db_path)["target_publish_at"] is not None
 
+    def test_scheduled_claim_target_uses_the_deliverable_schedule_policy(self, db_path):
+        """2026-10-04: the target came from the legacy publishing_schedule
+        (Thursday) while the release compiler booked against weekly_slots
+        (Mon/Wed/Sat) at-or-after that target — Wednesday got skipped. The
+        claim-time target must come from the same policy the compiler uses."""
+        from datetime import datetime
+        channel_id = "ch_sched_slots"
+        set_channel_state(channel_id, "active", db_path=db_path)
+        _make_operations_profile(db_path, channel_id, deliverable_schedule_policy={"main_episode": {
+            "weekly_slots": [{"day_of_week": "monday", "time_of_day": "10:00"},
+                             {"day_of_week": "wednesday", "time_of_day": "18:00"}],
+            "timezone": "UTC"}})
+        topic_id = enqueue_topic(channel_id, "A scheduled topic", db_path=db_path)
+        past = _now() - timedelta(minutes=1)
+        create_schedule(db_path=db_path, scope="channel", channel_id=channel_id,
+                        cadence="daily", next_run_at=past)
+        tick(db_path=db_path, now=_now())
+        consume_scheduled_runs(db_path=db_path)
+        with patch("hypogeum.pipeline.run_pipeline", self._mock_pipeline()):
+            process_next(worker_id=_worker(), db_path=db_path, dry_run=False,
+                         config=MagicMock(FINANCE_BUDGET_CEILING_USD=10.0))
+        target = datetime.fromisoformat(get_topic(topic_id, db_path=db_path)["target_publish_at"])
+        assert (target.strftime("%A"), target.strftime("%H:%M")) in {("Monday", "10:00"), ("Wednesday", "18:00")}
+
     def test_manual_invocation_does_not_derive_target(self, db_path):
         """A plain, non-scheduler-linked run_queue item (no scheduled_run_id)
         must not get a target_publish_at derived/written at claim time."""

@@ -13,6 +13,7 @@ registered by run_dashboard.py.
     POST /workspaces/<id>/approvals/settings          approval-before-publish settings
     POST /approvals/<aid>/decide  {decision}          -> {ok, status}
     GET  /approvals/<aid>/cover                       the episode's cover image
+    POST /workspaces/bot  {token}                     switch the platform bot (verified first)
 
 Operator-only today (the dashboard has no login yet — Phase 6); the page is
 how the operator connects each client's Telegram in the managed-service
@@ -68,8 +69,11 @@ def workspaces_page():
         bot = ar.bot_username()
     except Exception:  # noqa: BLE001 — Telegram unreachable: page still renders
         bot = None
+    from flask import request
+    msg = request.args.get("bot_msg")
     return render_template("workspaces.html", workspaces=_workspace_rows(db), bot=bot,
-                           alert_types=ar.ALERT_TYPES, scope="factory")
+                           alert_types=ar.ALERT_TYPES, scope="factory",
+                           bot_switch_msg=msg, bot_switch_ok=request.args.get("bot_ok") == "1")
 
 
 @bp.route("/workspaces/<workspace_id>/alerts/link", methods=["POST"])
@@ -167,3 +171,53 @@ def approval_cover(approval_id):
     if not path or not path.is_file():
         abort(404)
     return send_file(path)
+
+
+@bp.route("/workspaces/bot", methods=["POST"])
+def workspace_change_bot():
+    """Switch the platform's Telegram bot: verify the new token with
+    Telegram (getMe) BEFORE saving anything, write it to .env (the same place
+    scripts/connect_telegram.py writes), then restart the dashboard so the
+    alert sender and the bot loop use it. The operator's chat id is kept —
+    they press Start on the new bot so it may message them."""
+    import json
+    import os
+    import re
+    import subprocess
+    import threading
+    import urllib.parse
+    import urllib.request
+    from flask import request
+    token = (request.form.get("token") or "").strip()
+    back = "/workspaces?scope=factory&bot_msg="
+    if not re.fullmatch(r"\d{5,}:[A-Za-z0-9_-]{30,}", token):
+        return redirect(back + urllib.parse.quote("That doesn't look like a bot token (123456789:AA…)."))
+    try:
+        me = json.load(urllib.request.urlopen(f"https://api.telegram.org/bot{token}/getMe", timeout=15))["result"]
+    except Exception:  # noqa: BLE001
+        return redirect(back + urllib.parse.quote("Telegram rejected this token — nothing was changed."))
+    env = Path(__file__).resolve().parent.parent / ".env"
+    lines = env.read_text().splitlines() if env.exists() else []
+    out, seen = [], False
+    for line in lines:
+        if line.split("=", 1)[0].strip() == "TELEGRAM_BOT_TOKEN":
+            out.append(f"TELEGRAM_BOT_TOKEN={token}")
+            seen = True
+        else:
+            out.append(line)
+    if not seen:
+        out.append(f"TELEGRAM_BOT_TOKEN={token}")
+    env.write_text("\n".join(out) + "\n")
+    os.chmod(env, 0o600)
+    from hypogeum.db import set_worker_control
+    set_worker_control("telegram_update_offset", "0", db_path=_db())   # new bot, new update sequence
+
+    def _restart():
+        import time
+        time.sleep(2)
+        subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/com.hypogeum.dashboard"],
+                       capture_output=True)
+    threading.Thread(target=_restart, daemon=True).start()
+    msg = (f"Switched to @{me['username']}. Open https://t.me/{me['username']} and press Start "
+           "so it can message you (the dashboard restarts in a few seconds).")
+    return redirect(back + urllib.parse.quote(msg) + "&bot_ok=1")

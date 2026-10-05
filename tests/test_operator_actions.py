@@ -79,7 +79,8 @@ def test_status_and_help_commands(db):
     set_worker_control("queue_paused_reason", "3 runs failed", db_path=db)
     text, markup = oa.handle_command("999", "/status", db_path=db)
     assert "الإنتاج: ⛔️ واقف" in text and "act:resume:" in _cb(markup)
-    assert oa.handle_command("999", "/help", db_path=db)[0].startswith("أوامر")
+    help_text, kb = oa.handle_command("999", "/help", db_path=db)
+    assert help_text.startswith("الزراير") and kb == oa.MENU
     assert "only receives" in oa.handle_command("111", "/status", db_path=db)[0]
     assert oa.handle_command("999", "hello", db_path=db) is None
 
@@ -90,3 +91,19 @@ def test_resolved_message_not_sent_when_alert_never_arrived(db):
     alerts.alert("worker:down", "الـ worker مش شغال", "b", db_path=db, send=lambda t: False)   # network down
     alerts.resolve("worker:down", db_path=db, send=lambda t: sent.append(t) or True)
     assert sent == []
+
+
+def test_menu_buttons(db, monkeypatch):
+    assert oa.handle_command("999", "/start", db_path=db)[1] == oa.MENU          # operator gets the keyboard
+    assert oa.handle_command("999", "/start abc123", db_path=db) is None          # a connect link: not a menu
+    assert oa.handle_command("111", "/start", db_path=db) is None                 # client: link flow only
+    text, kb = oa.handle_command("999", oa.M_PAUSE, db_path=db)
+    assert "متأكد" in text and "act:pause:" in _cb(kb)                            # pause asks first
+    assert get_worker_control("queue_paused", "0", db_path=db) == "0"
+    oa.handle("999", "act:pause:", db_path=db)
+    assert get_worker_control("queue_paused", "0", db_path=db) == "1"
+    assert oa.handle_command("999", oa.M_RESUME, db_path=db)[0].startswith("▶️")
+    assert get_worker_control("queue_paused", "0", db_path=db) == "0"
+    assert "مفيش" in oa.handle_command("999", oa.M_COVERS, db_path=db)[0]
+    assert oa.handle_command("999", oa.M_UPCOMING, db_path=db)[0].startswith("📅")
+    assert oa.handle_command("999", "hello", db_path=db) is None

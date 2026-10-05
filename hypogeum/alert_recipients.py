@@ -420,14 +420,15 @@ def poll_once(db_path=None, *, http=None, timeout: int = 0) -> int:
         try:
             if upd.get("callback_query"):
                 _handle_button(upd["callback_query"], token=token, http=http, db_path=db_path)
-            elif (msg.get("text") or "").strip().lower().startswith(("/status", "/help")):
+            else:
                 from hypogeum.operator_actions import handle_command
-                res = handle_command(str((msg.get("chat") or {}).get("id", "")), msg.get("text"), db_path=db_path)
+                res = handle_command(str((msg.get("chat") or {}).get("id", "")), msg.get("text"), db_path=db_path) \
+                    if (msg.get("chat") or {}).get("type") == "private" else None
                 if res:
                     send_to_chat(str(msg["chat"]["id"]), res[0], http=http, reply_markup=res[1])
-            else:
-                handle_message(msg.get("chat") or {}, msg.get("text") or "", db_path=db_path,
-                               reply=lambda cid, t: send_to_chat(cid, t, http=http))
+                else:
+                    handle_message(msg.get("chat") or {}, msg.get("text") or "", db_path=db_path,
+                                   reply=lambda cid, t: send_to_chat(cid, t, http=http))
             handled += 1
         except Exception as exc:  # noqa: BLE001
             log.warn("telegram_update_failed", error=str(exc)[:200])
@@ -472,8 +473,8 @@ def start_bot_loop(db_path=None) -> Optional[threading.Thread]:
     stop = threading.Event()
     try:   # the bot's command menu in Telegram
         _api("setMyCommands", token=getattr(_config(), "TELEGRAM_BOT_TOKEN", None), commands=[
-            {"command": "status", "description": "حالة المصنع + زراير لأي حاجة محتاجة تدخّل"},
-            {"command": "help", "description": "الأوامر"}])
+            {"command": "menu", "description": "قايمة الزراير"},
+            {"command": "status", "description": "حالة المصنع"}])
     except Exception as exc:  # noqa: BLE001
         log.warn("telegram_set_commands_failed", error=str(exc)[:200])
 

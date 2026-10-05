@@ -197,16 +197,26 @@ def _channel_local_day_start_utc(
     # The production day begins at the workspace's chosen start time, not
     # midnight (2026-10-05: the operator's laptop is closed at midnight, so a
     # run starting then never finished) -- see workspace_controls.
+    # A chosen start time is on THIS computer's clock (it's the machine that
+    # has to be awake), not the channel's publishing timezone -- twinkle's is
+    # UTC, so "02:00" there would have been 06:00 for the operator.
     try:
         from hypogeum.workspace_controls import production_start_for_channel  # noqa: PLC0415
         h, m = production_start_for_channel(channel_id, db_path)
     except Exception:  # noqa: BLE001
         h, m = 0, 0
+    if (h, m) != (0, 0):
+        tz = _machine_tz()
     local = now.astimezone(tz)
     start = local.replace(hour=h, minute=m, second=0, microsecond=0)
     if local < start:
         start -= timedelta(days=1)
     return start.astimezone(timezone.utc)
+
+
+def _machine_tz():
+    """This computer's local timezone (patched in tests)."""
+    return datetime.now().astimezone().tzinfo
 
 
 def _scheduled_runs_since(channel_id: str, conn, since_iso: str) -> int:

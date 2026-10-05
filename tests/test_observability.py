@@ -269,8 +269,35 @@ class TestDiskUsage:
     def test_absurd_threshold_forces_unhealthy(self, tmp_path):
         class FakeConfig:
             DISK_FREE_WARNING_PCT = 100.1  # impossible to satisfy
+            DISK_MIN_FREE_GB = 1e9
         result = check_disk_usage(path=tmp_path, config=FakeConfig())
         assert not result.healthy
+
+    def test_low_percent_but_plenty_of_gb_is_healthy(self, tmp_path):
+        class FakeConfig:
+            DISK_FREE_WARNING_PCT = 100.1
+            DISK_MIN_FREE_GB = 0.0
+        assert check_disk_usage(path=tmp_path, config=FakeConfig()).healthy
+
+
+class TestOneOpenSignalPerCondition:
+    def test_repeat_failures_keep_one_signal_and_recovery_closes_it(self, tmp_path):
+        from hypogeum.db import get_connection, initialize_schema
+        from hypogeum.observability import CheckResult, _emit_if_unhealthy
+        db = tmp_path / "t.db"
+        initialize_schema(db)
+        for free in ("50GB", "49GB", "48GB"):
+            _emit_if_unhealthy(CheckResult("disk_usage", False, f"{free} free"), "disk_low", "WARNING", None, db)
+        conn = get_connection(db)
+        rows = conn.execute("SELECT full_record FROM signal_records WHERE signal_type='disk_low' "
+                            "AND lifecycle_status='open'").fetchall()
+        assert len(rows) == 1 and "48GB" in rows[0][0]
+        conn.close()
+        _emit_if_unhealthy(CheckResult("disk_usage", True, "ok"), "disk_low", "WARNING", None, db)
+        conn = get_connection(db)
+        assert conn.execute("SELECT COUNT(*) FROM signal_records WHERE signal_type='disk_low' "
+                            "AND lifecycle_status='open'").fetchone()[0] == 0
+        conn.close()
 
 
 # ---------------------------------------------------------------------------

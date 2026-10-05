@@ -363,9 +363,11 @@ class TestProduction:
 
 class TestWeeklyTargets:
 
+    # 2026-10-05: the hand-typed per-platform target table was replaced by
+    # the real per-channel schedule + production outlook (factory_outlook).
     def test_weekly_targets_visible(self, client, db):
         html = _html(client, db)
-        assert "YouTube Videos" in html or "Weekly Publishing Targets" in html
+        assert "Publishing &amp; production" in html
 
     def test_targets_section_has_labels(self, client, db):
         html = _html(client, db)
@@ -373,7 +375,7 @@ class TestWeeklyTargets:
 
     def test_edit_targets_link_present(self, client, db):
         html = _html(client, db)
-        assert "/channel-profile" in html
+        assert "/workspaces?scope=factory" in html or "No active channel schedules" in html
 
 
 # ===========================================================================

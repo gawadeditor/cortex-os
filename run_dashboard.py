@@ -3224,8 +3224,18 @@ def legacy_dashboard():
     except Exception:  # noqa: BLE001
         rollup = None
 
+    try:
+        from hypogeum.factory_outlook import channel_outlook, open_operator_alerts
+        outlook = channel_outlook(_db_path())
+        operator_alerts_open = open_operator_alerts(_db_path())
+    except Exception:  # noqa: BLE001
+        outlook, operator_alerts_open = [], []
+
     return render_template(
         "exec_dashboard.html",
+        outlook=outlook,
+        operator_alerts_open=operator_alerts_open,
+        operator_action_msg=request.args.get("action_msg", ""),
         state=state,
         report=report,
         error=err,
@@ -3236,6 +3246,29 @@ def legacy_dashboard():
         attention_summary=attention_summary,
         rollup=rollup,
     )
+
+
+@app.route("/operator-action/<name>", methods=["POST"])
+def operator_action(name):
+    """The fix button on a "Needs you now" alert — the same actions Telegram's
+    alert buttons run. Slow ones (mounting the NAS, re-registering adapters)
+    run in the background; the alert clears on its next check."""
+    import threading
+    from hypogeum import operator_actions as oa
+    from hypogeum.logger import get_logger
+    fn = oa.ACTIONS.get(name)
+    if fn is None or name in ("cancel", "pause"):
+        return redirect("/dashboard?action_msg=Unknown+action", 303)
+    arg = (request.form.get("arg") or "").strip()
+    db = _db_path()
+
+    def _run():
+        try:
+            fn(arg, db)
+        except Exception as exc:  # noqa: BLE001
+            get_logger(agent="dashboard").warn("operator_action_failed", action=name, error=str(exc)[:200])
+    threading.Thread(target=_run, daemon=True, name=f"operator-action-{name}").start()
+    return redirect("/dashboard?action_msg=Started+%E2%80%94+the+alert+clears+on+its+own+once+it%27s+fixed", 303)
 
 
 @app.route("/attention")

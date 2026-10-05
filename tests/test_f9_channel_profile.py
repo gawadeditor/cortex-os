@@ -335,8 +335,10 @@ class TestDashboardShowsTargets:
         assert "exec-charts" in html or "chart" in html.lower()
 
     def test_channel_profile_link_in_dashboard(self, client, db):
+        # 2026-10-05: home shows the real schedule instead of these targets;
+        # /channel-profile stays reachable from its own page.
         html = self._html(client, db_path=db)
-        assert "/channel-profile" in html
+        assert "Publishing &amp; production" in html
 
     def test_channel_name_from_profile_in_dashboard(self, client, db):
         update_channel_profile({"channel_name": "Rocket Finance"}, db_path=db)

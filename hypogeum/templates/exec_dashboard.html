@@ -709,38 +709,65 @@
       {% endif %}
     </div>
 
-    {# ── Weekly targets ── #}
+    {# ── Publishing schedule + production outlook (real schedule, 2026-10-05) ── #}
     <div>
-      <div class="chart-title">Weekly Publishing Targets</div>
-      {% set targets = [
-        ("YouTube Videos",  cp.yt_videos_per_week  if cp else 2),
-        ("YouTube Shorts",  cp.yt_shorts_per_week  if cp else 3),
-        ("TikTok Posts",    cp.tiktok_per_week     if cp else 5),
-        ("Instagram Reels", cp.instagram_per_week  if cp else 3),
-        ("Facebook Posts",  cp.facebook_per_week   if cp else 2),
-      ] %}
-      {% set max_target = (targets | map(attribute=1) | max) or 1 %}
+      <div class="chart-title">Publishing &amp; production</div>
+      {% if outlook %}
       <div class="targets-list">
-        {% for label, target in targets %}
-        <div class="target-row">
-          <span class="target-label">{{ label }}</span>
-          <div class="target-bar">
-            <div class="progress-bar" style="height:6px">
-              <div class="progress-fill progress-fill-green"
-                   style="width:{{ (target / max_target * 100) | int }}%"></div>
-            </div>
+        {% for o in outlook %}
+        <div class="target-row" style="display:block; margin-bottom:10px;">
+          <div class="target-label" style="font-weight:600;">{{ o.channel_id }}</div>
+          <div style="font-size:12px; color:var(--muted);">
+            {% if o.schedule %}{{ o.schedule.per_week }}/week · {{ o.schedule.slots | join(', ') }} {{ o.schedule.timezone }}{% else %}No weekly schedule set{% endif %}
           </div>
-          <span class="target-num">{{ target }}/wk</span>
+          <div style="font-size:12px;">
+            {{ o.ready }} ready ahead (target {{ o.target }}) —
+            {% if o.state == 'enough' %}no production needed now
+            {% elif o.state == 'next_day' %}next production {{ o.next_production_at[:16] | replace('T', ' ') }} UTC
+            {% else %}producing at the next check{% endif %}
+          </div>
         </div>
         {% endfor %}
       </div>
       <div style="font-size:11px; color:var(--muted); margin-top:8px">
-        <a href="/channel-profile">Edit targets →</a>
+        <a href="/workspaces?scope=factory">Production start time →</a>
       </div>
+      {% else %}
+      <div style="font-size:12px; color:var(--muted);">No active channel schedules.</div>
+      {% endif %}
     </div>
 
   </div>
 </div>
+
+{# ═════════════════════════════════════════════════════════════════
+   6b. NEEDS YOU NOW — the same open alerts sent to Telegram, with the fix
+══════════════════════════════════════════════════════════════════ #}
+{% if operator_action_msg %}
+<div class="card exec-section"><div class="alert-sub">{{ operator_action_msg }}</div></div>
+{% endif %}
+{% if operator_alerts_open %}
+<div class="card exec-section">
+  <div class="card-title">Needs you now</div>
+  {% for a in operator_alerts_open %}
+  <div class="alert-row">
+    <div class="alert-dot alert-dot-critical"></div>
+    <div style="flex:1">
+      <div class="alert-label">{{ a.label }}</div>
+      {% if a.detail %}<div class="alert-sub">{{ a.detail }}</div>{% endif %}
+    </div>
+    {% if a.action %}
+    <form method="post" action="/operator-action/{{ a.action[0] }}">
+      <input type="hidden" name="arg" value="{{ a.action[1] }}">
+      <button type="submit" class="btn btn-resolve">{{ a.action[2] }}</button>
+    </form>
+    {% elif a.link %}
+    <a href="{{ a.link[0] }}" target="_blank" rel="noopener" class="btn btn-resolve">{{ a.link[1] }}</a>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
 
 {# ═════════════════════════════════════════════════════════════════
    7. SYSTEM ALERTS

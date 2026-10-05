@@ -51,7 +51,7 @@ from typing import Optional
 
 from hypogeum.config import Config
 from hypogeum.db import get_connection
-from hypogeum.ois import emit_signal
+from hypogeum.ois import auto_resolve_signal, emit_signal
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_DB_PATH = _PROJECT_ROOT / ".hypogeum-assets" / "hypogeum.db"
@@ -109,7 +109,20 @@ def _emit_if_unhealthy(
     config,
     db_path: Optional[Path],
 ) -> CheckResult:
+    # One open signal per condition, closed when the condition clears
+    # (2026-10-05: each check run added a fresh copy and nothing ever closed
+    # them -- the dashboard home listed ~100 identical "Disk Low" /
+    # "Provider Outage" rows, including outages fixed a day earlier).
+    open_ids = _open_signal_ids(signal_type, db_path)
     if result.healthy:
+        for sid in open_ids:
+            auto_resolve_signal(sid, f"{signal_type}_cleared", db_path=db_path)
+        return result
+    if open_ids:
+        _refresh_signal_message(open_ids[0], result.detail, db_path)
+        for sid in open_ids[1:]:
+            auto_resolve_signal(sid, "duplicate", db_path=db_path)
+        result.signal_id = open_ids[0]
         return result
     signal_id = emit_signal(
         signal_type=signal_type,
@@ -120,9 +133,45 @@ def _emit_if_unhealthy(
         blocking=False,
         db_path=db_path,
         config=config,
+        dedup_any_open=True,
     )
     result.signal_id = signal_id
     return result
+
+
+def _open_signal_ids(signal_type: str, db_path: Optional[Path]) -> list:
+    """Open signals of this type raised by these health checks, newest first."""
+    try:
+        conn = get_connection(_resolve_db_path(db_path))
+        try:
+            return [r[0] for r in conn.execute(
+                "SELECT signal_id FROM signal_records WHERE signal_type = ? AND source_system = ? "
+                "AND channel_id IS NULL AND lifecycle_status = 'open' ORDER BY ingested_at DESC",
+                (signal_type, _SOURCE_SYSTEM))]
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _refresh_signal_message(signal_id: str, detail: str, db_path: Optional[Path]) -> None:
+    """Keep the one open signal's text current (e.g. today's free disk space)."""
+    try:
+        conn = get_connection(_resolve_db_path(db_path))
+        try:
+            row = conn.execute("SELECT full_record FROM signal_records WHERE signal_id = ?",
+                               (signal_id,)).fetchone()
+            import json as _json
+            rec = _json.loads(row[0]) if row and row[0] else {}
+            if isinstance(rec, dict):
+                rec["message"] = detail
+                conn.execute("UPDATE signal_records SET full_record = ? WHERE signal_id = ?",
+                             (_json.dumps(rec), signal_id))
+                conn.commit()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -405,7 +454,13 @@ def check_disk_usage(
         return CheckResult("disk_usage", False, f"could not stat {target}: {exc}")
 
     free_pct = (usage.free / usage.total) * 100 if usage.total else 0.0
-    if free_pct < warning_pct:
+    free_gb = usage.free / (1024**3)
+    # A percentage alone is wrong on a big personal disk: 3% of 1.8TB is
+    # still ~55GB, plenty for production (an episode is ~1-2GB). Low only
+    # when the absolute free space is also small -- same idea as the
+    # operator Telegram alert (operator_alerts.check_disk).
+    min_free_gb = getattr(cfg, "DISK_MIN_FREE_GB", 20.0) if cfg else 20.0
+    if free_pct < warning_pct and free_gb < min_free_gb:
         return CheckResult(
             "disk_usage", False,
             f"{free_pct:.1f}% free, below {warning_pct}% threshold "

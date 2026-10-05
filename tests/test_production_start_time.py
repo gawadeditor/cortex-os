@@ -33,7 +33,8 @@ def test_default_is_midnight(db):
     assert sch._channel_local_day_start_utc("ch", now, db) == datetime(2026, 10, 5, tzinfo=timezone.utc)
 
 
-def test_day_starts_at_the_chosen_time(db):
+def test_day_starts_at_the_chosen_time(db, monkeypatch):
+    monkeypatch.setattr(sch, "_machine_tz", lambda: timezone.utc)
     wsc.set_production_start("op", "2:00", db)
     assert wsc.production_start("op", db) == "02:00"
     before = datetime(2026, 10, 6, 1, 30, tzinfo=timezone.utc)      # still "yesterday"
@@ -60,3 +61,11 @@ def test_dashboard_saves_it(db):
         assert 'value="02:00"' in c.get("/workspaces?scope=factory").get_data(as_text=True)
     finally:
         server.app.config["DB_PATH"] = old
+
+
+def test_start_time_follows_this_computers_clock(db, monkeypatch):
+    from datetime import timedelta
+    monkeypatch.setattr(sch, "_machine_tz", lambda: timezone(timedelta(hours=4)))   # Dubai
+    wsc.set_production_start("op", "02:00", db)
+    now = datetime(2026, 10, 5, 23, 0, tzinfo=timezone.utc)                        # 03:00 Dubai
+    assert sch._channel_local_day_start_utc("ch", now, db) == datetime(2026, 10, 5, 22, tzinfo=timezone.utc)

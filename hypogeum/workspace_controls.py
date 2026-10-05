@@ -32,9 +32,10 @@ Now:
     has_client_workspaces(db_path=None) -> bool
     production_start(workspace_id) -> "HH:MM"  /  set_production_start(...)
 
-Production start time (2026-10-05): each workspace picks the local hour its
-production day begins (worker_control ws_production_start:<id>, "HH:MM" in
-each channel's own timezone; default 00:00). The scheduler's daily ceiling
+Production start time (2026-10-05): each workspace picks the hour its
+production day begins (worker_control ws_production_start:<id>, "HH:MM" on
+this computer's clock -- the machine that has to be awake; default 00:00 =
+the old behaviour, midnight in each channel's own timezone). The scheduler's daily ceiling
 counts from that moment, so a channel's next episode can't start before it
 -- the operator's laptop is usually closed at midnight, so theirs is 02:00.
 If the machine is still closed then, the worker starts it at its first tick

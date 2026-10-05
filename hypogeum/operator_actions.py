@@ -339,33 +339,16 @@ def _last_run_line(run: dict, dbp) -> str:
 def _outlook_lines(dbp) -> list:
     """Per channel: how many episodes are ready ahead, and when the next one
     gets produced (or why not yet)."""
-    from datetime import datetime, timezone
-    from hypogeum.db import get_connection
-    from hypogeum import scheduler as sch
-    now = datetime.now(timezone.utc)
+    from hypogeum.factory_outlook import channel_outlook
     out = []
-    conn = get_connection(dbp)
-    try:
-        for r in conn.execute("SELECT channel_id, next_run_at, max_runs_per_day FROM schedules "
-                              "WHERE status='active' AND channel_id IS NOT NULL ORDER BY channel_id"):
-            ch = r["channel_id"]
-            depth = sch.channel_buffer_depth(ch, conn, now=now)
-            target = sch._env_int("PRODUCTION_BUFFER_TARGET", sch._PRODUCTION_BUFFER_TARGET)
-            day_start = sch._channel_local_day_start_utc(ch, now, dbp)
-            used = sch._scheduled_runs_since(ch, conn, day_start.isoformat())
-            cap = r["max_runs_per_day"] or 0
-            if target and depth >= target:
-                nxt = "مفيش إنتاج لازم دلوقتي"
-            elif cap and used >= cap:
-                from datetime import timedelta
-                nxt = f"محاولة النهارده اتاخدت، الجاية {_local((day_start + timedelta(days=1)).isoformat())}"
-            else:
-                nxt = f"الحلقة الجاية تتعمل عند {_local(r['next_run_at'])} أو أقرب"
-            out.append(f"• {ch}: {depth} حلقة جاهزة قدام (الهدف {target}) — {nxt}")
-    except Exception as exc:  # noqa: BLE001
-        log.warn("status_outlook_failed", error=str(exc)[:200])
-    finally:
-        conn.close()
+    for o in channel_outlook(dbp):
+        if o["state"] == "enough":
+            nxt = "مفيش إنتاج لازم دلوقتي"
+        elif o["state"] == "next_day":
+            nxt = f"محاولة النهارده اتاخدت، الجاية {_local(o['next_production_at'])}"
+        else:
+            nxt = f"الحلقة الجاية تتعمل عند {_local(o['next_production_at'] or '')} أو أقرب"
+        out.append(f"• {o['channel_id']}: {o['ready']} حلقة جاهزة قدام (الهدف {o['target']}) — {nxt}")
     return out
 
 

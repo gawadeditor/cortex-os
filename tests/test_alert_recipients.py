@@ -176,3 +176,24 @@ def test_status_command_and_action_button_through_the_bot(env):
     ar.poll_once(db, http=bot)
     assert get_worker_control("queue_paused", "0", db_path=db) == "0"
     assert [t for c, t in bot.sent if c == "999"][-1].startswith("▶️")
+
+
+def test_update_handled_at_most_once_even_if_offset_save_fails(env, monkeypatch):
+    """2026-10-04: a busy DB made the bot answer the same /status 27 times."""
+    db, bot = env
+    bot.user_says(999, "/status", 1)
+    real_save = ar._save_offset
+    calls = {"n": 0}
+
+    def flaky_save(db_path, offset):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("database is locked")
+        return real_save(db_path, offset)
+    monkeypatch.setattr(ar, "_save_offset", flaky_save)
+    with pytest.raises(RuntimeError):
+        ar.poll_once(db, http=bot)
+    assert [c for c, _ in bot.sent if c == "999"] == []      # not answered while unsaved
+    ar.poll_once(db, http=bot)
+    ar.poll_once(db, http=bot)
+    assert len([c for c, _ in bot.sent if c == "999"]) == 1  # answered exactly once

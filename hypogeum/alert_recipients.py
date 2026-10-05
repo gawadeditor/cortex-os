@@ -377,14 +377,37 @@ def handle_message(chat: dict, text: str, *, db_path=None, reply: Callable[[str,
     return wid
 
 
+def _get_offset(db_path) -> int:
+    conn = _conn(db_path)
+    try:
+        r = conn.execute("SELECT value FROM worker_control WHERE key='telegram_update_offset'").fetchone()
+        return int(r[0]) if r and r[0] else 0
+    finally:
+        conn.close()
+
+
+def _save_offset(db_path, offset: int) -> None:
+    """Raises if it can't be saved — the caller must then NOT handle the update."""
+    conn = _conn(db_path)   # busy_timeout 15s: waits out a busy DB instead of failing at once
+    try:
+        conn.execute("INSERT INTO worker_control (key, value, updated_at) VALUES ('telegram_update_offset', ?, ?) "
+                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                     (str(offset), _now().isoformat()))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def poll_once(db_path=None, *, http=None, timeout: int = 0) -> int:
-    """Fetch pending bot updates once and handle them. The update offset is
-    kept in worker_control so a message is never processed twice."""
-    from hypogeum.db import get_worker_control, set_worker_control
+    """Fetch pending bot updates once and handle each AT MOST ONCE: the
+    update's offset is saved BEFORE it is handled. 2026-10-04: handling
+    first and saving after meant a busy DB ('database is locked' while an
+    episode was producing) made the bot re-handle the same /status 27 times
+    — and a button like 'restart worker' would have run 27 times too."""
     token = getattr(_config(), "TELEGRAM_BOT_TOKEN", None)
     if not token and http is None:
         return 0
-    offset = int(get_worker_control("telegram_update_offset", "0", db_path=_p(db_path)) or 0)
+    offset = _get_offset(db_path)
     params = {"timeout": timeout, "allowed_updates": ["message", "callback_query"]}
     if offset:
         params["offset"] = offset
@@ -392,6 +415,7 @@ def poll_once(db_path=None, *, http=None, timeout: int = 0) -> int:
     handled = 0
     for upd in updates:
         offset = max(offset, upd["update_id"] + 1)
+        _save_offset(db_path, offset)       # first; if this raises, nothing below runs
         msg = upd.get("message") or {}
         try:
             if upd.get("callback_query"):
@@ -407,7 +431,6 @@ def poll_once(db_path=None, *, http=None, timeout: int = 0) -> int:
             handled += 1
         except Exception as exc:  # noqa: BLE001
             log.warn("telegram_update_failed", error=str(exc)[:200])
-        set_worker_control("telegram_update_offset", str(offset), db_path=_p(db_path))
     return handled
 
 

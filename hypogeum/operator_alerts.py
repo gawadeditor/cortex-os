@@ -132,11 +132,12 @@ def alert(key: str, title: str, body: str = "", *, db_path=None, config=None,
             now = _now().isoformat()
             conn.execute(
                 "INSERT INTO operator_alerts (alert_key, status, title, body, opened_at, resolved_at, last_sent_at, "
-                "send_ok, workspace_id, title_en, body_en) VALUES (?,?,?,?,?,NULL,NULL,0,?,?,?) "
+                "send_ok, workspace_id, title_en, body_en) VALUES (?,?,?,?,?,NULL,?,0,?,?,?) "
                 "ON CONFLICT(alert_key) DO UPDATE SET status='open', title=excluded.title, "
-                "body=excluded.body, opened_at=excluded.opened_at, resolved_at=NULL, last_sent_at=NULL, send_ok=0, "
+                "body=excluded.body, opened_at=excluded.opened_at, resolved_at=NULL, "
+                "last_sent_at=excluded.last_sent_at, send_ok=0, "
                 "workspace_id=excluded.workspace_id, title_en=excluded.title_en, body_en=excluded.body_en",
-                (key, "open", title, body, now, workspace_id, title_en, body_en))
+                (key, "open", title, body, now, now, workspace_id, title_en, body_en))
             conn.commit()
             ar_text = f"🔴 {title}\n\n{body}".strip()
             en_text = f"🔴 {title_en}\n\n{body_en or ''}".strip() if title_en else None
@@ -144,8 +145,7 @@ def alert(key: str, title: str, body: str = "", *, db_path=None, config=None,
                 ok = bool(send(ar_text))
             else:
                 ok = _deliver(key, workspace_id, ar_text, en_text, config, db_path)
-            conn.execute("UPDATE operator_alerts SET last_sent_at=?, send_ok=? WHERE alert_key=?",
-                         (_now().isoformat(), 1 if ok else 0, key))
+            conn.execute("UPDATE operator_alerts SET send_ok=? WHERE alert_key=?", (1 if ok else 0, key))
             conn.commit()
         finally:
             conn.close()
@@ -652,15 +652,24 @@ def _retry_unsent(db_path, config, send, now: datetime) -> None:
             continue
         ar_text = f"🔴 {r['title']}\n\n{r['body'] or ''}".strip()
         en_text = f"🔴 {r['title_en']}\n\n{r['body_en'] or ''}".strip() if r.get("title_en") else None
-        ok = bool(send(ar_text)) if send is not None else _deliver(
-            r["alert_key"], r.get("workspace_id"), ar_text, en_text, config, db_path)
+        # claim the attempt BEFORE sending: if this write fails nothing is
+        # sent, so a busy DB can't turn into the same message every 2 minutes
         conn = _conn(db_path)
         try:
-            conn.execute("UPDATE operator_alerts SET last_sent_at=?, send_ok=? WHERE alert_key=? AND status='open'",
-                         (now.isoformat(), 1 if ok else 0, r["alert_key"]))
+            conn.execute("UPDATE operator_alerts SET last_sent_at=? WHERE alert_key=? AND status='open'",
+                         (now.isoformat(), r["alert_key"]))
             conn.commit()
         finally:
             conn.close()
+        ok = bool(send(ar_text)) if send is not None else _deliver(
+            r["alert_key"], r.get("workspace_id"), ar_text, en_text, config, db_path)
+        if ok:
+            conn = _conn(db_path)
+            try:
+                conn.execute("UPDATE operator_alerts SET send_ok=1 WHERE alert_key=?", (r["alert_key"],))
+                conn.commit()
+            finally:
+                conn.close()
 
 
 def start_operator_alerts_loop(db_path=None, *, check_every_s: int = 60):

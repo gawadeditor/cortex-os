@@ -465,8 +465,31 @@ class TestRepairExistingPostUpdatesNotCreates:
         provider = ZernioProvider(transport=transport)
         _repair(provider, db_path)
         put_body = transport.put_calls[0]
-        assert put_body["scheduledFor"] == "2026-08-24T18:00:00.000Z"
+        # No top-level scheduledFor: Zernio would apply it to every platform.
+        assert "scheduledFor" not in put_body
         assert put_body["timezone"] == "UTC"
+        # The platform that had to be appended gets the post's own time.
+        appended = [e for e in put_body["platforms"] if e["platform"] != "youtube"]
+        assert appended and all(e["scheduledFor"] == "2026-08-24T18:00:00.000Z" for e in appended)
+
+    def test_held_youtube_and_later_platforms_keep_their_own_times(self, db_path):
+        # 2026-10-05: a cover backfill on a held Short echoed the post-level
+        # scheduledFor (= the EARLIEST platform, YouTube's private upload) and
+        # pulled Facebook/Instagram/TikTok a day early.
+        _bind_all(db_path)
+        resp = _existing_post_get_response(platforms=ALL_PLATFORMS)
+        post = resp.json_body["post"]
+        post["scheduledFor"] = "2026-10-06T18:00:00.000Z"
+        for e in post["platforms"]:
+            e["scheduledFor"] = ("2026-10-06T18:00:00.000Z" if e["platform"] == "youtube"
+                                 else "2026-10-07T18:00:00.000Z")
+        transport = FakeRepairTransport(get_response=resp, put_response=_successful_put_response())
+        _repair(ZernioProvider(transport=transport), db_path)
+        put_body = transport.put_calls[0]
+        assert "scheduledFor" not in put_body
+        times = {e["platform"]: e["scheduledFor"] for e in put_body["platforms"]}
+        assert times["youtube"] == "2026-10-06T18:00:00.000Z"
+        assert {times[p] for p in ALL_PLATFORMS if p != "youtube"} == {"2026-10-07T18:00:00.000Z"}
 
     def test_put_body_contains_all_four_platforms(self, db_path):
         _bind_all(db_path)
@@ -985,8 +1008,9 @@ class TestRepairWhitelistsExistingPlatformEntries:
         assert "platformSpecificData" in by_platform["youtube"]
         assert "contentHash" not in by_platform["youtube"]
         # the three genuinely new platforms get the minimal freshly built shape
+        # (+ the post's own time, since no top-level scheduledFor is sent)
         for platform in ("tiktok", "instagram", "facebook"):
-            assert set(by_platform[platform].keys()) == {"platform", "accountId"}
+            assert set(by_platform[platform].keys()) == {"platform", "accountId", "scheduledFor"}
 
     def test_repaired_post_id_is_identical_and_no_post_call_occurs(self, db_path):
         _bind_all(db_path)

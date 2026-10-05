@@ -2417,23 +2417,34 @@ def _run_thumbnail_strategy(
 
     Checkpoint: loads existing thumbnail_concept_brief from disk if present.
     """
-    if (getattr(config, "SHORT_NATIVE_MODE", False) is True):
-        # A vertical Short has no concept-driven thumbnail (the platform
-        # auto-generates a cover from a frame). Do NOT write a
-        # thumbnail_concept_brief file -- its absence is exactly what keeps
-        # CONCEPT_DRIVEN_MODE off downstream. Return a minimal in-memory
-        # shape purely for the caller's log line.
-        get_logger(episode_id=episode_id, agent="pipeline").info(
-            "pipeline_stage_skipped", agent="thumbnail_strategy", reason="short_native_mode",
-        )
-        return {"thumbnail_concept_brief_id": f"tcb_{episode_id}",
-                "episode_id": episode_id, "concepts": [], "short_native": True}
-
+    short_native = getattr(config, "SHORT_NATIVE_MODE", False) is True
     pkg = _load_package(episode_id, "thumbnail_concept_brief", output_dir)
     if pkg is not None:
         log = get_logger(episode_id=episode_id, agent="pipeline")
         log.info("pipeline_stage_skipped", agent="thumbnail_strategy", reason="existing_output")
         return pkg
+    if short_native:
+        # Short-native (2026-10-05): the concept brief is what the vertical
+        # 9:16 cover builder (hypogeum.agents.vertical_thumbnail) works from.
+        # It used to be skipped here, so in-pipeline covers never happened —
+        # every Short went out with a platform-picked frame unless the cover
+        # was backfilled by hand. The landscape Thumbnail Director (the only
+        # CONCEPT_DRIVEN_MODE consumer) is never run in this mode, so writing
+        # the brief is safe. Best-effort: a failure leaves the auto-cover
+        # stub and never blocks production.
+        try:
+            return run_thumbnail_strategy(
+                topic_brief=topic_brief,
+                script_package=script_package,
+                config=config,
+                episode_id=episode_id,
+                output_dir=output_dir,
+            )
+        except Exception as exc:  # noqa: BLE001
+            get_logger(episode_id=episode_id, agent="pipeline").warn(
+                "short_native_thumbnail_strategy_failed", error=str(exc)[:200])
+            return {"thumbnail_concept_brief_id": f"tcb_{episode_id}",
+                    "episode_id": episode_id, "concepts": [], "short_native": True}
     return run_thumbnail_strategy(
         topic_brief=topic_brief,
         script_package=script_package,

@@ -1583,9 +1583,10 @@ class ZernioProvider:
         non-platform-specific metadata for the whole post.
 
         `scheduled_for` (2026-08-24): ISO 8601 UTC string. When omitted
-        (default), the existing post's own scheduledFor is echoed back
-        VERBATIM as before -- this call never silently changes a
-        schedule by default. When provided, it REPLACES the echoed
+        (default), no top-level scheduledFor is sent and every platform
+        entry's own scheduledFor is echoed back verbatim -- this call never
+        changes a schedule by default (echoing the top-level value instead
+        collapsed every platform onto the earliest one, 2026-10-05). When provided, it REPLACES the echoed
         value -- the one sanctioned way to reschedule an already-created
         post (e.g. moving Shorts to slots after a corrected main-episode
         schedule) without a delete+recreate.
@@ -1740,6 +1741,11 @@ class ZernioProvider:
             )
             for p in missing_platforms
         ]
+        # A newly appended platform has no time of its own and no top-level
+        # scheduledFor is sent (see below) -- give it the post's time.
+        if scheduled_for is None and existing_post.get("scheduledFor"):
+            for entry in merged_platform_entries[len(existing_platform_entries):]:
+                entry.setdefault("scheduledFor", existing_post["scheduledFor"])
 
         headers = {"Authorization": f"Bearer {credential}", "Content-Type": "application/json"}
         del credential
@@ -1754,8 +1760,14 @@ class ZernioProvider:
             body.update(root_fields)
         if scheduled_for is not None:
             body["scheduledFor"] = scheduled_for
-        elif existing_post.get("scheduledFor"):
-            body["scheduledFor"] = existing_post["scheduledFor"]
+        # else: deliberately NO top-level scheduledFor. Zernio applies a PUT's
+        # top-level scheduledFor to EVERY platform, and it reports the post's
+        # scheduledFor as the EARLIEST platform time — so echoing it back
+        # (the old behaviour) moved every platform onto that earliest time.
+        # 2026-10-05: a cover backfill on a held Short pulled Facebook /
+        # Instagram / TikTok a day early onto YouTube's private-upload time.
+        # Omitting it keeps each platform entry's own scheduledFor (echoed
+        # verbatim above).
         if existing_post.get("timezone"):
             body["timezone"] = existing_post["timezone"]
         tiktok_root_settings = (platform_settings or {}).get("tiktok")

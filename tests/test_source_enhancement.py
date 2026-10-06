@@ -406,6 +406,41 @@ class TestFailClosed:
         assert se["archived_checksum"] == expected_checksum
 
 
+class _DiskFullProvider(FakeEnhancementProvider):
+    """Leaves a 0-byte dest file and fails -- what "[Errno 28] No space left
+    on device" mid-download did to ep_31d1891b s03 on 2026-10-05."""
+
+    def enhance(self, source_path, dest_path, *a, **k):
+        self.calls.append(k.get("scene_id"))
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        dest_path.write_bytes(b"")
+        return EnhancementResult(
+            success=False, provider=self.name, model=self.model, provider_version=self.version,
+            failure_reason="adapter invocation raised: [Errno 28] No space left on device",
+        )
+
+
+def test_empty_candidate_from_local_io_failure_is_not_quarantined_and_is_retried(tmp_path):
+    episode_id = "ep_enh_disk_full"
+    clip_path = tmp_path / "video" / "sc_s01.mp4"
+    _make_clip(clip_path, 1280, 720)
+    disk_full = _DiskFullProvider()
+    register_provider("fake_disk_full", lambda: disk_full)
+    vp = _make_visual_package("s01", f"episodes/{episode_id}/video/sc_s01")
+    vp = run_source_enhancement(vp, _make_config(ENHANCEMENT_PROVIDER="fake_disk_full"), episode_id, output_dir=tmp_path)
+    se = vp["asset_manifest"]["assets"][0]["source_enhancement"]
+    assert se["validation_result"] == "failed"
+    assert se["archived_path"] is None                       # nothing real to quarantine
+    assert not (tmp_path / "video" / "sc_s01.enhanced.mp4").exists()
+
+    # next pass (same provider identity, disk freed) makes a genuine fresh attempt
+    healthy = FakeEnhancementProvider()
+    register_provider("fake_disk_full", lambda: healthy)
+    vp = run_source_enhancement(vp, _make_config(ENHANCEMENT_PROVIDER="fake_disk_full"), episode_id, output_dir=tmp_path)
+    assert healthy.calls == ["s01"]
+    assert vp["asset_manifest"]["assets"][0]["source_enhancement"]["validation_result"] == "passed"
+
+
 # ---------------------------------------------------------------------------
 # 3b. Asset lifecycle: validation failure must never destroy a paid artifact
 # (2026-08-04 architectural fix)

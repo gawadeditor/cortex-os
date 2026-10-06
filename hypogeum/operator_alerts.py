@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS operator_alert_checks (
 # per-check minimum interval (seconds) — run_operator_checks is called from
 # every worker iteration (~60s); the network-backed checks run less often.
 _INTERVALS = {"adapters": 300, "run_failures": 60, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
-              "youtube_covers": 300, "posts": 1800, "accounts": 600, "archive": 300, "disk": 1800}
+              "youtube_covers": 300, "posts": 1800, "unpublished": 300, "accounts": 600, "archive": 300, "disk": 1800}
 _DASHBOARD = "http://127.0.0.1:5001"
 _CREDIT_LOW_USD = 3.0
 _DISK_LOW_GB, _DISK_OK_GB = 30.0, 40.0
@@ -541,6 +541,79 @@ def check_posts(db_path, now: datetime) -> dict:
     return out
 
 
+_UNPUBLISHED_GATE_GRACE_MIN = 20     # release trigger re-runs the gate every ~minute
+_UNPUBLISHED_NO_ATTEMPT_H = 6        # finished but never handed to publishing
+_GATE_PLAIN = {
+    "A_VIDEO": "مشهد أو أكتر جودته أقل من المطلوب",
+    "B_VISUAL_PLAYBACK": "الفيديو النهائي فيه مشكلة في التشغيل",
+    "C_THUMBNAIL": "الغلاف ناقص أو قديم",
+    "D_SHORTS_CAPTIONS": "مشكلة في الكابشن",
+    "E_END_PAGE": "مشكلة في صفحة النهاية",
+    "F_ARTIFACT_COMPATIBILITY": "ملفات قديمة أو مش متوافقة",
+    "G_SHORTS_VISUAL_COVERAGE": "فيه أجزاء من الفيديو من غير صورة",
+    "H_VERTICAL_MASTER": "مقاس الفيديو النهائي مش مظبوط",
+}
+
+
+def check_unpublished_episodes(db_path, now: datetime) -> dict:
+    """A finished episode that isn't going out: the production output gate
+    keeps rejecting it, or it was never handed to publishing at all. The run
+    itself "completed", so check_run_failures never sees it (2026-10-06:
+    ep_31d1891b sat behind a failed gate for ~21h with nobody told)."""
+    from hypogeum.db import _DEFAULT_DB_PATH
+    dbp = Path(db_path) if db_path else _DEFAULT_DB_PATH
+    episodes_dir = dbp.parent / "episodes"
+    since = (now - timedelta(days=3)).isoformat()
+    conn = _conn(db_path, ddl=False)
+    try:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT r.episode_id, r.channel_id, MAX(r.completed_at) AS completed_at, "
+            "       COALESCE(e.topic, e.title, r.episode_id) AS topic "
+            "FROM runs r LEFT JOIN episodes e ON e.episode_id = r.episode_id "
+            "WHERE r.status = 'completed' AND r.completed_at >= ? "
+            "AND COALESCE(e.status, '') != 'superseded' "
+            "AND r.episode_id NOT IN (SELECT episode_id FROM publishing_attempts "
+            "                         WHERE state = 'succeeded' AND episode_id IS NOT NULL) "
+            "GROUP BY r.episode_id", (since,))]
+    except Exception:  # noqa: BLE001 — tables absent on a fresh DB
+        return {}
+    finally:
+        conn.close()
+    out = {}
+    for r in rows:
+        try:
+            done = datetime.fromisoformat(r["completed_at"])
+            if done.tzinfo is None:
+                done = done.replace(tzinfo=timezone.utc)
+        except Exception:  # noqa: BLE001
+            continue
+        age_min = (now - done).total_seconds() / 60
+        ep, ch, topic = r["episode_id"], r["channel_id"], (r["topic"] or "")[:90]
+        gate = None
+        try:
+            gate = json.loads((episodes_dir / ep / f"production_output_gate_{ep}.json").read_text())
+        except Exception:  # noqa: BLE001
+            pass
+        if gate is not None and gate.get("passed") is False and age_min >= _UNPUBLISHED_GATE_GRACE_MIN:
+            failed = [c for c in gate.get("checks") or [] if c.get("status") == "fail"]
+            lines = [f"• {_GATE_PLAIN.get(c.get('capability'), c.get('capability'))}: {(c.get('reason') or '')[:160]}"
+                     for c in failed]
+            out[f"unpublished:{ep}"] = (
+                f"حلقة {ch} خلصت بس واقفة قبل النشر",
+                f"«{topic}»\nبوابة الجودة رافضاها من {age_min / 60:.0f} ساعة:\n" + "\n".join(lines)
+                + f"\nالحلقة: {ep}",
+                _ws_extra(ch, db_path, (f"{ch}: finished episode blocked before publishing",
+                                        f"«{topic}»\n" + "\n".join(
+                                            f"• {c.get('capability')}: {(c.get('reason') or '')[:160]}" for c in failed))))
+        elif gate is None and age_min >= _UNPUBLISHED_NO_ATTEMPT_H * 60:
+            out[f"unpublished:{ep}"] = (
+                f"حلقة {ch} خلصت ومتجدولتش",
+                f"«{topic}»\nخلصت من {age_min / 60:.0f} ساعة ولسه متبعتتش للنشر.\nالحلقة: {ep}",
+                _ws_extra(ch, db_path, (f"{ch}: finished episode not scheduled",
+                                        f"«{topic}»\nFinished {age_min / 60:.0f}h ago, not handed to publishing.")))
+    return out
+
+
 def check_accounts(db_path) -> dict:
     conn = _conn(db_path, ddl=False)
     try:
@@ -617,7 +690,11 @@ def run_operator_checks(*, db_path=None, config=None, now: Optional[datetime] = 
     now = now or _now()
     config = _config(config)
     out: dict = {}
-    just_woke = _note_tick_and_wake(db_path, now)
+    try:
+        just_woke = _note_tick_and_wake(db_path, now)
+    except Exception as exc:  # noqa: BLE001 — a locked/full DB must not end the loop
+        log.warn("operator_tick_failed", error=str(exc)[:200])
+        just_woke = False
     checks = [
         ("openrouter_credits", "openrouter:credits", lambda: check_openrouter_credits(config)),
         ("workspace_credits", "openrouter_ws:", lambda: check_workspace_credits(db_path)),
@@ -630,6 +707,7 @@ def run_operator_checks(*, db_path=None, config=None, now: Optional[datetime] = 
         ("blocking_signals", "signal:", lambda: check_blocking_signals(db_path)),
         ("youtube_covers", "cover:", lambda: check_youtube_covers(db_path, now)),
         ("posts", "post", lambda: check_posts(db_path, now)),
+        ("unpublished", "unpublished:", lambda: check_unpublished_episodes(db_path, now)),
         ("accounts", "account:", lambda: check_accounts(db_path)),
         ("disk", "disk:", lambda: check_disk()),
         ("archive", "archive:", lambda: check_archive(db_path, now)),
@@ -723,7 +801,13 @@ def start_operator_alerts_loop(db_path=None, *, check_every_s: int = 60):
     def _loop():
         stop.wait(20)   # let startup settle (sleep-wake DB contention)
         while not stop.is_set():
-            run_operator_checks(db_path=db_path)
+            # one uncaught error used to end this thread for good, silently:
+            # 2026-10-05 a "database is locked" while the disk was full stopped
+            # every alert (disk full included) for ~22h. Never again.
+            try:
+                run_operator_checks(db_path=db_path)
+            except Exception as exc:  # noqa: BLE001
+                log.warn("operator_alerts_loop_error", error=str(exc)[:200])
             stop.wait(check_every_s)
 
     t = threading.Thread(target=_loop, name="operator-alerts", daemon=True)

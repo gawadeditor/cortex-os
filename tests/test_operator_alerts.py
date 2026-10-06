@@ -301,3 +301,86 @@ def test_run_failure_alert_carries_the_cause_once_per_episode(db):
     assert "السبب: حجز قديم ما اتفكّش" in got["run_failed:ep1"][1]   # latest attempt's cause
     set_worker_control("breaker_cleared_at", NOW.isoformat(), db_path=db)
     assert oa.check_run_failures(db, NOW) == {}                 # dealt with by the operator's resume
+
+
+def _completed_run(db, ep, completed_at, status="completed"):
+    conn = get_connection(db)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+    data = {"run_id": f"r_{ep}", "episode_id": ep, "status": status, "channel_id": "hypogeum",
+            "started_at": (completed_at - timedelta(hours=1)).isoformat(), "completed_at": completed_at.isoformat()}
+    if "created_at" in cols:
+        data["created_at"] = data["started_at"]
+    conn.execute(f"INSERT INTO runs ({','.join(data)}) VALUES ({','.join('?' * len(data))})", list(data.values()))
+    conn.commit()
+    conn.close()
+
+
+def _gate_file(db, ep, passed):
+    import json
+    d = db.parent / "episodes" / ep
+    d.mkdir(parents=True, exist_ok=True)
+    checks = [] if passed else [{"capability": "A_VIDEO", "status": "fail",
+                                 "reason": "1/9 source clip(s) measured below their deliverable's required source resolution"}]
+    (d / f"production_output_gate_{ep}.json").write_text(json.dumps({"passed": passed, "checks": checks}))
+
+
+def test_finished_episode_blocked_by_output_gate_alerts_with_reason(db):
+    # 2026-10-06: ep_31d1891b "completed" but the gate rejected it for ~21h, nobody told
+    _completed_run(db, "ep_blocked", NOW - timedelta(hours=3))
+    _gate_file(db, "ep_blocked", passed=False)
+    got = oa.check_unpublished_episodes(db, NOW)
+    assert list(got) == ["unpublished:ep_blocked"]
+    assert "واقفة قبل النشر" in got["unpublished:ep_blocked"][0]
+    assert "جودته أقل من المطلوب" in got["unpublished:ep_blocked"][1]
+
+
+def test_unpublished_check_quiet_for_fresh_passing_published_or_failed(db):
+    _completed_run(db, "ep_fresh", NOW - timedelta(minutes=5))       # gate gets its grace
+    _gate_file(db, "ep_fresh", passed=False)
+    _completed_run(db, "ep_ok", NOW - timedelta(hours=1))            # passed, being scheduled
+    _gate_file(db, "ep_ok", passed=True)
+    _completed_run(db, "ep_nogate", NOW - timedelta(hours=2))        # not yet seen by publishing
+    _completed_run(db, "ep_failed", NOW - timedelta(hours=3), status="failed")  # check_run_failures' job
+    _completed_run(db, "ep_pub", NOW - timedelta(hours=3))
+    _gate_file(db, "ep_pub", passed=False)
+    conn = get_connection(db)
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("INSERT INTO publishing_attempts (attempt_id, publication_intent_id, channel_id, episode_id, "
+                 "deliverable_id, platform, provider_id, state, created_at, updated_at) "
+                 "VALUES ('a1','i1','hypogeum','ep_pub','main_episode','youtube','zernio','succeeded',?,?)",
+                 (NOW.isoformat(), NOW.isoformat()))
+    conn.commit()
+    conn.close()
+    assert oa.check_unpublished_episodes(db, NOW) == {}
+    # never handed to publishing for hours -> alert even without a gate file
+    later = oa.check_unpublished_episodes(db, NOW + timedelta(hours=5))
+    assert "unpublished:ep_nogate" in later and "متجدولتش" in later["unpublished:ep_nogate"][0]
+
+
+def test_alert_loop_survives_a_locked_database(db, monkeypatch):
+    # 2026-10-05: one "database is locked" ended the alert thread for ~22h
+    calls = []
+
+    def boom(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise __import__("sqlite3").OperationalError("database is locked")
+        t.stop_event.set()
+        return {}
+
+    import threading
+    monkeypatch.setattr(oa, "run_operator_checks", boom)
+    monkeypatch.setattr(threading.Event, "wait", lambda self, timeout=None: self.is_set())  # no 20s settle
+    t = oa.start_operator_alerts_loop(db, check_every_s=0)
+    t.join(timeout=30)
+    assert len(calls) >= 2 and not t.is_alive()
+
+
+def test_tick_failure_does_not_abort_the_checks(db, monkeypatch):
+    def locked(*a, **k):
+        raise __import__("sqlite3").OperationalError("database is locked")
+    monkeypatch.setattr(oa, "_note_tick_and_wake", locked)
+    monkeypatch.setattr(oa, "check_disk", lambda: {"disk:low": ("الهارد", "x")})
+    out = _Outbox()
+    got = oa.run_operator_checks(db_path=db, config=_CFG, now=NOW, send=out, force=True)
+    assert got.get("disk") == 1

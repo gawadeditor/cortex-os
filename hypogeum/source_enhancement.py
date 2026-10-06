@@ -596,8 +596,25 @@ def _archive_candidate(dest_path: Path) -> tuple[Optional[str], Optional[str], O
     needed. Returns (None, None, None) if dest_path was never actually
     written (a provider failure before any real output existed — nothing
     to quarantine).
+
+    An empty or undecodable file is not a candidate either: a local I/O
+    failure mid-write (2026-10-05 ep_31d1891b s03: "No space left on
+    device") left a 0-byte file that was quarantined, and the
+    no-auto-retry guard in qualify_asset() then froze the scene below
+    resolution for good. Such a file is removed so the next pass makes a
+    genuine fresh attempt.
     """
     if not dest_path.exists():
+        return None, None, None
+    try:
+        unusable = dest_path.stat().st_size == 0 or probe_resolution(dest_path)[0] <= 0
+    except OSError:
+        unusable = True
+    if unusable:
+        try:
+            dest_path.unlink()
+        except OSError:
+            pass
         return None, None, None
     checksum = _sha256_file(dest_path)
     archived_at = datetime.now(timezone.utc).isoformat()

@@ -117,7 +117,8 @@ ALERT_TYPES = [
     ("approvals", "Approvals", "An episode is waiting for approval before publishing."),
     ("system", "Factory health", "Worker down, disk space, archive storage, factory-wide blocks (platform only)."),
 ]
-_PREFIX_TYPE = [("production:", "production"), ("run_failed:", "production"), ("openrouter:", "credits"), ("openrouter_ws:", "credits"), ("cover:", "covers"),
+_PREFIX_TYPE = [("production:", "production"), ("run_failed:", "production"),
+                ("unpublished:", "production"), ("openrouter:", "credits"), ("openrouter_ws:", "credits"), ("cover:", "covers"),
                 ("postcover:", "covers"), ("post:", "posts"), ("account:", "accounts"),
                 ("approval:", "approvals"), ("worker:", "system"), ("disk:", "system"),
                 ("archive:", "system"), ("signal:", "system"), ("system:", "system")]

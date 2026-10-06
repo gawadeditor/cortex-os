@@ -349,7 +349,9 @@ class MuapiVideoUpscalerProvider(EnhancementProvider):
                 # alone exceeds this call's $0.10 UPSCALE_CEILING_USD ->
                 # `17_budget_scope_configuration: ceiling would be exceeded`
                 # on every resumed coverage-fill upscale.
-                bs.ScopeRequest(bs.BudgetScopeKind.CALL, f"{episode_id}:upscale:{scene_id}", UPSCALE_CEILING_USD, "USD"),
+                # per attempt identity: a :recovery{n} attempt gets its own CALL row,
+                # never stacked on a stranded attempt's still-reserved one
+                bs.ScopeRequest(bs.BudgetScopeKind.CALL, authorization_id, UPSCALE_CEILING_USD, "USD"),
                 bs.ScopeRequest(bs.BudgetScopeKind.EPISODE, episode_id, grant.max_total_spend_all_bindings or UPSCALE_CEILING_USD, "USD"),
             ]
             result = submission_gate.submit(

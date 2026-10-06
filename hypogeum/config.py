@@ -580,6 +580,12 @@ class Config:
             "ENHANCEMENT_TARGET_RESOLUTION_LABEL", default="1080p"
         )
 
+        # Automatic repair of a finished episode the production output gate
+        # rejects for under-resolution clips (hypogeum.episode_repair): spends
+        # under the channel's signed operating grant, capped per repair.
+        self.EPISODE_REPAIR_ENABLED = _get_bool("EPISODE_REPAIR_ENABLED", default=True)
+        self.EPISODE_REPAIR_MAX_USD = _get_float("EPISODE_REPAIR_MAX_USD", default=1.0) or 0.0
+
         # M5.6 — Cost guardrails
         self.MUAPI_EPISODE_BUDGET_CREDITS = _get_float("MUAPI_EPISODE_BUDGET_CREDITS", default=0.0) or 0.0
         self.MUAPI_SCENE_BUDGET_CREDITS = _get_float("MUAPI_SCENE_BUDGET_CREDITS", default=0.0) or 0.0

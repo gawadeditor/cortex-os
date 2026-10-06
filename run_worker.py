@@ -581,6 +581,7 @@ def _process_channel_publishing(db_path: Path, assets_root: Path) -> dict:
                 channel_results.extend(process_channel_ready_bundles(
                     channel_id, bundle_def, db_path=db_path, assets_root=assets_root,
                     publish_now=publish_immediately,
+                    enable_episode_repair=True,
                 ))
         except Exception as exc:
             log.error("publishing_channel_error channel=%s error=%s", channel_id, exc, exc_info=True)

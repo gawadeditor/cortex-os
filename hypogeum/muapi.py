@@ -738,6 +738,17 @@ def _resolve_authorization_grant(channel_id: str, episode_id: Optional[str], *, 
             admitted = False
     if admitted:
         return _authority.resolve_active_operating_grant(channel_id, at=at), True
+    # A completed episode under an open, persisted repair window
+    # (hypogeum.episode_repair, bounded per repair and per episode) routes
+    # through the channel's operating grant exactly like an admitted one --
+    # never a caller flag, and no paid legacy fallback.
+    if episode_id:
+        try:
+            from hypogeum.episode_repair import repair_window_open  # noqa: PLC0415
+            if repair_window_open(channel_id, episode_id):
+                return _authority.resolve_active_operating_grant(channel_id, at=at), True
+        except Exception:  # noqa: BLE001 -- unknown => no repair routing
+            pass
     return _authority.resolve_active_grant(channel_id, episode_id or "unknown_episode", at=at), False
 
 

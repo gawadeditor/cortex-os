@@ -368,6 +368,20 @@ def _execute_raw_upscale_http(*, ctx: VerifiedInvocationContext, config, t0: flo
         dest_path.write_bytes(dl.content)
     except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
         return _fail(f"download_failed: {exc}", request_id=request_id, cost_usd=cost_usd)
+    except OSError as exc:
+        # The job already completed (and was charged) -- a local write
+        # failure (2026-10-05: "[Errno 28] No space left on device") used to
+        # escape as an exception, losing request_id and the spend record.
+        try:
+            dest_path.unlink()
+        except OSError:
+            pass
+        import hypogeum.finance as _finance  # noqa: PLC0415
+        _finance.record_cost(
+            provider=PROVIDER_NAME, model=MODEL_NAME, call_type="source_enhancement",
+            cost_usd=cost_usd or 0.0, episode_id=episode_id,
+        )
+        return _fail(f"local_write_failed_after_charge: {exc}", request_id=request_id, cost_usd=cost_usd)
 
     import hypogeum.finance as _finance  # noqa: PLC0415
 

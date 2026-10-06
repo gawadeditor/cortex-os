@@ -904,6 +904,7 @@ def process_channel_ready_bundles(
     titles_llm_call=None,
     captions_llm_call=None,
     canonical_metadata_llm_call=None,
+    enable_episode_repair: bool = False,
 ) -> List[ReadyBundle]:
     """
     Find this channel's not-yet-published, complete items for
@@ -1041,6 +1042,15 @@ def process_channel_ready_bundles(
         # check.
         if enable_production_output_gate:
             gate_result = run_production_output_gate(item.item_id, assets_root, resolved_config, resolved_log)
+            if not gate_result.passed and enable_episode_repair:
+                # Under-resolution source clips on a finished episode: a
+                # bounded, operator-authorized repair (hypogeum.episode_repair)
+                # instead of blocking forever. Only "repaired" re-opens the gate.
+                from hypogeum.episode_repair import try_repair_blocked_episode  # noqa: PLC0415
+                if try_repair_blocked_episode(
+                    channel_id, item.item_id, gate_result, assets_root=Path(assets_root), db_path=db_path,
+                ) == "repaired":
+                    gate_result = run_production_output_gate(item.item_id, assets_root, resolved_config, resolved_log)
             if not gate_result.passed:
                 failed_capabilities = [c.capability for c in gate_result.checks if c.status == "fail"]
                 for platform in resolved_platforms:

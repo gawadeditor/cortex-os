@@ -55,6 +55,24 @@ UPSCALE_CEILING_USD = Decimal("0.10")
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _ASSETS_ROOT = _PROJECT_ROOT / ".hypogeum-assets"
 
+_MAX_UPSCALE_RECOVERY_GENERATIONS = 2
+
+
+def _next_upscale_key_suffix(episode_id: str, scene_id: str) -> Optional[str]:
+    """'' for the first attempt, ':recovery{n}' once every earlier key for
+    this scene already carries attempt evidence (so the gate would refuse a
+    fresh submission under it), or None when the bounded recovery
+    generations are used up. Reads durable receipts only."""
+    from hypogeum.provider_receipt import ELIGIBLE_FOR_SUBMISSION_STATES, WriteAheadReceiptStore
+
+    store = WriteAheadReceiptStore(_ASSETS_ROOT / "episodes" / episode_id)
+    for n in range(_MAX_UPSCALE_RECOVERY_GENERATIONS + 1):
+        suffix = f":recovery{n}" if n else ""
+        key = f"{episode_id}:upscale:{scene_id}{suffix}"
+        if store.classify_recovery_state(episode_id, key) in ELIGIBLE_FOR_SUBMISSION_STATES:
+            return suffix
+    return None
+
 
 def _canonical_json_bytes(payload: dict) -> bytes:
     import json
@@ -245,8 +263,23 @@ class MuapiVideoUpscalerProvider(EnhancementProvider):
         operation_payload_content = operation_payload_bytes.decode("utf-8")
         operation_payload_sha256 = hashlib.sha256(operation_payload_bytes).hexdigest()
 
-        expected_output_identity = f"episodes/{episode_id}/upscale/{scene_id}"
-        authorization_id = f"{episode_id}:upscale:{scene_id}"
+        # A prior attempt stranded on this scene's key (2026-10-05 ep_31d1891b
+        # s03: paid job completed, local write hit ENOSPC -> receipt left at
+        # unknown_acceptance) can never be resubmitted under the same
+        # idempotency key. Mirror muapi.py's scene ":recovery{n}" identity: a
+        # genuinely new, separately authorized and budgeted attempt, bounded.
+        key_suffix = _next_upscale_key_suffix(episode_id, scene_id)
+        if key_suffix is None:
+            return EnhancementResult(
+                success=False, provider=self.name, model=self.model, provider_version=self.version,
+                failure_reason=(
+                    f"upscale_attempts_exhausted: scene {scene_id!r} already has "
+                    f"{_MAX_UPSCALE_RECOVERY_GENERATIONS + 1} attempts on record"
+                ),
+                generation_time_s=time.time() - t0,
+            )
+        expected_output_identity = f"episodes/{episode_id}/upscale/{scene_id}{key_suffix.replace(':', '/')}"
+        authorization_id = f"{episode_id}:upscale:{scene_id}{key_suffix}"
 
         try:
             envelope = GenerationExecutionEnvelope.create(

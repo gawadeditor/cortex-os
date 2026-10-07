@@ -456,11 +456,19 @@ def relocate_episode_assets(
     # The archive root may be an SMB share that dropped while the box slept.
     # Bring it back before we resolve/move — otherwise resolve_archive_root()
     # silently falls back to the in-tree default and we "archive" into the
-    # working area. Best-effort; a failure here just means the fallback path.
+    # working area. If the share can't be brought back, wait for the next
+    # sweep instead: 2026-10-06 ep_31d1891b was "archived" into
+    # .hypogeum-assets/archive while the NAS was off the network, and nothing
+    # ever moved it on (the catalog already said relocated).
     try:
-        ensure_archive_root_mounted(db_path)
+        mounted = ensure_archive_root_mounted(db_path)
     except Exception:  # noqa: BLE001
-        pass
+        mounted = False
+    if not mounted and not dry_run:
+        rec["verdict"] = "SKIPPED"
+        rec["warnings"].append("archive share not mounted — deferred to the next sweep")
+        log.info("archive_relocation_deferred", episode_id=episode_id, reason="archive_share_not_mounted")
+        return rec
 
     src = Path(output_dir) if output_dir is not None else (_WORKING_EPISODES_DIR / episode_id)
     rec["source_dir"] = str(src)

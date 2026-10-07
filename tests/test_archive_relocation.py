@@ -237,6 +237,27 @@ def test_unpublished_episode_is_not_relocated(dbp, tmp_path):
     assert ep_dir.exists()
 
 
+def test_unmounted_archive_share_defers_instead_of_archiving_locally(dbp, tmp_path, monkeypatch):
+    # 2026-10-06: NAS off the network -> ep_31d1891b landed in the in-tree
+    # fallback archive and nothing ever moved it on.
+    from hypogeum import archive_relocation as rl
+    import hypogeum.archive_storage as storage
+
+    work = tmp_path / "episodes"
+    work.mkdir()
+    ep_dir = _seed_episode_dir(work, "ep_nas_down")
+    set_factory_setting("archive_root", str(tmp_path / "server-archive"), db_path=dbp)
+    _mark_published(dbp, "ep_nas_down")
+    monkeypatch.setattr(storage, "ensure_archive_root_mounted", lambda db_path=None, **k: False)
+
+    rec = rl.relocate_episode_assets("ep_nas_down", db_path=dbp, output_dir=ep_dir,
+                                     catalog_dir=tmp_path / "c")
+    assert rec["verdict"] == "SKIPPED" and rec["relocated"] is False
+    assert "not mounted" in " ".join(rec["warnings"])
+    assert (ep_dir / "video" / "sc_s01.mp4").exists()                 # stays put for the next sweep
+    assert not (tmp_path / "server-archive").exists()
+
+
 def test_rollback_on_move_failure(dbp, tmp_path, monkeypatch):
     from hypogeum import archive_relocation as rl
     episode_id = "ep_fail"

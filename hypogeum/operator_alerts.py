@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS operator_alert_checks (
 # per-check minimum interval (seconds) — run_operator_checks is called from
 # every worker iteration (~60s); the network-backed checks run less often.
 _INTERVALS = {"adapters": 300, "run_failures": 60, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
-              "youtube_covers": 300, "posts": 1800, "unpublished": 300, "accounts": 600, "archive": 300, "disk": 1800}
+              "youtube_covers": 300, "posts": 1800, "unpublished": 300, "accounts": 600, "archive": 300, "archive_backlog": 600, "disk": 1800}
 _DASHBOARD = "http://127.0.0.1:5001"
 _CREDIT_LOW_USD = 3.0
 _DISK_LOW_GB, _DISK_OK_GB = 30.0, 40.0
@@ -671,6 +671,44 @@ def check_archive(db_path, now: datetime, *, mounted=None) -> Optional[dict]:
                              "اتأكد إن الـ NAS شغال وعلى نفس الشبكة.")}
 
 
+_ARCHIVE_BACKLOG_GRACE_H = 2
+
+
+def check_archive_backlog(db_path, now: datetime, *, pending=None) -> dict:
+    """Published episodes whose files still sit on the laptop hours later
+    although the sweep retries every minute. 2026-10-07: the NAS was mounted
+    but macOS refused the background worker access to it ("Operation not
+    permitted") and ep_b2853bbc failed to move every minute, silently — the
+    mount itself looked healthy so check_archive stayed quiet."""
+    if pending is None:
+        from hypogeum.archive_relocation import find_pending_published_episodes
+        pending = find_pending_published_episodes(Path(db_path) if db_path else None)
+    current = {ep for ep, _ch in pending}
+    conn = _conn(db_path)
+    try:
+        seen = {r["check_name"][len("archive_pending_since:"):]: r["last_run_at"] for r in conn.execute(
+            "SELECT * FROM operator_alert_checks WHERE check_name LIKE 'archive_pending_since:%'")}
+        for ep in current - set(seen):
+            conn.execute("INSERT INTO operator_alert_checks (check_name, last_run_at) VALUES (?, ?)",
+                         (f"archive_pending_since:{ep}", now.isoformat()))
+            seen[ep] = now.isoformat()
+        for ep in set(seen) - current:
+            conn.execute("DELETE FROM operator_alert_checks WHERE check_name=?", (f"archive_pending_since:{ep}",))
+        conn.commit()
+    finally:
+        conn.close()
+    stuck = sorted(ep for ep in current
+                   if (now - datetime.fromisoformat(seen[ep])).total_seconds() >= _ARCHIVE_BACKLOG_GRACE_H * 3600)
+    if not stuck:
+        return {}
+    return {"archive_backlog:stuck": (
+        "حلقات منشورة لسه ماتنقلتش للأرشيف",
+        f"{len(stuck)} حلقة ملفاتها لسه على اللابتوب من أكتر من {_ARCHIVE_BACKLOG_GRACE_H} ساعة رغم إن النقل "
+        f"بيتعاد كل دقيقة: {', '.join(stuck[:5])}\n"
+        "لو الـ NAS متوصّل، غالباً macOS مانع البرامج اللي شغالة في الخلفية من الوصول له "
+        "(Privacy & Security → Full Disk Access).")}
+
+
 def check_disk(path: str = "/System/Volumes/Data", *, usage=None) -> dict:
     try:
         u = usage or shutil.disk_usage(path if Path(path).exists() else "/")
@@ -711,6 +749,7 @@ def run_operator_checks(*, db_path=None, config=None, now: Optional[datetime] = 
         ("accounts", "account:", lambda: check_accounts(db_path)),
         ("disk", "disk:", lambda: check_disk()),
         ("archive", "archive:", lambda: check_archive(db_path, now)),
+        ("archive_backlog", "archive_backlog:", lambda: check_archive_backlog(db_path, now)),
     ]
     for name, prefix, fn in checks:
         try:

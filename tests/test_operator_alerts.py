@@ -384,3 +384,15 @@ def test_tick_failure_does_not_abort_the_checks(db, monkeypatch):
     out = _Outbox()
     got = oa.run_operator_checks(db_path=db, config=_CFG, now=NOW, send=out, force=True)
     assert got.get("disk") == 1
+
+
+def test_archive_backlog_alerts_only_after_grace_and_clears(db):
+    # 2026-10-07: NAS mounted but the background worker was denied access;
+    # ep_b2853bbc failed to move every minute and nobody was told.
+    pend = [("ep_stuck", "hypogeum")]
+    assert oa.check_archive_backlog(db, NOW, pending=pend) == {}                          # first seen
+    assert oa.check_archive_backlog(db, NOW + timedelta(hours=1), pending=pend) == {}     # grace
+    got = oa.check_archive_backlog(db, NOW + timedelta(hours=3), pending=pend)
+    assert list(got) == ["archive_backlog:stuck"] and "ep_stuck" in got["archive_backlog:stuck"][1]
+    assert oa.check_archive_backlog(db, NOW + timedelta(hours=4), pending=[]) == {}       # moved -> clears
+    assert oa.check_archive_backlog(db, NOW + timedelta(hours=5), pending=pend) == {}     # fresh clock

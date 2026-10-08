@@ -396,3 +396,53 @@ def test_archive_backlog_alerts_only_after_grace_and_clears(db):
     assert list(got) == ["archive_backlog:stuck"] and "ep_stuck" in got["archive_backlog:stuck"][1]
     assert oa.check_archive_backlog(db, NOW + timedelta(hours=4), pending=[]) == {}       # moved -> clears
     assert oa.check_archive_backlog(db, NOW + timedelta(hours=5), pending=pend) == {}     # fresh clock
+
+
+def _holds_tables(db):
+    conn = get_connection(db)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS youtube_cover_holds (post_id TEXT PRIMARY KEY, channel_id TEXT,
+            episode_id TEXT, release_at TEXT, upload_at TEXT, status TEXT, held_at TEXT,
+            released_at TEXT, last_error TEXT);
+        CREATE TABLE IF NOT EXISTS youtube_cover_confirmations (post_id TEXT PRIMARY KEY,
+            channel_id TEXT, confirmed_at TEXT);
+    """)
+    return conn
+
+
+def test_confirmed_but_still_private_past_the_slot_alerts(db):
+    conn = _holds_tables(db)
+    conn.execute("INSERT INTO youtube_cover_holds VALUES ('p1','hypogeum','ep','2026-10-04T10:00:00.000Z',"
+                 "'2026-10-03T10:00:00.000Z','release_failed','x',NULL,'no YouTube authorization')")
+    conn.execute("INSERT INTO youtube_cover_holds VALUES ('p2','hypogeum','ep','2026-10-04T10:00:00.000Z',"
+                 "'2026-10-03T10:00:00.000Z','held','x',NULL,NULL)")        # not confirmed: other check's job
+    conn.execute("INSERT INTO youtube_cover_holds VALUES ('p3','hypogeum','ep','2026-10-04T11:55:00.000Z',"
+                 "'2026-10-03T11:55:00.000Z','held','x',NULL,NULL)")        # slot only just passed: grace
+    for p in ("p1", "p3"):
+        conn.execute("INSERT INTO youtube_cover_confirmations VALUES (?,?,?)", (p, "hypogeum", "x"))
+    conn.commit()
+    conn.close()
+    got = oa.check_stuck_releases(db, NOW)
+    assert set(got) == {"stuckrelease:p1"}
+    assert "no YouTube authorization" in got["stuckrelease:p1"][1]
+    assert "authorize?channel=hypogeum" in got["stuckrelease:p1"][1]
+
+
+def test_expired_youtube_flip_authorization_alerts_but_network_blips_do_not(db):
+    from hypogeum.publishing.retry import HardFailureError, SoftFailureError
+    conn = get_connection(db)
+    for ch in ("hypogeum", "twinkle_mini_tales", "other"):
+        conn.execute(
+            "INSERT INTO channel_provider_bindings (binding_id, channel_id, capability, platform, provider_id,"
+            " logical_alias, enabled, created_at, updated_at) VALUES (?,?,?,?,?,?,1,'x','x')",
+            (f"b_{ch}", ch, "publishing", "youtube", "postiz" if ch != "other" else "zernio", "default"))
+    conn.commit()
+    conn.close()
+
+    def probe(ch):
+        if ch == "hypogeum":
+            raise HardFailureError("expired", error_code="invalid_grant")
+        raise SoftFailureError("network")
+    got = oa.check_youtube_flip_auth(db, probe=probe)
+    assert set(got) == {"ytauth:hypogeum"}          # blip on twinkle ignored; zernio channel not probed
+    assert oa.check_youtube_flip_auth(db, probe=lambda ch: None) == {}

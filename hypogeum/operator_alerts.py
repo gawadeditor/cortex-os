@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS operator_alert_checks (
 # per-check minimum interval (seconds) — run_operator_checks is called from
 # every worker iteration (~60s); the network-backed checks run less often.
 _INTERVALS = {"adapters": 300, "run_failures": 60, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
-              "youtube_covers": 300, "posts": 1800, "unpublished": 300, "accounts": 600, "archive": 300, "archive_backlog": 600, "disk": 1800}
+              "youtube_covers": 300, "stuck_releases": 300, "youtube_flip_auth": 3600, "posts": 1800, "unpublished": 300, "accounts": 600, "archive": 300, "archive_backlog": 600, "disk": 1800}
 _DASHBOARD = "http://127.0.0.1:5001"
 _CREDIT_LOW_USD = 3.0
 _DISK_LOW_GB, _DISK_OK_GB = 30.0, 40.0
@@ -499,6 +499,69 @@ def check_youtube_covers(db_path, now: datetime) -> dict:
     return out
 
 
+def check_stuck_releases(db_path, now: datetime) -> dict:
+    """Cover confirmed and the slot has passed, yet the Short is still private
+    — the flip to public failed or never ran (dead token, server down, laptop
+    asleep). check_youtube_covers only watches the unconfirmed ones."""
+    conn = _conn(db_path, ddl=False)
+    try:
+        rows = conn.execute(
+            "SELECT h.post_id, h.channel_id, h.release_at, h.status, h.last_error FROM youtube_cover_holds h "
+            "WHERE h.status IN ('held','late','release_failed') AND h.release_at <= ? "
+            "AND h.post_id IN (SELECT post_id FROM youtube_cover_confirmations)",
+            ((now - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%S"),)).fetchall()
+    except Exception:  # noqa: BLE001 — table absent on a fresh DB
+        return {}
+    finally:
+        conn.close()
+    out = {}
+    for r in rows:
+        why = (r["last_error"] or "")[:200]
+        out[f"stuckrelease:{r['post_id']}"] = (
+            f"شورت {r['channel_id']} الغلاف اتأكد بس لسه private",
+            "ميعاده عدّى والغلاف متأكد، لكن قلبه للعامة ماحصلش." + (f"\nالسبب: {why}" if why else "")
+            + f"\nلو توكن يوتيوب منتهي: {_DASHBOARD}/platforms/youtube/authorize?channel={r['channel_id']}"
+            f"\nالـ Content Grid: {_DASHBOARD}/channel/{r['channel_id']}/grid",
+            _ws_extra(r["channel_id"], db_path, (
+                f"{r['channel_id']}: cover confirmed but the Short is still private",
+                f"Its slot has passed and the cover is confirmed, but it was not made public. {why}".strip())))
+    return out
+
+
+def check_youtube_flip_auth(db_path, *, probe=None) -> dict:
+    """The per-channel YouTube authorization that flips held Shorts public must
+    still work. A refresh token that Google has revoked/expired (a Testing-mode
+    OAuth app expires them after 7 days) would leave every held Short private."""
+    conn = _conn(db_path, ddl=False)
+    try:
+        channels = [r[0] for r in conn.execute(
+            "SELECT DISTINCT channel_id FROM channel_provider_bindings WHERE provider_id='postiz' "
+            "AND platform='youtube' AND capability='publishing' AND enabled=1")]
+    except Exception:  # noqa: BLE001
+        return {}
+    finally:
+        conn.close()
+    if probe is None:
+        from hypogeum.publishing.youtube_privacy import _access_token
+
+        def probe(ch):
+            _access_token(ch, Path(db_path) if db_path else None)
+    out = {}
+    for ch in channels:
+        try:
+            probe(ch)
+        except Exception as exc:  # noqa: BLE001 — transient network trouble is not an expired token
+            if type(exc).__name__ == "SoftFailureError":
+                continue
+            out[f"ytauth:{ch}"] = (
+                f"تصريح يوتيوب لقناة {ch} خلص أو مش موجود",
+                f"من غيره الشورتس هتفضل private بعد الغلاف. {str(exc)[:160]}\n"
+                f"جدّده (مرة واحدة): {_DASHBOARD}/platforms/youtube/authorize?channel={ch}",
+                _ws_extra(ch, db_path, (f"{ch}: YouTube authorization expired",
+                                        "Held Shorts cannot be made public until it is renewed.")))
+    return out
+
+
 def check_posts(db_path, now: datetime) -> dict:
     """Zernio posts the Content Grid flags: a platform failed / stuck
     (needs_attention), or a live Short whose Studio cover isn't confirmed.
@@ -527,7 +590,7 @@ def check_posts(db_path, now: datetime) -> dict:
                 stuck = ", ".join(x for x in (it.get("not_yet_live_platforms") or []) if x) or "?"
                 out[f"post:{it['post_id']}"] = (
                     f"بوست على {ch} مانزلش صح",
-                    f"«{title}»\nحالته في Zernio: {it.get('status')} — المنصات اللي لسه: {stuck}\n"
+                    f"«{title}»\nحالته عند الناشر: {it.get('status')} — المنصات اللي لسه: {stuck}\n"
                     f"{_DASHBOARD}/channel/{ch}/grid",
                     _ws_extra(ch, db_path, (f"{ch}: a post didn't go out correctly",
                                             f"«{title}»\nStill missing on: {stuck}")))
@@ -744,6 +807,8 @@ def run_operator_checks(*, db_path=None, config=None, now: Optional[datetime] = 
         ("run_failures", "run_failed:", lambda: check_run_failures(db_path, now)),
         ("blocking_signals", "signal:", lambda: check_blocking_signals(db_path)),
         ("youtube_covers", "cover:", lambda: check_youtube_covers(db_path, now)),
+        ("stuck_releases", "stuckrelease:", lambda: check_stuck_releases(db_path, now)),
+        ("youtube_flip_auth", "ytauth:", lambda: check_youtube_flip_auth(db_path)),
         ("posts", "post", lambda: check_posts(db_path, now)),
         ("unpublished", "unpublished:", lambda: check_unpublished_episodes(db_path, now)),
         ("accounts", "account:", lambda: check_accounts(db_path)),

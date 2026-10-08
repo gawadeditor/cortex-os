@@ -5,6 +5,7 @@
 # server — see scripts/server/setup_r2_offsite.sh). Keeps 14 days off-site.
 set -euo pipefail
 LOG=~/backups/backup.log
+trap 'echo "$(date -u +%FT%TZ) offsite FAILED (line $LINENO)" >> "$LOG"' ERR
 LATEST=$(ls -1d ~/backups/*/ | sort | tail -1)
 LATEST=${LATEST%/}
 [ -s "$LATEST/postiz.dump" ] || { echo "$(date -u +%FT%TZ) offsite FAILED no dump in $LATEST" >> "$LOG"; exit 1; }
@@ -15,7 +16,7 @@ tar czf "$LATEST/config.tgz" -C ~ --ignore-failed-read postiz/docker-compose.yam
 chmod 600 "$LATEST/config.tgz"
 
 NAME=$(basename "$LATEST")
-rclone copy "$LATEST" "cortexcrypt:$NAME" --transfers 2 --retries 3
+rclone copy "$LATEST" "cortexcrypt:$NAME" --transfers 2 --retries 5
 # verify the copy before pruning anything
 rclone check "$LATEST" "cortexcrypt:$NAME" --one-way --size-only >/dev/null
 rclone delete cortexcrypt: --min-age 14d --rmdirs

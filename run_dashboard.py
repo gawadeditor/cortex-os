@@ -3838,6 +3838,9 @@ def youtube_oauth_authorize():
         "access_type":   "offline",
         "prompt":        "consent",   # force refresh_token to be issued
     }
+    # ?channel=<id>: store the token for that channel only (cover-hold release)
+    if request.args.get("channel"):
+        params["state"] = request.args["channel"]
     auth_url = _YT_AUTH_URL + "?" + urllib.parse.urlencode(params)
     return redirect(auth_url)
 
@@ -3869,7 +3872,8 @@ def youtube_oauth_callback():
         ), 400
 
     result = exchange_youtube_code(
-        request.args.get("code", ""), redirect_uri, db_path=_db_path())
+        request.args.get("code", ""), redirect_uri, db_path=_db_path(),
+        channel_id=request.args.get("state") or None)
     if result.ok:
         return redirect(url_for("providers_page") + "?youtube_authorized=1")
     return render_template(

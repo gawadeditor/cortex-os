@@ -68,3 +68,9 @@ def test_route_handler_is_thin():
     assert "exchange_youtube_code" in src
     assert "oauth2.googleapis.com" not in src   # no token URL in the handler
     assert "grant_type" not in src              # no token payload in the handler
+
+
+def test_youtube_oauth_label_is_per_channel_only_when_asked():
+    from hypogeum.oauth_service import youtube_oauth_label
+    assert youtube_oauth_label() == "youtube-oauth-refresh"
+    assert youtube_oauth_label("twinkle_mini_tales") == "youtube-oauth-refresh:twinkle_mini_tales"

@@ -76,12 +76,12 @@
   {% call hero(
      eyebrow=channel.name,
      title='Content grid',
-     lede='Every post this channel has staged or published on Zernio — poster, status, and date, the way Zernio itself shows it.',
+     lede='Every post this channel has staged or published (Zernio or Postiz) — poster, status, and date, the way the publisher itself shows it.',
      meta=[{'label': 'posts', 'value': items|length},
            {'label': 'missing a cover', 'value': missing_cover_count},
            {'label': 'needs attention', 'value': needs_attention_count},
            {'label': 'YouTube cover to upload', 'value': youtube_cover_pending_count}]) %}
-    <a href="?refresh=1&scope={{ channel_id }}" class="btn">{{ icon('refresh') }} Refresh from Zernio</a>
+    <a href="?refresh=1&scope={{ channel_id }}" class="btn">{{ icon('refresh') }} Refresh from the publisher</a>
   {% endcall %}
 
   {% if load_error %}
@@ -94,7 +94,7 @@
   <div class="dv-empty">
     {{ icon('grid') }}
     <div class="dv-empty-title">No posts yet</div>
-    <div class="dv-empty-sub">Nothing has been staged or published on Zernio for this channel yet.</div>
+    <div class="dv-empty-sub">Nothing has been staged or published for this channel yet.</div>
   </div>
   {% else %}
 
@@ -138,12 +138,12 @@
         {% endif %}
         {% if it.needs_attention %}
         <div class="cg-attention-note">
-          Zernio status is "{{ it.status }}", not published — check it live and re-verify the thumbnail once it settles.
+          Publisher status is "{{ it.status }}", not published — check it live and re-verify the thumbnail once it settles.
           {% if it.not_yet_live_platforms %}Not yet live on: {{ it.not_yet_live_platforms|join(', ') }}.{% endif %}
         </div>
         {% for fp in it.failed_platforms %}
         <div class="cg-manual-note">
-          <strong>{{ fp.platform }}:</strong> {{ fp.error or 'Zernio marked it failed.' }}
+          <strong>{{ fp.platform }}:</strong> {{ fp.error or 'The publisher marked it failed.' }}
           {% if fp.error and 'published externally' in fp.error %}Re-publishing without checking would post it twice.{% endif %}
         </div>
         <form method="post" action="/channel/{{ channel_id }}/grid/platform-live" class="cg-done-form">

@@ -44,6 +44,72 @@ _LOCAL_SLOT_GRACE_SECONDS = 2 * 3600
 _EP_ID_IN_URL = re.compile(r"(ep_[0-9a-fA-F]{8})")
 
 
+# Postiz's API allows 30 requests/hour by default and the worker syncs every
+# iteration, so the Postiz post list is cached between syncs. A stale list is
+# safe: it only ever ADDS slots for posts we made, and the day-cap guards
+# need "is there already a post that day", which a few minutes' lag cannot
+# change (a fresh assignment is also kept by the local grace window).
+_POSTIZ_MIN_INTERVAL_SECONDS = 300
+_postiz_cache: dict = {"at": 0.0, "key": None, "posts": []}
+
+
+def _postiz_publishing_in_use(db_path) -> bool:
+    """True when at least one enabled publishing binding names Postiz."""
+    from hypogeum.db import get_connection
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM channel_provider_bindings WHERE provider_id = 'postiz' "
+            "AND capability = 'publishing' AND enabled = 1 LIMIT 1"
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
+def _normalize_postiz_post(p: dict) -> Optional[dict]:
+    """A Postiz /posts entry in the Zernio post shape this module reads.
+    Attribution goes through provider_content_mappings (post id), the same
+    first step as for Zernio posts; Postiz-side posts we did not create find
+    no mapping and are skipped as unattributed."""
+    post_id = str(p.get("id") or "")
+    when = str(p.get("publishDate") or "").strip()
+    if not post_id or not when:
+        return None
+    if str(p.get("state") or "").upper() == "ERROR":
+        return None  # a failed post holds no slot
+    return {"_id": post_id, "scheduledFor": when, "title": "", "platforms": []}
+
+
+def _fetch_postiz_posts(db_path, *, floor: datetime, now: datetime,
+                        provider=None, force: bool = False) -> list:
+    """Postiz posts from `floor` to 30 days ahead, normalized; [] when no
+    channel is bound to Postiz. Cached for _POSTIZ_MIN_INTERVAL_SECONDS.
+    Raises on a failed list so the caller can report it."""
+    import time
+    if provider is None and not _postiz_publishing_in_use(db_path):
+        return []
+    key = (str(db_path), floor.date().isoformat())
+    if (not force and _postiz_cache["key"] == key
+            and time.monotonic() - _postiz_cache["at"] < _POSTIZ_MIN_INTERVAL_SECONDS):
+        return list(_postiz_cache["posts"])
+    from urllib.parse import urlencode
+    from hypogeum.publishing.postiz import (
+        PostizProvider, PostizAdapterError, _iso_utc, _DEFAULT_TIMEOUT_SECONDS,
+    )
+    prov = provider or PostizProvider()
+    headers = prov._headers(db_path)
+    q = urlencode({"startDate": _iso_utc(floor), "endDate": _iso_utc(now + timedelta(days=30))})
+    resp = prov._transport.get(url=f"{prov._base_url}/posts?{q}", headers=headers,
+                               timeout=_DEFAULT_TIMEOUT_SECONDS)
+    if resp.status_code != 200 or not isinstance(resp.json_body, dict):
+        raise PostizAdapterError(f"postiz list HTTP {resp.status_code}")
+    posts = [n for n in (_normalize_postiz_post(p) for p in resp.json_body.get("posts") or [])
+             if n is not None]
+    _postiz_cache.update({"at": time.monotonic(), "key": key, "posts": posts})
+    return list(posts)
+
+
 def post_release_time(post: dict) -> str:
     """The post's public release time: the LATEST per-platform scheduledFor,
     else the post-level one. Zernio sets the post-level scheduledFor to the
@@ -170,6 +236,19 @@ def sync_zernio_schedule(
                 posts.append(p)
                 owner_of_post[id(p)] = ws_id
         del accounts
+        # Channels moved to Postiz publish there, so Zernio no longer lists
+        # their posts. Without folding Postiz's posts in, those channels'
+        # slots would be dropped after the grace window and the
+        # one-episode-per-day guards would let a second episode through.
+        try:
+            _now_pz = datetime.now(timezone.utc)
+            for p in _fetch_postiz_posts(
+                db_path, floor=_now_pz - timedelta(days=max(0, window_days_back) + 1), now=_now_pz,
+            ):
+                posts.append(p)
+                owner_of_post[id(p)] = None
+        except Exception as exc:  # noqa: BLE001 — a Postiz outage must not break the Zernio mirror
+            out["postiz_error"] = f"{type(exc).__name__}: {exc}"
         try:
             from hypogeum.workspace_controls import _client_channels
             from hypogeum.workspaces import platform_workspace_id

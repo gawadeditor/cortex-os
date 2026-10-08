@@ -59,11 +59,21 @@ def _persist_refresh_token(provider: str, label: str, refresh_token: str,
                               credential_data=refresh_token, db_path=db_path)
 
 
+def youtube_oauth_label(channel_id: Optional[str] = None) -> str:
+    """SecretProfile label of a YouTube refresh token: the shared
+    'youtube-oauth-refresh', or one per channel ('…:<channel_id>') — a Google
+    refresh token is bound to the single YouTube channel picked at consent,
+    so two channels need two tokens."""
+    return f"youtube-oauth-refresh:{channel_id}" if channel_id else "youtube-oauth-refresh"
+
+
 def exchange_youtube_code(
     code: str, redirect_uri: str, *, db_path: Optional[Path] = None,
+    channel_id: Optional[str] = None,
 ) -> OAuthResult:
     """Exchange a Google authorization code for a refresh token and persist
-    it as the 'youtube-oauth-refresh' SecretProfile."""
+    it as the 'youtube-oauth-refresh' SecretProfile (or the per-channel one
+    when `channel_id` is given)."""
     if not code:
         return OAuthResult(False, "no_code",
                            "No authorization code in the callback.", 400)
@@ -102,7 +112,7 @@ def exchange_youtube_code(
         )
 
     try:
-        _persist_refresh_token("youtube", "youtube-oauth-refresh", refresh_token, db_path)
+        _persist_refresh_token("youtube", youtube_oauth_label(channel_id), refresh_token, db_path)
     except Exception as exc:  # noqa: BLE001
         return OAuthResult(False, "db_error", str(exc), 500)
 

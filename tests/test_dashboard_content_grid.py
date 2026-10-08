@@ -365,3 +365,107 @@ def test_failed_platform_confirmed_live_by_hand_stops_needing_attention(tmp_path
     cg.mark_platform_live("post_pip", "facebook", "hypogeum", db_path=db_path)
     item = cg.get_content_grid("hypogeum", db_path=db_path)[0]
     assert item["needs_attention"] is False and item["failed_platforms"] == []
+
+
+# -- Postiz-published posts: one card per deliverable, one list call ----------
+
+def _seed_postiz_deliverable(db_path, *, channel_id, episode_id, deliverable_id, posts):
+    """posts: [(platform, postiz_post_id)] — one attempt+receipt each."""
+    initialize_schema(db_path)
+    conn = get_connection(db_path)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute("INSERT OR IGNORE INTO episodes (episode_id, title, created_at, status) "
+                 "VALUES (?, ?, ?, 'complete')", (episode_id, f"Title for {episode_id}", now))
+    for platform, post_id in posts:
+        intent = f"intent_{post_id}"
+        conn.execute(
+            """INSERT INTO publication_intents
+               (publication_intent_id, channel_id, episode_id, deliverable_id, platform, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, 'succeeded', ?, ?)""",
+            (intent, channel_id, episode_id, deliverable_id, platform, now, now))
+        conn.execute(
+            """INSERT INTO publishing_attempts
+               (attempt_id, publication_intent_id, channel_id, episode_id, deliverable_id, platform,
+                provider_id, state, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'postiz', 'succeeded', ?, ?)""",
+            (f"attempt_{post_id}", intent, channel_id, episode_id, deliverable_id, platform, now, now))
+        conn.execute(
+            """INSERT INTO publishing_receipts
+               (receipt_id, attempt_id, provider_id, platform, provider_publication_id, acknowledged_at)
+               VALUES (?, ?, 'postiz', ?, ?, ?)""",
+            (f"receipt_{post_id}", f"attempt_{post_id}", platform, post_id, now))
+    conn.commit()
+    conn.close()
+
+
+class _FakePostiz:
+    def __init__(self, posts, status=200):
+        self.listed = posts
+        self.status = status
+        self.calls = 0
+        self._base_url = "http://pz/api"
+        outer = self
+
+        class _T:
+            def get(self, *, url, headers, timeout):
+                outer.calls += 1
+                from types import SimpleNamespace
+                return SimpleNamespace(status_code=outer.status, json_body={"posts": outer.listed})
+        self._transport = _T()
+
+    def _headers(self, db_path, channel_id=None):
+        return {}
+
+
+def _pz_post(pid, platform, state, url=None, date="2026-10-09T14:00:00.000Z", settings="{}"):
+    return {"id": pid, "state": state, "publishDate": date, "releaseURL": url, "settings": settings,
+            "integration": {"id": "i", "providerIdentifier": platform}}
+
+
+def test_postiz_posts_fold_into_one_card_with_one_list_call(tmp_path, monkeypatch):
+    db = tmp_path / "t.db"
+    _seed_postiz_deliverable(db, channel_id="ch", episode_id="ep_1", deliverable_id="main_episode",
+                             posts=[("youtube", "pzA"), ("instagram", "pzB")])
+    fake = _FakePostiz([
+        _pz_post("pzA", "youtube", "PUBLISHED", "https://youtube.com/shorts/abc123",
+                 settings=json.dumps({"title": "Real YT Title"})),
+        _pz_post("pzB", "instagram", "QUEUE"),
+    ])
+    import hypogeum.publishing.postiz as pz
+    monkeypatch.setattr(pz, "PostizProvider", lambda: fake)
+
+    grid = cg.get_content_grid("ch", db_path=db)
+    assert len(grid) == 1 and fake.calls == 1
+    card = grid[0]
+    assert card["post_id"] == "pzA" and card["display_title"] == "Real YT Title"
+    assert {p["platform"]: p["status"] for p in card["platforms"]} == {"youtube": "published",
+                                                                       "instagram": "scheduled"}
+    assert card["status"] == "scheduled" and card["needs_attention"] is False
+    assert card["has_cover"] and card["thumbnail_url"] == "/episode/ep_1/thumbnail"
+    assert card["youtube_studio_url"].endswith("/abc123/edit")
+
+
+def test_postiz_error_state_flags_needs_attention(tmp_path, monkeypatch):
+    db = tmp_path / "t.db"
+    _seed_postiz_deliverable(db, channel_id="ch", episode_id="ep_1", deliverable_id="main_episode",
+                             posts=[("youtube", "pzA"), ("facebook", "pzB")])
+    fake = _FakePostiz([_pz_post("pzA", "youtube", "PUBLISHED", "https://youtube.com/watch?v=x"),
+                        _pz_post("pzB", "facebook", "ERROR")])
+    import hypogeum.publishing.postiz as pz
+    monkeypatch.setattr(pz, "PostizProvider", lambda: fake)
+    card = cg.get_content_grid("ch", db_path=db)[0]
+    assert card["status"] == "partial" and card["needs_attention"] is True
+    assert [f["platform"] for f in card["failed_platforms"]] == ["facebook"]
+
+
+def test_postiz_outage_keeps_the_cached_copy(tmp_path, monkeypatch):
+    db = tmp_path / "t.db"
+    _seed_postiz_deliverable(db, channel_id="ch", episode_id="ep_1", deliverable_id="main_episode",
+                             posts=[("youtube", "pzA")])
+    _seed_cache_row(db, post_id="pzA", channel_id="ch", episode_id="ep_1")
+    fake = _FakePostiz([], status=503)
+    import hypogeum.publishing.postiz as pz
+    monkeypatch.setattr(pz, "PostizProvider", lambda: fake)
+    card = cg.get_content_grid("ch", db_path=db, force_refresh=True)[0]
+    assert card["display_title"] == "Real Title"
+    assert "Postiz" in card["fetch_error"]

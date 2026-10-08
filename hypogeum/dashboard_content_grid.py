@@ -178,14 +178,21 @@ def _is_landscape(url: str) -> Optional[bool]:
 
 
 def _resolve_posts(conn, channel_id: str) -> list[dict]:
-    """Every distinct Zernio post this channel has a successful attempt+
-    receipt for, one row per (post_id), earliest deliverable_id kept for
-    display (a multi-deliverable episode's main takes priority alphabetically
-    -- 'main_episode' < 'short_*')."""
+    """Every distinct post this channel has a successful attempt+receipt
+    for, one row per (post_id), earliest deliverable_id kept for display
+    (a multi-deliverable episode's main takes priority alphabetically --
+    'main_episode' < 'short_*').
+
+    Zernio carries all platforms of a deliverable in ONE post, so one
+    post_id is one card. Postiz carries one post per platform, so its posts
+    are folded into ONE card per (episode, deliverable): post_id is the
+    smallest of its Postiz post ids (stable), `postiz_ids` lists them all,
+    and `provider` is 'postiz'."""
     rows = conn.execute(
         """
         SELECT pr.provider_publication_id AS post_id, pa.episode_id,
-               MIN(pa.deliverable_id) AS deliverable_id
+               MIN(pa.deliverable_id) AS deliverable_id, pa.provider_id AS provider_id,
+               pa.platform AS platform
         FROM publishing_attempts pa
         JOIN publishing_receipts pr ON pr.attempt_id = pa.attempt_id
         WHERE pa.state = 'succeeded' AND pa.channel_id = ?
@@ -194,10 +201,23 @@ def _resolve_posts(conn, channel_id: str) -> list[dict]:
         """,
         (channel_id,),
     ).fetchall()
-    return [
-        {"post_id": r["post_id"], "episode_id": r["episode_id"], "deliverable_id": r["deliverable_id"]}
-        for r in rows
-    ]
+    out: list[dict] = []
+    postiz: dict = {}
+    for r in rows:
+        if r["provider_id"] == "postiz":
+            postiz.setdefault((r["episode_id"], r["deliverable_id"]), []).append(
+                (r["post_id"], r["platform"]))
+        else:
+            out.append({"post_id": r["post_id"], "episode_id": r["episode_id"],
+                        "deliverable_id": r["deliverable_id"]})
+    for (episode_id, deliverable_id), ids in postiz.items():
+        # The card is keyed by its YouTube post when it has one: the cover hold and
+        # the "cover done" confirmation are recorded against that post id.
+        yt = sorted(pid for pid, plat in ids if plat == "youtube")
+        ids = sorted(pid for pid, _ in ids)
+        out.append({"post_id": (yt or ids)[0], "episode_id": episode_id, "deliverable_id": deliverable_id,
+                    "provider": "postiz", "postiz_ids": ids})
+    return out
 
 
 def _local_episode_title(conn, episode_id: str) -> str:
@@ -265,6 +285,94 @@ def _fetch_live(provider, post_id: str, *, known_thumbnail_url: Optional[str] = 
         "platforms_json": json.dumps(platforms),
         "fetch_error": None,
     }
+
+
+# Postiz's own post states -> the status words this page already understands.
+_POSTIZ_STATE = {"PUBLISHED": "published", "QUEUE": "scheduled", "ERROR": "failed", "DRAFT": "draft"}
+
+
+def _postiz_card_status(platforms: list[dict]) -> Optional[str]:
+    """One post-level status for a card whose platforms are separate Postiz
+    posts. A platform still queued next to a published one is a normal
+    staggered release (cover hold, per-platform slots), so it reads
+    'scheduled', never 'partial'."""
+    states = {p.get("status") for p in platforms}
+    if not states:
+        return None
+    if states == {"published"}:
+        return "published"
+    if "failed" in states:
+        return "partial" if "published" in states else "failed"
+    return "scheduled"
+
+
+def _fetch_live_postiz(provider, posts: list[dict], *, channel_id: Optional[str] = None,
+                       db_path=None) -> dict:
+    """Live rows for every Postiz card in `posts`, from ONE list call (the
+    API allows only 30 requests/hour, so a per-post GET is not an option).
+    Returns {card post_id: live dict}; on a failed list every card gets a
+    `fetch_error` row, which the caller turns into 'keep the cached copy'."""
+    import datetime as _dt
+    from urllib.parse import urlencode
+    from hypogeum.publishing.postiz import _iso_utc
+    now = _dt.datetime.now(_dt.timezone.utc)
+    try:
+        headers = provider._headers(db_path, channel_id=channel_id)
+        q = urlencode({"startDate": _iso_utc(now - _dt.timedelta(days=60)),
+                       "endDate": _iso_utc(now + _dt.timedelta(days=30))})
+        resp = provider._transport.get(url=f"{provider._base_url}/posts?{q}", headers=headers,
+                                       timeout=_LIVE_FETCH_TIMEOUT_SECONDS)
+        if resp.status_code != 200 or not isinstance(resp.json_body, dict):
+            raise RuntimeError(f"HTTP {resp.status_code}")
+        listed = {p.get("id"): p for p in resp.json_body.get("posts") or [] if isinstance(p, dict)}
+    except Exception as exc:  # noqa: BLE001
+        text = str(exc)
+        msg = ("Couldn't reach Postiz (network) — showing the last saved copy; it refreshes on its own."
+               if any(k in text for k in ("NameResolution", "Max retries", "ConnectionError", "timed out", "Timeout"))
+               else f"Couldn't refresh from Postiz ({text[:120]}) — showing the last saved copy.")
+        return {p["post_id"]: {"fetch_error": msg} for p in posts}
+
+    out = {}
+    for card in posts:
+        platforms, title, dates = [], None, []
+        for pid in card.get("postiz_ids") or [card["post_id"]]:
+            lp = listed.get(pid)
+            if lp is None:
+                continue
+            state = _POSTIZ_STATE.get(str(lp.get("state") or "").upper(), "scheduled")
+            platform = (lp.get("integration") or {}).get("providerIdentifier")
+            url = lp.get("releaseURL") if state == "published" else None
+            if platform == "tiktok" and url and "/video/" not in url:
+                url = None  # Postiz stores TikTok's inbox link when the upload is a draft
+            platforms.append({
+                "platform": platform, "status": state, "url": url,
+                "published_at": lp.get("publishDate") if state == "published" else None,
+                "error": ("Postiz reports this post failed — open it in Postiz for the reason."
+                          if state == "failed" else None),
+            })
+            dates.append(lp.get("publishDate"))
+            if title is None and platform == "youtube":
+                try:
+                    title = (json.loads(lp.get("settings") or "{}") or {}).get("title")
+                except Exception:  # noqa: BLE001
+                    pass
+        if not platforms:
+            out[card["post_id"]] = {"fetch_error": "Not found in Postiz (outside the listed window)."}
+            continue
+        dates = [d for d in dates if d]
+        out[card["post_id"]] = {
+            "title": title,
+            "status": _postiz_card_status(platforms),
+            "scheduled_for": max(dates) if dates else None,
+            "published_at": next((p["published_at"] for p in platforms if p.get("published_at")), None),
+            # The cover the adapter attached at publish time is the episode's own designed
+            # thumbnail; Postiz's list carries no media, so show that file.
+            "thumbnail_url": f"/episode/{card['episode_id']}/thumbnail",
+            "thumb_is_landscape": None,
+            "platforms_json": json.dumps(platforms),
+            "fetch_error": None,
+        }
+    return out
 
 
 def _cache_get(conn, post_id: str) -> Optional[dict]:
@@ -360,6 +468,22 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
     # only for the quick credential SELECT before the network call, per
     # ZernioProvider.get_post -- safe under WAL from multiple threads).
     fresh_rows = {}  # post_id -> live dict
+    postiz_fetch = [p for p in to_fetch if p.get("provider") == "postiz"]
+    if postiz_fetch:
+        from hypogeum.publishing.postiz import PostizProvider
+        for post_id, live in _fetch_live_postiz(
+                PostizProvider(), postiz_fetch, channel_id=channel_id, db_path=db_path).items():
+            p = next(x for x in postiz_fetch if x["post_id"] == post_id)
+            if live.get("fetch_error"):
+                live_error = live["fetch_error"]
+                old = cached_by_post.get(post_id) or {}
+                live = {k: old.get(k) for k in ("title", "status", "scheduled_for", "published_at",
+                                                "thumbnail_url", "thumb_is_landscape")}
+                live["platforms_json"] = old.get("platforms_json", "[]")
+                live["fetch_error"] = live_error
+            fresh_rows[post_id] = live
+            rows_for_display[post_id] = {**p, "channel_id": channel_id, **live}
+    to_fetch = [p for p in to_fetch if p.get("provider") != "postiz"]
     if to_fetch:
         from hypogeum.publishing.zernio import ZernioProvider
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -471,6 +595,7 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
             )
             out.append({
                 "post_id": p["post_id"],
+                "provider": p.get("provider", "zernio"),
                 "episode_id": p["episode_id"],
                 "deliverable_id": p["deliverable_id"],
                 "display_title": display_title,

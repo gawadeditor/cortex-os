@@ -48,9 +48,16 @@ def build_state(db_path=None) -> dict:
     initialize_schema(db_path)
     conn = get_connection(db_path)
     try:
+        postiz_ids = {r[0] for r in conn.execute(
+            "SELECT r.provider_publication_id FROM publishing_receipts r "
+            "JOIN publishing_attempts a ON a.attempt_id = r.attempt_id WHERE a.provider_id = 'postiz'")}
+        # A Postiz hold is released by the server only once youtube.json (the channel's
+        # OAuth token) is there; the laptop keeps releasing them itself until then.
         holds = [{"post_id": r["post_id"], "channel_id": r["channel_id"], "release_at": r["release_at"],
-                  "status": r["status"]}
-                 for r in conn.execute("SELECT post_id, channel_id, release_at, status FROM youtube_cover_holds")]
+                  "upload_at": r["upload_at"], "status": r["status"],
+                  "provider": "postiz" if r["post_id"] in postiz_ids else "zernio"}
+                 for r in conn.execute(
+                     "SELECT post_id, channel_id, release_at, upload_at, status FROM youtube_cover_holds")]
         confirmed = sorted(r["post_id"] for r in conn.execute("SELECT post_id FROM youtube_cover_confirmations"))
     finally:
         conn.close()

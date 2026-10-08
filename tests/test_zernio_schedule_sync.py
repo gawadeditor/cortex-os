@@ -70,7 +70,7 @@ def test_mirrors_zernio_posts_into_slots(dbp):
     _map(dbp, "p1", "hypogeum", "ep_a")
     _map(dbp, "p2", "hypogeum", "ep_b")
 
-    out = zss.sync_zernio_schedule(db_path=dbp, transport=_FakeTransport(posts), window_days_back=30)
+    out = zss.sync_zernio_schedule(db_path=dbp, transport=_FakeTransport(posts), window_days_back=400)
     assert out["ok"], out
     assert _slots(dbp, "hypogeum") == [("2026-09-06T14:00", "ep_a"), ("2026-09-07T14:00", "ep_b")]
 
@@ -84,7 +84,7 @@ def test_removes_stale_slots_not_on_zernio(dbp):
 
     posts = [_post("p1", "2026-09-06T14:00:00.000Z", "Ep A")]
     _map(dbp, "p1", "hypogeum", "ep_a")
-    out = zss.sync_zernio_schedule(db_path=dbp, transport=_FakeTransport(posts), window_days_back=30)
+    out = zss.sync_zernio_schedule(db_path=dbp, transport=_FakeTransport(posts), window_days_back=400)
     assert out["ok"]
     slots = _slots(dbp, "hypogeum")
     assert ("2026-09-06T14:00", "ep_a") in slots
@@ -93,7 +93,7 @@ def test_removes_stale_slots_not_on_zernio(dbp):
 
 def test_unmapped_post_is_counted_not_slotted(dbp):
     posts = [_post("p_unknown", "2026-09-06T14:00:00.000Z", "Totally Unknown Title")]
-    out = zss.sync_zernio_schedule(db_path=dbp, transport=_FakeTransport(posts), window_days_back=30)
+    out = zss.sync_zernio_schedule(db_path=dbp, transport=_FakeTransport(posts), window_days_back=400)
     assert out["ok"]
     assert out["unattributed"] == 1
     assert _slots(dbp, "hypogeum") == []
@@ -122,7 +122,7 @@ def test_attributes_via_ep_id_in_media_url_when_title_and_mapping_miss(dbp):
                         "url": "https://media.zernio.com/media/123_abc_main_ep_5f72565c.mp4"}],
         "platforms": [{"platform": "youtube", "status": "pending"}],
     }
-    out = zss.sync_zernio_schedule(db_path=dbp, transport=_FakeTransport([post]), window_days_back=30)
+    out = zss.sync_zernio_schedule(db_path=dbp, transport=_FakeTransport([post]), window_days_back=400)
     assert out["ok"], out
     assert out["unattributed"] == 0
     assert _slots(dbp, "twinkle_mini_tales") == [("2026-09-10T16:00", "ep_5f72565c")]
@@ -135,7 +135,7 @@ def test_earliest_post_wins_the_day(dbp):
     ]
     _map(dbp, "p_late", "hypogeum", "ep_late")
     _map(dbp, "p_early", "hypogeum", "ep_early")
-    out = zss.sync_zernio_schedule(db_path=dbp, transport=_FakeTransport(posts), window_days_back=30)
+    out = zss.sync_zernio_schedule(db_path=dbp, transport=_FakeTransport(posts), window_days_back=400)
     assert out["ok"]
     assert _slots(dbp, "hypogeum") == [("2026-09-06T14:00", "ep_early")]
 
@@ -159,7 +159,7 @@ def test_stale_local_slot_outside_grace_is_dropped_not_kept_forever(dbp):
 
     posts = [_post("p1", "2026-09-06T14:00:00.000Z", "Ep A")]
     _map(dbp, "p1", "hypogeum", "ep_a")
-    out = zss.sync_zernio_schedule(db_path=dbp, transport=_FakeTransport(posts), window_days_back=30)
+    out = zss.sync_zernio_schedule(db_path=dbp, transport=_FakeTransport(posts), window_days_back=400)
     assert out["ok"]
     eps = {ep for _, ep in _slots(dbp, "hypogeum")}
     assert "ep_ghost" not in eps           # old, unconfirmed -> dropped
@@ -171,6 +171,70 @@ def test_transport_error_is_no_raise(dbp):
     class _Boom:
         def get(self, **kw):
             raise RuntimeError("network down")
-    out = zss.sync_zernio_schedule(db_path=dbp, transport=_Boom(), window_days_back=30)
+    out = zss.sync_zernio_schedule(db_path=dbp, transport=_Boom(), window_days_back=400)
     assert out["ok"] is False
     assert "network down" in out["error"]
+
+
+# -- Postiz-published posts must keep their slots -----------------------------
+
+def test_postiz_posts_hold_their_slot_when_zernio_has_none(dbp, monkeypatch):
+    """A channel moved to Postiz: Zernio lists nothing for it, Postiz does.
+    Without folding Postiz in, the slot would be dropped and a second
+    episode could land on the same day."""
+    _map(dbp, "pz1", "hypogeum", "ep_pz")
+    monkeypatch.setattr(zss, "_fetch_postiz_posts", lambda *a, **k: [
+        {"_id": "pz1", "scheduledFor": "2026-09-08T14:00:00.000Z", "title": "", "platforms": []},
+    ])
+    out = zss.sync_zernio_schedule(db_path=dbp, transport=_FakeTransport([]), window_days_back=400)
+    assert out["ok"], out
+    assert _slots(dbp, "hypogeum") == [("2026-09-08T14:00", "ep_pz")]
+
+
+def test_postiz_outage_does_not_break_the_zernio_mirror(dbp, monkeypatch):
+    _map(dbp, "p1", "hypogeum", "ep_a")
+
+    def boom(*a, **k):
+        raise RuntimeError("postiz down")
+    monkeypatch.setattr(zss, "_fetch_postiz_posts", boom)
+    out = zss.sync_zernio_schedule(
+        db_path=dbp, transport=_FakeTransport([_post("p1", "2026-09-06T14:00:00.000Z", "Ep A")]),
+        window_days_back=400,
+    )
+    assert out["ok"], out
+    assert "postiz down" in out["postiz_error"]
+    assert _slots(dbp, "hypogeum") == [("2026-09-06T14:00", "ep_a")]
+
+
+def test_normalize_postiz_post_skips_failed_and_dateless():
+    n = zss._normalize_postiz_post
+    assert n({"id": "a", "publishDate": "2026-09-08T14:00:00.000Z", "state": "QUEUE"})["_id"] == "a"
+    assert n({"id": "a", "publishDate": "2026-09-08T14:00:00.000Z", "state": "ERROR"}) is None
+    assert n({"id": "a"}) is None
+
+
+def test_postiz_fetch_is_skipped_when_nothing_is_bound_to_postiz(dbp):
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    assert zss._fetch_postiz_posts(dbp, floor=now - timedelta(days=3), now=now) == []
+
+
+def test_postiz_fetch_is_cached_between_syncs(dbp, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+    calls = []
+
+    class _T:
+        def get(self, *, url, headers, timeout):
+            calls.append(url)
+            return SimpleNamespace(status_code=200, json_body={"posts": [
+                {"id": "x", "publishDate": "2026-09-08T14:00:00.000Z", "state": "QUEUE"}]})
+
+    prov = SimpleNamespace(_transport=_T(), _base_url="http://pz/api", _headers=lambda db: {})
+    monkeypatch.setitem(zss._postiz_cache, "key", None)
+    now = datetime.now(timezone.utc)
+    kw = dict(floor=now - timedelta(days=3), now=now, provider=prov)
+    a = zss._fetch_postiz_posts(dbp, **kw)
+    b = zss._fetch_postiz_posts(dbp, **kw)
+    assert a == b and len(a) == 1
+    assert len(calls) == 1, "second sync inside the interval must not hit the API (30 req/h limit)"

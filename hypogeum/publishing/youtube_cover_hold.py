@@ -99,6 +99,62 @@ def _drift(before: dict, after: dict) -> list[str]:
     return problems
 
 
+def plan_hold(release_at: datetime, *, now: Optional[datetime] = None) -> Optional[dict]:
+    """{release_at, upload_at} for a post that should be held, or None when
+    the slot is too close to hold (the same rule apply_hold uses)."""
+    now = now or _now()
+    if release_at.tzinfo is None:
+        release_at = release_at.replace(tzinfo=timezone.utc)
+    if release_at - now < _MIN_RELEASE_GAP:
+        return None
+    return {"release_at": release_at, "upload_at": max(release_at - LEAD, now + _MIN_UPLOAD_DELAY)}
+
+
+def record_hold(post_id: str, channel_id: str, episode_id: Optional[str], *, release_at: datetime,
+                upload_at: datetime, db_path=None) -> None:
+    """Record a hold applied at publish time (Postiz): the post was created
+    already private at `upload_at`, so there is nothing to move afterwards."""
+    initialize_schema(db_path)
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO youtube_cover_holds (post_id, channel_id, episode_id, release_at, "
+            "upload_at, status, held_at, released_at, last_error) VALUES (?,?,?,?,?, 'held', ?, NULL, NULL)",
+            (post_id, channel_id, episode_id, _zernio_ts(release_at), _zernio_ts(upload_at),
+             _now().isoformat()))
+        conn.commit()
+    finally:
+        conn.close()
+    log.info("youtube_cover_hold_recorded", post_id=post_id, channel_id=channel_id,
+             release_at=_zernio_ts(release_at), upload_at=_zernio_ts(upload_at))
+
+
+def _is_postiz_post(db_path, post_id: str) -> bool:
+    conn = get_connection(db_path)
+    try:
+        return conn.execute(
+            "SELECT 1 FROM publishing_receipts r JOIN publishing_attempts a ON a.attempt_id = r.attempt_id "
+            "WHERE r.provider_publication_id = ? AND a.provider_id = 'postiz' LIMIT 1", (post_id,),
+        ).fetchone() is not None
+    finally:
+        conn.close()
+
+
+def _release_postiz(post_id: str, channel_id: str, upload_at: str, *, db_path=None, postiz=None,
+                    set_privacy=None) -> Optional[str]:
+    """Flip a Postiz-published YouTube video public. Returns an error text or None."""
+    from hypogeum.publishing.postiz import PostizProvider
+    from hypogeum.publishing.youtube_privacy import set_video_privacy
+    postiz = postiz or PostizProvider()
+    post = postiz.get_post(post_id, around=_parse(upload_at), db_path=db_path)
+    if post is None:
+        return "Postiz post not found in its list window"
+    if str(post.get("state") or "").upper() != "PUBLISHED" or not post.get("release_id"):
+        return f"Postiz has not published the private upload yet (state={post.get('state')})"
+    res = (set_privacy or set_video_privacy)(channel_id, post["release_id"], "public", db_path=db_path)
+    return res.get("error")
+
+
 def get_holds(db_path=None) -> dict:
     initialize_schema(db_path)
     conn = get_connection(db_path)
@@ -205,9 +261,12 @@ def release_due(*, provider=None, db_path=None, now: Optional[datetime] = None) 
             out.append({"post_id": pid, "status": "late"})
             continue
         try:
-            z = z or _provider(provider)
-            res = z.set_youtube_privacy(pid, "public", db_path=db_path, channel_id=h["channel_id"])
-            err = res.get("error")
+            if _is_postiz_post(db_path, pid):
+                err = _release_postiz(pid, h["channel_id"], h["upload_at"], db_path=db_path)
+            else:
+                z = z or _provider(provider)
+                res = z.set_youtube_privacy(pid, "public", db_path=db_path, channel_id=h["channel_id"])
+                err = res.get("error")
         except Exception as exc:  # noqa: BLE001
             err = str(exc)
         if err:
@@ -246,6 +305,8 @@ def _scheduled_youtube_posts(db_path) -> list:
     for ch in channels:
         for it in get_content_grid(ch, db_path=db_path):
             has_yt = any(p.get("platform") == "youtube" for p in it.get("platforms") or [])
+            if it.get("provider") == "postiz":
+                continue  # held at publish time (record_hold), nothing to move afterwards
             if it.get("status") == "scheduled" and has_yt and not it.get("is_landscape"):
                 out.append((it["post_id"], ch, it.get("episode_id")))
     return out

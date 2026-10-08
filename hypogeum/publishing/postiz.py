@@ -197,6 +197,18 @@ def _resolve_postiz_credential(db_path, channel_id: Optional[str] = None,
     return publishing_key("postiz", channel_id=channel_id, workspace_id=workspace_id, db_path=db_path)
 
 
+def split_staged_media_url(url: str) -> tuple:
+    """(url_without_fragment, postiz_media_id or None) — the inverse of the
+    ``#postiz-id=<id>`` marker PostizMediaStagingProvider appends."""
+    from urllib.parse import unquote
+    base, _, fragment = (url or "").partition("#")
+    if fragment.startswith("postiz-id="):
+        media_id = unquote(fragment[len("postiz-id="):])
+        if media_id:
+            return base, media_id
+    return url, None
+
+
 def _to_postiz_html(text: Optional[str]) -> str:
     """Plain text -> one <p> per line, entity-escaped. Postiz's "normal"
     editor path decodes &amp;/&quot;/… only when the content contains <p>;
@@ -416,8 +428,13 @@ class PostizProvider:
         return {"Authorization": credential, "Content-Type": "application/json"}
 
     def _import_media(self, url: str, headers: dict) -> dict:
-        """POST /upload-from-url -> {id, path}. Raises PostizMediaError on any
+        """{id, path} for a media URL. A URL staged by PostizMediaStagingProvider
+        already lives in Postiz (id in the fragment) and is used as is; any other
+        URL is imported with POST /upload-from-url. Raises PostizMediaError on any
         non-success (nothing has been posted yet, so this is never ambiguous)."""
+        url, staged_id = split_staged_media_url(url)
+        if staged_id:
+            return {"id": staged_id, "path": url}
         try:
             resp = self._transport.post(
                 url=f"{self._base_url}/upload-from-url", headers=headers,
@@ -515,6 +532,19 @@ class PostizProvider:
         if platform == "youtube" and platform_specific.get("title"):
             title = platform_specific["title"]
 
+        # Cover hold (see hypogeum.publishing.youtube_cover_hold): a YouTube Short
+        # uploads PRIVATE ~24h before its slot so the designed cover can be set in
+        # Studio, and is flipped public at the slot once the cover is confirmed.
+        hold = None
+        if platform == "youtube" and options.pop("cover_hold", False) and scheduled_for \
+                and not publish_now and not is_draft:
+            from hypogeum.publishing.youtube_cover_hold import plan_hold
+            hold = plan_hold(scheduled_for)
+            if hold:
+                options["privacy"] = "private"
+                scheduled_for = hold["upload_at"]
+        options.pop("cover_hold", None)
+
         # -- pure validation, before any DB/credential/ledger access --
         if not media:
             raise PostizMediaError("PostizProvider.publish() requires at least one MediaReference")
@@ -576,11 +606,16 @@ class PostizProvider:
         finally:
             del headers  # credential never referenced past the calls above
 
-        return self._handle_create_response(
+        result = self._handle_create_response(
             resp, platform=platform, deliverable_type=deliverable_type, guard=guard,
             db_path=db_path, provider_account_id=account["provider_account_id"],
             integration_id=account["external_account_id"],
         )
+        if hold and result.get("status") == "published" and result.get("provider_content_id"):
+            from hypogeum.publishing.youtube_cover_hold import record_hold
+            record_hold(result["provider_content_id"], channel_id, episode_id,
+                        release_at=hold["release_at"], upload_at=hold["upload_at"], db_path=db_path)
+        return result
 
     def publish_multi_platform(self, *, platforms: List[str], deliverable_type: str,
                                episode_id: str, **kwargs) -> Dict[str, dict]:

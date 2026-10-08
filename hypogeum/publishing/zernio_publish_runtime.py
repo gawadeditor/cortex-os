@@ -442,13 +442,21 @@ def publish_episode_package(
             blocked=True, blocked_reason=str(exc), deliverables=[],
         )
 
-    staging = media_staging_provider if media_staging_provider is not None else ZernioMediaStagingProvider()
     if publishing_provider is not None:
         routed = [(publishing_provider, list(platforms))]
     else:
         routed = _route_platforms_by_binding(
             platforms, channel_id=channel_id, logical_alias=logical_alias, db_path=db_path,
         )
+    if media_staging_provider is not None:
+        staging = media_staging_provider
+    elif publishing_provider is None and all(type(p).__name__ == "PostizProvider" for p, _ in routed):
+        # Every platform publishes through Postiz: stage straight into its own
+        # media library, no Zernio presigned upload (and no Zernio dependency).
+        from hypogeum.publishing.postiz_media_staging import PostizMediaStagingProvider
+        staging = PostizMediaStagingProvider()
+    else:
+        staging = ZernioMediaStagingProvider()
     publisher = routed[0][0]
     supports_aggregation = all(hasattr(p, "publish_multi_platform") for p, _ in routed)
     if not supports_aggregation and len(routed) > 1:
@@ -540,6 +548,13 @@ def publish_episode_package(
             platform_results = {}
             group_error = None
             for group_publisher, group_platforms in routed:
+                # Postiz cannot change a YouTube video's privacy after upload, so a
+                # vertical (Short) cover is held by uploading private early; the adapter
+                # records the hold and the cover-hold sweep flips it public later.
+                _extra = {}
+                if type(group_publisher).__name__ == "PostizProvider" and "youtube" in group_platforms \
+                        and _is_vertical_image(deliverable.thumbnail_local_path):
+                    _extra["platform_options"] = {"youtube": {"cover_hold": True}}
                 try:
                     platform_results.update(group_publisher.publish_multi_platform(
                         platforms=group_platforms,
@@ -561,6 +576,7 @@ def publish_episode_package(
                         platform_settings=_eff_platform_settings,
                         platform_specific_data=_eff_platform_specific,
                         root_fields=deliverable.root_fields,
+                        **_extra,
                     ))
                 except Exception as exc:
                     if len(routed) == 1:
@@ -642,6 +658,18 @@ def publish_episode_package(
         episode_id=package.episode_id, platforms=platforms,
         blocked=False, deliverables=outcomes,
     )
+
+
+def _is_vertical_image(path) -> bool:
+    """True when the cover image is portrait (a Short's cover). False on any doubt."""
+    if path is None:
+        return False
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            return im.height > im.width
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _staged_to_dict(staged) -> dict:

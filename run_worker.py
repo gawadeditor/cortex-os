@@ -312,6 +312,19 @@ def _sync_analytics_background(db_path: Path, config) -> None:
     except Exception as exc:
         log.error("analytics_sync_error provider=zernio error=%s", exc)
 
+    # Postiz — posts a channel publishes through Postiz never match Zernio's
+    # analytics, so they are read from Postiz itself (no-op until one exists).
+    try:
+        from hypogeum.publishing.postiz_analytics_sync import sync_postiz_analytics
+        pz = sync_postiz_analytics(db_path=db_path, window_days=7)
+        if pz.get("posts_read") or pz.get("error"):
+            log.info(
+                "analytics_sync_complete provider=postiz rows=%d posts=%d skipped=%d error=%s",
+                pz.get("rows_written", 0), pz.get("posts_read", 0), pz.get("skipped", 0), pz.get("error"),
+            )
+    except Exception as exc:
+        log.error("analytics_sync_error provider=postiz error=%s", exc)
+
     # YouTube Analytics API — optional richer retention pass.
     try:
         yt_ok = bool(

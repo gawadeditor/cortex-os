@@ -138,3 +138,33 @@ def test_postiz_provider_is_constructible_without_config_access():
     # configuration or touch the network.
     p = PostizProvider()
     assert p.provider_id == "postiz" and p._explicit_base_url is None
+
+
+def _stage_spy(monkeypatch):
+    from hypogeum.publishing import postiz_media_staging as pms
+    from hypogeum.publishing.media_staging import StagedMediaResult
+    seen = []
+
+    def fake_stage(self, source, *, db_path=None):
+        seen.append(source.deliverable_id)
+        return StagedMediaResult(
+            media_staging_provider_id="postiz", public_url="https://pz.example/u/a.mp4#postiz-id=m1",
+            source_sha256=source.sha256, size_bytes=source.size_bytes, mime_type=source.mime_type,
+            created_at="2026-10-09T00:00:00+00:00", status="uploaded")
+    monkeypatch.setattr(pms.PostizMediaStagingProvider, "stage", fake_stage)
+    return seen
+
+
+def test_all_postiz_routing_stages_into_postiz_not_zernio(db_path, tmp_path, monkeypatch):
+    seen = _stage_spy(monkeypatch)
+    pz = PostizProvider()
+    fake = _FakeMulti("postiz")
+    pz.publish_multi_platform = fake.publish_multi_platform
+    monkeypatch.setattr(runtime, "_route_platforms_by_binding", lambda *a, **k: [(pz, ["facebook"])])
+    result = publish_episode_package(
+        _package(tmp_path), platforms=["facebook"], channel_id=CHANNEL, db_path=db_path,
+        schedule_plan=SchedulePlan(channel_id=CHANNEL, entries={"main_episode": DeliverableSchedule(publish_now=True)}),
+    )
+    (outcome,) = result.deliverables
+    assert outcome.status == "published" and seen == ["main_episode"]
+

@@ -256,6 +256,13 @@ def publish_channel_release(
         except Exception:  # noqa: BLE001
             pass
 
+    # A per-platform override slot (evidence-based, e.g. YouTube "Saturday
+    # 15:00") must not stack two episodes on one platform on one day — the
+    # ledger above only spaces out the base slot (2026-10-08).
+    if not publish_now:
+        from hypogeum.publishing.platform_slot_guard import resolve_platform_collisions
+        schedule_result = resolve_platform_collisions(channel_id, episode_id, schedule_result, db_path=db_path)
+
     outcome = publish_episode_package(
         package, platforms=passed_platforms, channel_id=channel_id, db_path=db_path,
         schedule_plan=schedule_result.schedule_plan, logical_alias=logical_alias,

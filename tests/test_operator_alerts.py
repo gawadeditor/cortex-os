@@ -561,3 +561,35 @@ def test_buffer_gap_counts_episodes_not_dates_so_a_later_youtube_date_still_cove
     conn.commit()
     conn.close()
     assert list(oa.check_buffer_gap(db, later)) == ["buffer:ch"]     # with no episode the 55h slot is uncovered
+
+
+# --- long-silence backstop: production stalled for days (2026-09-07..10-03: 26 days, nobody told) ---
+
+def test_production_stalled_alerts_with_the_days_and_the_reason(db, monkeypatch):
+    monkeypatch.setenv("PRODUCTION_BUFFER_TARGET", "3")
+    _channel_with_slots(db, monkeypatch, filled_slots=[])
+    _queue_row(db, "ch", "ep_old", "completed", NOW - timedelta(days=5),
+               completed_at=(NOW - timedelta(days=5)).isoformat())
+    set_worker_control("stop_requested", "1", db_path=db)
+    got = oa.check_production_stalled(db, NOW)
+    assert list(got) == ["stalled:ch"]
+    assert "من 5 يوم" in got["stalled:ch"][0] and "حلقات جديدة" in got["stalled:ch"][0]
+    assert "النشر شغال من المخزون" in got["stalled:ch"][1]          # not "the factory is down"
+    assert "متوقف بأمر" in got["stalled:ch"][1] and "0 من 3" in got["stalled:ch"][1]
+
+
+def test_production_stalled_is_quiet_when_recent_full_or_never_produced(db, monkeypatch):
+    monkeypatch.setenv("PRODUCTION_BUFFER_TARGET", "3")
+    _channel_with_slots(db, monkeypatch, filled_slots=[])
+    assert oa.check_production_stalled(db, NOW) == {}                       # never finished an episode
+    _queue_row(db, "ch", "ep_recent", "completed", NOW - timedelta(days=1),
+               completed_at=(NOW - timedelta(days=1)).isoformat())
+    assert oa.check_production_stalled(db, NOW) == {}                       # finished 1 day ago
+    conn = get_connection(db)
+    conn.execute("UPDATE run_queue SET completed_at = ?, created_at = ?, queued_at = ?",
+                 ((NOW - timedelta(days=9)).isoformat(),) * 3)
+    conn.commit()
+    conn.close()
+    assert list(oa.check_production_stalled(db, NOW)) == ["stalled:ch"]     # 9 days idle, buffer empty
+    monkeypatch.setenv("PRODUCTION_BUFFER_TARGET", "0")
+    assert oa.check_production_stalled(db, NOW) == {}                       # buffer guard disabled

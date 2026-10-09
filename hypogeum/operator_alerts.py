@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS operator_alert_checks (
 
 # per-check minimum interval (seconds) — run_operator_checks is called from
 # every worker iteration (~60s); the network-backed checks run less often.
-_INTERVALS = {"adapters": 300, "run_failures": 60, "queue_failures": 120, "buffer_gap": 1800, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
+_INTERVALS = {"adapters": 300, "run_failures": 60, "queue_failures": 120, "buffer_gap": 1800, "production_stalled": 1800, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
               "youtube_covers": 300, "stuck_releases": 300, "youtube_flip_auth": 3600, "posts": 1800, "unpublished": 300, "accounts": 600, "archive": 300, "archive_backlog": 600, "disk": 1800}
 _DASHBOARD = "http://127.0.0.1:5001"
 _CREDIT_LOW_USD = 3.0
@@ -497,6 +497,70 @@ def check_buffer_gap(db_path, now: datetime) -> dict:
             _ws_extra(ch, db_path, (f"{ch}: no episode is ready for the next publish slot",
                                     f"First slot without an episode: {slot.isoformat()} (UTC), about {int(hours)}h away, "
                                     "and nothing is queued or in production for it.")))
+    return out
+
+
+_STALL_ALERT_DAYS = 3   # no episode finished for this long while the buffer is below target
+
+
+def check_production_stalled(db_path, now: datetime) -> dict:
+    """A channel whose buffer is below target and that has not FINISHED an
+    episode for 3+ days, whatever the reason (worker stopped on purpose, paused,
+    failing, stuck). 2026-09-07..10-03: production sat stopped for 26 days and
+    nothing said so. Failures and pauses have their own alerts; this one is the
+    long-silence backstop, and says how long it has been. One alert per channel
+    (not repeated while open). Channels that never finished an episode, or whose
+    buffer is full, are skipped."""
+    from hypogeum.db import get_worker_control
+    dbp = Path(db_path) if db_path else None
+    conn = _conn(db_path, ddl=False)
+    try:
+        channels = [r[0] for r in conn.execute(
+            "SELECT DISTINCT channel_id FROM schedules WHERE status = 'active' AND channel_id IS NOT NULL")]
+        last_done = {r[0]: r[1] for r in conn.execute(
+            "SELECT channel_id, MAX(COALESCE(completed_at, queued_at)) FROM run_queue "
+            "WHERE status = 'completed' GROUP BY channel_id")}
+        from hypogeum.scheduler import _PRODUCTION_BUFFER_TARGET, _env_int, channel_buffer_depth
+        target = _env_int("PRODUCTION_BUFFER_TARGET", _PRODUCTION_BUFFER_TARGET)
+        depths = {ch: channel_buffer_depth(ch, conn, now=now) for ch in channels} if target else {}
+    except Exception:  # noqa: BLE001
+        return {}
+    finally:
+        conn.close()
+    if not target:
+        return {}
+    from hypogeum.channel_config import get_channel_operations_profile
+    stopped = get_worker_control("stop_requested", "0", db_path=dbp) == "1"
+    paused = get_worker_control("queue_paused", "0", db_path=dbp) == "1"
+    out = {}
+    for ch in channels:
+        done = last_done.get(ch)
+        if not done or depths.get(ch, target) >= target:
+            continue
+        try:
+            profile = get_channel_operations_profile(ch, db_path=dbp)
+            if profile is None or not getattr(profile, "production_enabled", True):
+                continue
+            idle = now - datetime.fromisoformat(str(done).replace("Z", "+00:00"))
+        except Exception:  # noqa: BLE001
+            continue
+        if idle < timedelta(days=_STALL_ALERT_DAYS):
+            continue
+        days = idle.days
+        if stopped:
+            why = "الـ worker متوقف بأمر (stop)."
+        elif paused:
+            why = "الإنتاج موقوف (paused): " + (get_worker_control("queue_paused_reason", "", db_path=dbp) or "سبب غير مكتوب")
+        else:
+            why = "مفيش إيقاف مسجّل. شوف تنبيهات فشل الإنتاج أو حالة الـ worker."
+        last_local = (datetime.fromisoformat(str(done).replace("Z", "+00:00")) + timedelta(hours=4)).strftime("%d %b")
+        out[f"stalled:{ch}"] = (
+            f"مفيش حلقات جديدة بتتنتج على {ch} من {days} يوم",
+            f"ده عن إنتاج حلقات جديدة لقناة {ch} بس. النشر شغال من المخزون المتبقي.\n"
+            f"آخر حلقة خلّص إنتاجها: {last_local} (دبي).\n"
+            f"الحلقات الجاهزة أو الشغالة دلوقتي: {depths[ch]} من {target}.\n{why}",
+            _ws_extra(ch, db_path, (f"{ch}: production has been stalled for {days} days",
+                                    f"No episode finished since {done}. Buffer {depths[ch]} of {target}.")))
     return out
 
 
@@ -959,6 +1023,7 @@ def run_operator_checks(*, db_path=None, config=None, now: Optional[datetime] = 
         ("run_failures", "run_failed:", lambda: check_run_failures(db_path, now)),
         ("queue_failures", "queue_failed:", lambda: check_queue_failures(db_path, now)),
         ("buffer_gap", "buffer:", lambda: check_buffer_gap(db_path, now)),
+        ("production_stalled", "stalled:", lambda: check_production_stalled(db_path, now)),
         ("blocking_signals", "signal:", lambda: check_blocking_signals(db_path)),
         ("youtube_covers", "cover:", lambda: check_youtube_covers(db_path, now)),
         ("stuck_releases", "stuckrelease:", lambda: check_stuck_releases(db_path, now)),

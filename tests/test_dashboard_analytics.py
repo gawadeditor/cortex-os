@@ -131,6 +131,34 @@ class TestDashboardAnalyticsReads:
         assert "ep_alpha" in ep_ids
         assert "ep_beta"  in ep_ids
 
+    def test_overview_lists_newest_episode_first_even_with_fewest_views(self, db_path):
+        # Ranking by views used to cap the table at 30 and bury the newest
+        # (lowest-view) episodes, so the page looked stale.
+        conn = get_connection(db_path)
+        try:
+            for i in range(32):
+                conn.execute(
+                    "INSERT INTO platform_analytics (record_id, episode_id, platform, snapshot_date, "
+                    "window_days, views, source, imported_at, metadata_version) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (f"r{i}", f"ep_old{i:02d}", "youtube", f"2026-09-{(i % 28) + 1:02d}", 1,
+                     1000 + i, "api", "2026-10-09T20:00:00+00:00", 1))
+            conn.execute(
+                "INSERT INTO platform_analytics (record_id, episode_id, platform, snapshot_date, "
+                "window_days, views, source, imported_at, metadata_version) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                ("rnew", "ep_newest", "youtube", "2026-10-09", 1, 3, "api",
+                 "2026-10-09T20:06:00+00:00", 1))
+            conn.commit()
+        finally:
+            conn.close()
+        overview = get_analytics_overview(db_path=db_path)
+        ids = [e["episode_id"] for e in overview["episodes"]]
+        assert ids[0] == "ep_newest"
+        assert len(ids) == 33
+        assert overview["last_synced"] == "2026-10-09T20:06:00+00:00"
+        assert overview["last_synced_uae"] == "10 Oct 2026, 00:06 (UAE)"
+
     def test_get_platform_summary_empty(self, db_path):
         summary = get_platform_summary("youtube", db_path=db_path)
         assert summary["platform"] == "youtube"

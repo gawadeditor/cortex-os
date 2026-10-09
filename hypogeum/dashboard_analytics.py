@@ -110,6 +110,21 @@ def get_analytics_overview(db_path: Optional[Path] = None,
         }
 
 
+def _uae_label(iso: Optional[str]) -> Optional[str]:
+    """'2026-10-09T20:06:24+00:00' -> '09 Oct 2026, 00:06 (UAE)'; None if unparseable."""
+    if not iso:
+        return None
+    try:
+        from datetime import datetime, timezone
+        from zoneinfo import ZoneInfo
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(ZoneInfo("Asia/Dubai")).strftime("%d %b %Y, %H:%M") + " (UAE)"
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _overview_from_analytics(conn, channel_id: Optional[str] = None) -> dict:
     """Analytics overview computed straight from platform_analytics (real
     `source='api'` rows only, deduplicated to the latest snapshot per
@@ -142,10 +157,16 @@ def _overview_from_analytics(conn, channel_id: Optional[str] = None) -> dict:
         if not rows:
             return empty
 
-    # latest snapshot per (key, platform)
+    # latest snapshot per (key, platform); first_seen = earliest snapshot per
+    # episode, the closest thing to a publish date that analytics rows carry.
     latest: dict = {}
+    first_seen: dict = {}
     for r in rows:
         latest.setdefault((r["episode_id"], r["platform"]), r)
+        d = r["snapshot_date"] or ""
+        if d and (r["episode_id"] not in first_seen or d < first_seen[r["episode_id"]]):
+            first_seen[r["episode_id"]] = d
+    last_synced = max((r["imported_at"] for r in rows if r.get("imported_at")), default=None)
 
     titles = _episode_title_map(conn, {k for k, _ in latest})
 
@@ -170,7 +191,8 @@ def _overview_from_analytics(conn, channel_id: Optional[str] = None) -> dict:
         ep = episodes.setdefault(key, {
             "episode_id": key, "episode_title": titles.get(key) or key,
             "platforms_tracked": 0, "total_views": 0,
-            "avg_ctr": None, "avg_view_pct": None, "insight_count": 0})
+            "avg_ctr": None, "avg_view_pct": None, "insight_count": 0,
+            "first_seen": first_seen.get(key)})
         ep["platforms_tracked"] += 1
         ep["total_views"] += r["views"] or 0
         if r["ctr"] is not None:
@@ -189,9 +211,9 @@ def _overview_from_analytics(conn, channel_id: Optional[str] = None) -> dict:
     _eps = [e for e in episodes.values()
             if _real_ep.match(str(e.get("episode_id") or ""))
             or titles.get(e.get("episode_id"))]
-    _eps = sorted(_eps, key=lambda e: -(e["total_views"] or 0))
-    if channel_id is None:
-        _eps = _eps[:30]  # matches the old view-backed path's cap
+    # Newest first: ranking by views buried the latest episodes (they have
+    # the fewest views yet) and made the page look stale.
+    _eps = sorted(_eps, key=lambda e: (e.get("first_seen") or "", e["total_views"] or 0), reverse=True)
 
     pending_count = total_insights = 0
     try:
@@ -207,6 +229,8 @@ def _overview_from_analytics(conn, channel_id: Optional[str] = None) -> dict:
     return {
         "platform_breakdown":   platform_breakdown,
         "recent_snapshots":     rows[:10],
+        "last_synced":          last_synced,
+        "last_synced_uae":      _uae_label(last_synced),
         "episodes":             _eps,
         "pending_action_count": pending_count if channel_id is None else 0,
         "total_insights":       total_insights if channel_id is None else 0,

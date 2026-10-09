@@ -73,7 +73,7 @@
   <div class="stat-card">
     <div class="stat-lbl">{{ icon('channels') }} Platforms reporting</div>
     <div class="stat-val">{{ _plat_count }}</div>
-    <div class="stat-note">of 4 connected</div>
+    <div class="stat-note">of {{ valid_platforms | length }} platforms</div>
   </div>
   <div class="stat-card is-accent">
     <div class="stat-lbl">{{ icon('live') }} Total views</div>
@@ -96,9 +96,10 @@
 </div>
 
 {# ── Views trend ────────────────────────────────────────────────────── #}
-{% set _trend = _eps | reverse | list %}
+{% set _trend = _eps[:30] | reverse | list %}
 {% set _views_series = _trend | map(attribute='total_views') | map('default', 0) | map('int') | list %}
 <div class="sec-head"><h2>Views across your last {{ _views_series | length }} episodes</h2></div>
+{% if overview.last_synced_uae %}<p class="muted" style="font-size:12px; margin:-6px 0 10px;">Last synced from the platforms: {{ overview.last_synced_uae }}</p>{% endif %}
 <div class="card">
   {{ areachart(_views_series, tone='accent') }}
   <div class="row" style="justify-content:space-between; margin-top:10px;">

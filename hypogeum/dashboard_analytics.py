@@ -110,6 +110,9 @@ def get_analytics_overview(db_path: Optional[Path] = None,
         }
 
 
+_STALE_DAYS = 30  # see _overview_from_analytics: frozen counters are not current KPIs
+
+
 def _uae_label(iso: Optional[str]) -> Optional[str]:
     """'2026-10-09T20:06:24+00:00' -> '09 Oct 2026, 00:06 (UAE)'; None if unparseable."""
     if not iso:
@@ -166,6 +169,26 @@ def _overview_from_analytics(conn, channel_id: Optional[str] = None) -> dict:
         d = r["snapshot_date"] or ""
         if d and (r["episode_id"] not in first_seen or d < first_seen[r["episode_id"]]):
             first_seen[r["episode_id"]] = d
+
+    # Frozen counters: a (post, platform) whose newest snapshot is more than
+    # _STALE_DAYS older than the freshest snapshot in the data is no longer
+    # being refreshed by any sync (e.g. TikTok posts that left Zernio's feed).
+    # Its last-known views would otherwise count as current KPIs. Measured
+    # against the data's own newest date, never the wall clock.
+    stale_views = 0
+    stale_count = 0
+    newest = max((r["snapshot_date"] for r in rows if r["snapshot_date"]), default=None)
+    if newest:
+        from datetime import date as _date, timedelta as _td
+        try:
+            cutoff = (_date.fromisoformat(str(newest)[:10]) - _td(days=_STALE_DAYS)).isoformat()
+        except ValueError:
+            cutoff = None
+        if cutoff:
+            for k in [k for k, r in latest.items() if (r["snapshot_date"] or "9999") < cutoff]:
+                stale_views += latest[k]["views"] or 0
+                stale_count += 1
+                del latest[k]
     last_synced = max((r["imported_at"] for r in rows if r.get("imported_at")), default=None)
 
     titles = _episode_title_map(conn, {k for k, _ in latest})
@@ -230,6 +253,8 @@ def _overview_from_analytics(conn, channel_id: Optional[str] = None) -> dict:
         "platform_breakdown":   platform_breakdown,
         "recent_snapshots":     rows[:10],
         "last_synced":          last_synced,
+        "stale_count":          stale_count,
+        "stale_views":          stale_views,
         "last_synced_uae":      _uae_label(last_synced),
         "episodes":             _eps,
         "pending_action_count": pending_count if channel_id is None else 0,

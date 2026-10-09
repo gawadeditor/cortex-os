@@ -100,6 +100,7 @@
 {% set _views_series = _trend | map(attribute='total_views') | map('default', 0) | map('int') | list %}
 <div class="sec-head"><h2>Views across your last {{ _views_series | length }} episodes</h2></div>
 {% if overview.last_synced_uae %}<p class="muted" style="font-size:12px; margin:-6px 0 10px;">Last synced from the platforms: {{ overview.last_synced_uae }}</p>{% endif %}
+{% if overview.stale_count %}<p class="muted" style="font-size:12px; margin:-6px 0 10px;">{{ overview.stale_count }} older post{{ '' if overview.stale_count == 1 else 's' }} no longer refreshed by any sync ({{ "{:,}".format(overview.stale_views) }} views) {{ 'is' if overview.stale_count == 1 else 'are' }} left out of the totals.</p>{% endif %}
 <div class="card">
   {{ areachart(_views_series, tone='accent') }}
   <div class="row" style="justify-content:space-between; margin-top:10px;">

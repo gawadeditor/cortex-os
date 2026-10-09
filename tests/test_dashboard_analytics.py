@@ -141,7 +141,7 @@ class TestDashboardAnalyticsReads:
                     "INSERT INTO platform_analytics (record_id, episode_id, platform, snapshot_date, "
                     "window_days, views, source, imported_at, metadata_version) "
                     "VALUES (?,?,?,?,?,?,?,?,?)",
-                    (f"r{i}", f"ep_old{i:02d}", "youtube", f"2026-09-{(i % 28) + 1:02d}", 1,
+                    (f"r{i}", f"ep_old{i:02d}", "youtube", f"2026-10-0{(i % 8) + 1}", 1,
                      1000 + i, "api", "2026-10-09T20:00:00+00:00", 1))
             conn.execute(
                 "INSERT INTO platform_analytics (record_id, episode_id, platform, snapshot_date, "
@@ -158,6 +158,27 @@ class TestDashboardAnalyticsReads:
         assert len(ids) == 33
         assert overview["last_synced"] == "2026-10-09T20:06:00+00:00"
         assert overview["last_synced_uae"] == "10 Oct 2026, 00:06 (UAE)"
+
+    def test_frozen_counters_are_left_out_of_the_totals(self, db_path):
+        # A post no sync has refreshed for >30 days (relative to the data's
+        # own newest snapshot) is a frozen counter, not a current KPI.
+        conn = get_connection(db_path)
+        try:
+            for rid, ep, day, views in (("f1", "ep_fresh", "2026-10-09", 100),
+                                        ("f2", "ep_frozen", "2026-06-28", 863)):
+                conn.execute(
+                    "INSERT INTO platform_analytics (record_id, episode_id, platform, snapshot_date, "
+                    "window_days, views, source, imported_at, metadata_version) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (rid, ep, "tiktok", day, 1, views, "api", "2026-10-09T20:00:00+00:00", 1))
+            conn.commit()
+        finally:
+            conn.close()
+        overview = get_analytics_overview(db_path=db_path)
+        assert overview["platform_breakdown"]["tiktok"]["total_views"] == 100
+        assert overview["stale_count"] == 1
+        assert overview["stale_views"] == 863
+        assert [e["episode_id"] for e in overview["episodes"]] == ["ep_fresh"]
 
     def test_get_platform_summary_empty(self, db_path):
         summary = get_platform_summary("youtube", db_path=db_path)

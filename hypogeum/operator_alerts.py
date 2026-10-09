@@ -420,13 +420,20 @@ _BUFFER_ALERT_HOURS = 72   # the next EMPTY publish slot is this close and nothi
 
 
 def check_buffer_gap(db_path, now: datetime) -> dict:
-    """A channel whose next empty publish slot is close, with no episode queued
-    or in production for it. The slot would go out empty. 72h leaves time for
-    the ~36h production lead the backward plan needs."""
+    """A channel with more upcoming publish slots than episodes to fill them,
+    where the first uncovered slot is close and nothing is queued or in
+    production. 72h leaves time for the ~36h production lead the plan needs.
+
+    Counts EPISODES against SLOTS rather than matching episode->slot dates:
+    channel_publish_slots mirrors only an episode's LATEST per-platform release
+    (zernio_schedule_sync), so a channel with a YouTube day override shows an
+    episode on its YouTube date while its other platforms use an earlier slot
+    (2026-10-09: a false "Mon 12 Oct is empty" while that episode held it)."""
     from hypogeum.db import get_worker_control
     dbp = Path(db_path) if db_path else None
     if get_worker_control("queue_paused", "0", db_path=dbp) == "1":
         return {}                                       # check_production_paused already says so
+    now_iso = now.isoformat()
     conn = _conn(db_path, ddl=False)
     try:
         channels = [r[0] for r in conn.execute(
@@ -438,13 +445,24 @@ def check_buffer_gap(db_path, now: datetime) -> dict:
                 "SELECT DISTINCT channel_id FROM scheduled_runs WHERE status = 'pending'")}
         except Exception:  # noqa: BLE001
             pass
+        covering: dict = {}
+        for ch, ep in conn.execute(
+                "SELECT channel_id, episode_id FROM channel_publish_slots "
+                "WHERE episode_id IS NOT NULL AND slot_utc > ?", (now_iso,)):
+            covering.setdefault(ch, set()).add(ep)
+        try:   # a held YouTube Short's episode that is not in the mirror yet
+            for ch, ep in conn.execute(
+                    "SELECT channel_id, episode_id FROM youtube_cover_holds "
+                    "WHERE status IN ('held','late') AND episode_id IS NOT NULL AND release_at > ?", (now_iso,)):
+                covering.setdefault(ch, set()).add(ep)
+        except Exception:  # noqa: BLE001
+            pass
     except Exception:  # noqa: BLE001
         return {}
     finally:
         conn.close()
     from hypogeum.channel_config import get_channel_operations_profile
-    from hypogeum.queue import _occupied_publish_slots
-    from hypogeum.scheduler import next_unfilled_publish_slot
+    from hypogeum.scheduler import compute_next_publish_slot
     out = {}
     for ch in channels:
         if ch in busy:
@@ -458,8 +476,12 @@ def check_buffer_gap(db_path, now: datetime) -> dict:
             dsp = getattr(profile, "deliverable_schedule_policy", None) or {}
             policy = (dsp.get("main_episode") or next(iter(dsp.values()), None)
                       if isinstance(dsp, dict) and dsp else None) or profile.publishing_schedule
-            slot = next_unfilled_publish_slot(policy, profile.timezone, now,
-                                              _occupied_publish_slots(ch, None, db_path=dbp, now=now))
+            slot, from_dt = None, now
+            for _ in range(len(covering.get(ch, ())) + 1):     # the (n+1)th upcoming slot is the first uncovered
+                slot = compute_next_publish_slot(policy, profile.timezone, from_dt)
+                if slot is None:
+                    break
+                from_dt = slot + timedelta(minutes=1)
         except Exception:  # noqa: BLE001
             continue
         if slot is None:
@@ -470,10 +492,10 @@ def check_buffer_gap(db_path, now: datetime) -> dict:
         local = (slot + timedelta(hours=4)).strftime("%a %d %b %H:%M")
         out[f"buffer:{ch}"] = (
             f"{ch}: مفيش حلقة جاهزة للميعاد الجاي",
-            f"أقرب ميعاد نشر فاضي: {local} (دبي)، بعد حوالي {int(hours)} ساعة.\n"
+            f"أقرب ميعاد نشر مالوش حلقة: {local} (دبي)، بعد حوالي {int(hours)} ساعة.\n"
             "مفيش حلقة جاهزة ولا شغالة عليه. الإنتاج محتاج حوالي 36 ساعة، فلو ما بدأش دلوقتي الميعاد هيروح فاضي.",
             _ws_extra(ch, db_path, (f"{ch}: no episode is ready for the next publish slot",
-                                    f"Next empty slot: {slot.isoformat()} (UTC), about {int(hours)}h away, "
+                                    f"First slot without an episode: {slot.isoformat()} (UTC), about {int(hours)}h away, "
                                     "and nothing is queued or in production for it.")))
     return out
 

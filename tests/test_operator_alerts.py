@@ -547,3 +547,17 @@ def test_cover_alert_says_the_upload_failed_when_the_video_never_reached_youtube
     assert "فشل" in got["cover:p1"][0] and "401" in got["cover:p1"][1]
     monkeypatch.setattr(grid, "get_content_grid", lambda ch, db_path=None: [])
     assert "فات ميعاده" in oa.check_youtube_covers(db, NOW)["cover:p1"][0]   # unchanged wording otherwise
+
+
+def test_buffer_gap_counts_episodes_not_dates_so_a_later_youtube_date_still_covers_an_earlier_slot(db, monkeypatch):
+    # 2026-10-09 false alarm: the mirror shows an episode on its LATEST platform date
+    # (YouTube override), but its other platforms use the earlier slot. One buffered
+    # episode covers the first upcoming slot no matter which date the mirror shows.
+    later = NOW + timedelta(days=1)             # Mon 10-05 12:00; first slot = Wed 10-07 19:00 (55h)
+    _channel_with_slots(db, monkeypatch, filled_slots=[datetime(2026, 10, 10, 14, 0, tzinfo=timezone.utc)])
+    assert oa.check_buffer_gap(db, later) == {}          # 2nd slot (Sat 10-10) is 122h away
+    conn = get_connection(db)
+    conn.execute("DELETE FROM channel_publish_slots")
+    conn.commit()
+    conn.close()
+    assert list(oa.check_buffer_gap(db, later)) == ["buffer:ch"]     # with no episode the 55h slot is uncovered

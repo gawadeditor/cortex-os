@@ -946,6 +946,47 @@ class ProcessResult:
     topic_id: Optional[str] = None
 
 
+def _occupied_publish_slots(channel_id: str, exclude_topic_id: Optional[str], db_path=None, now=None) -> set:
+    """Future publish slots (aware UTC datetimes) another episode already holds:
+    the Zernio/Postiz schedule mirror (channel_publish_slots) plus the targets of
+    topics that are in flight (claimed) or produced (consumed) -- the gap before
+    a finished episode shows up in the mirror. Best-effort: empty set on error,
+    so a lookup problem only means the old (first-slot) behavior."""
+    out: set = set()
+    now_iso = (now or _now_utc()).isoformat()
+    try:
+        from hypogeum.db import get_connection
+        conn = get_connection(db_path)
+        try:
+            rows = list(conn.execute(
+                "SELECT slot_utc FROM channel_publish_slots WHERE channel_id = ? "
+                "AND episode_id IS NOT NULL AND slot_utc > ?", (channel_id, now_iso)))
+            # a held YouTube Short is mirrored at its (earlier) upload time; its
+            # real release slot lives in youtube_cover_holds
+            try:
+                rows += list(conn.execute(
+                    "SELECT release_at FROM youtube_cover_holds WHERE channel_id = ? "
+                    "AND status IN ('held','late') AND release_at > ?", (channel_id, now_iso)))
+            except Exception:  # noqa: BLE001 — table absent on a fresh DB
+                pass
+            rows += list(conn.execute(
+                "SELECT target_publish_at FROM episode_topics WHERE channel_id = ? "
+                "AND status IN ('claimed','consumed') AND target_publish_at IS NOT NULL "
+                "AND target_publish_at > ? AND topic_id != ?",
+                (channel_id, now_iso, exclude_topic_id or "")))
+        finally:
+            conn.close()
+        for r in rows:
+            try:
+                dt = datetime.fromisoformat(str(r[0]).replace("Z", "+00:00"))
+                out.add(dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc))
+            except ValueError:
+                continue
+    except Exception:  # noqa: BLE001
+        return set()
+    return out
+
+
 def process_next(
     worker_id: str,
     db_path: Optional[Path] = None,
@@ -1205,7 +1246,14 @@ def process_next(
                         _dsp = getattr(profile, "deliverable_schedule_policy", None) or {}
                         _policy = (_dsp.get("main_episode") or next(iter(_dsp.values()), None)
                                    if isinstance(_dsp, dict) and _dsp else None) or profile.publishing_schedule
-                        slot = compute_next_publish_slot(_policy, profile.timezone, anchor_dt)
+                        # Skip slots another episode already holds: the next
+                        # calendar slot is often already filled (and only hours
+                        # away), which made every plan infeasible.
+                        from hypogeum.scheduler import next_unfilled_publish_slot
+                        slot = next_unfilled_publish_slot(
+                            _policy, profile.timezone, anchor_dt,
+                            _occupied_publish_slots(channel_id, topic_id, db_path=db_path),
+                        )
                         if slot is not None:
                             set_topic_target_publish_at(topic_id, _iso(slot), db_path=db_path)
                 except Exception as exc:

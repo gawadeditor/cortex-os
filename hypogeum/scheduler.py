@@ -226,7 +226,8 @@ def _scheduled_runs_since(channel_id: str, conn, since_iso: str) -> int:
     day. Every scheduled_run is a paid pipeline attempt, so this (not a
     distinct-episode count) is what a max_runs_per_day ceiling must bound.
 
-    EXCEPT one that failed without spending anything (2026-10-05): a run
+    EXCEPT one that failed without spending anything (2026-10-05, but see
+    below for the infeasible-plan case): a run
     refused at its first gated call (e.g. adapter registrations out of date)
     costs $0 but used to use up the channel's whole day, leaving the buffer
     short until tomorrow. Those don't count; a failed run that spent money
@@ -236,7 +237,7 @@ def _scheduled_runs_since(channel_id: str, conn, since_iso: str) -> int:
     schedule."""
     try:
         rows = conn.execute(
-            "SELECT s.scheduled_run_id, q.status AS qstatus, q.episode_id FROM scheduled_runs s "
+            "SELECT s.scheduled_run_id, q.status AS qstatus, q.episode_id, q.error_message FROM scheduled_runs s "
             "LEFT JOIN run_queue q ON q.scheduled_run_id = s.scheduled_run_id "
             "WHERE s.channel_id = ? AND s.created_at >= ?",
             (channel_id, since_iso),
@@ -250,7 +251,12 @@ def _scheduled_runs_since(channel_id: str, conn, since_iso: str) -> int:
             continue
         seen.add(r[0])
         if r[1] == "failed" and r[2] and _episode_spend(conn, r[2]) <= 0:
-            continue
+            # An infeasible backward plan is deterministic: retrying within
+            # the day cannot succeed, so it must use up the day's ceiling or
+            # the reactive top-up re-fires it every cooldown (2026-10-09:
+            # 7 dead runs for one channel in one day).
+            if not str(r[3] or "").startswith("backward plan infeasible"):
+                continue
         counted += 1
     return counted
 
@@ -333,6 +339,33 @@ def compute_next_run(cadence: str, from_dt: datetime) -> Optional[datetime]:
     if cadence == "manual":
         return None
     raise ValueError(f"Unknown cadence: {cadence!r}")
+
+
+def next_unfilled_publish_slot(
+    publishing_schedule: dict,
+    tz_name: str,
+    from_dt: datetime,
+    occupied: "set",
+    *,
+    max_skips: int = 60,
+) -> Optional[datetime]:
+    """compute_next_publish_slot(), skipping slots an episode already holds.
+
+    A new episode must target the next slot that is still EMPTY: targeting a
+    slot another episode already fills is meaningless (that slot is taken) and,
+    when it is only hours away, makes the backward plan infeasible every time
+    (2026-10-09: twinkle's next slot was the one Lumi already held).
+    `occupied` is a set of timezone-aware datetimes (compared as instants).
+    Pure; returns None if no slot can be computed (same contract as
+    compute_next_publish_slot) or if `max_skips` slots in a row are taken."""
+    slot = compute_next_publish_slot(publishing_schedule, tz_name, from_dt)
+    skips = 0
+    while slot is not None and slot in occupied:
+        skips += 1
+        if skips > max_skips:
+            return None
+        slot = compute_next_publish_slot(publishing_schedule, tz_name, slot + timedelta(minutes=1))
+    return slot
 
 
 def compute_next_publish_slot(

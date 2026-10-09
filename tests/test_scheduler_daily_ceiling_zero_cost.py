@@ -36,3 +36,37 @@ def test_zero_cost_failure_not_counted(tmp_path):
         assert sch._scheduled_runs_since("ch", conn, "2026-10-05T00:00:00+00:00") == 2
     finally:
         conn.close()
+
+
+def test_infeasible_plan_failure_uses_up_the_day(tmp_path):
+    """A $0 'backward plan infeasible' failure is deterministic: it must count
+    toward the daily ceiling, or the reactive top-up re-fires it every hour."""
+    db = tmp_path / "s.db"
+    initialize_schema(db)
+    conn = get_connection(db)
+    try:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        _attempt(conn, "ch", "2026-10-09T16:00:00+00:00", "failed", "ep_inf")
+        conn.execute("UPDATE run_queue SET error_message = ? WHERE episode_id = 'ep_inf'",
+                     ("backward plan infeasible: required_lead_time_seconds=130830 "
+                      "available_lead_time_seconds=57399",))
+        conn.commit()
+        assert sch._scheduled_runs_since("ch", conn, "2026-10-09T00:00:00+00:00") == 1
+    finally:
+        conn.close()
+
+
+def test_next_unfilled_publish_slot_skips_a_slot_another_episode_holds():
+    from datetime import datetime, timezone
+    policy = {"weekly_slots": [{"day_of_week": "wednesday", "time_of_day": "19:00"},
+                               {"day_of_week": "friday", "time_of_day": "16:00"},
+                               {"day_of_week": "saturday", "time_of_day": "14:00"}],
+              "timezone": "UTC"}
+    now = datetime(2026, 10, 9, 22, 3, tzinfo=timezone.utc)
+    held = {datetime(2026, 10, 10, 14, 0, tzinfo=timezone.utc)}
+    assert sch.next_unfilled_publish_slot(policy, "UTC", now, set()) == held.copy().pop()
+    assert sch.next_unfilled_publish_slot(policy, "UTC", now, held) == \
+        datetime(2026, 10, 14, 19, 0, tzinfo=timezone.utc)
+    two = held | {datetime(2026, 10, 14, 19, 0, tzinfo=timezone.utc)}
+    assert sch.next_unfilled_publish_slot(policy, "UTC", now, two) == \
+        datetime(2026, 10, 16, 16, 0, tzinfo=timezone.utc)

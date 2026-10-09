@@ -134,9 +134,9 @@ def _seed_main_episode_grounding(episode_dir, *, sources=None):
 
 
 _HYPOGEUM_POLICY = {
-    "youtube": {"shorts": {"enabled": True, "categoryId": "27", "ai_disclosure": True}},
+    "youtube": {"shorts": {"enabled": True, "categoryId": "27", "madeForKids": True, "ai_disclosure": True}},
 }
-_MAIN_EPISODE_POLICY = {"youtube": {"main_episode": {"enabled": True, "categoryId": "27", "ai_disclosure": True}}}
+_MAIN_EPISODE_POLICY = {"youtube": {"main_episode": {"enabled": True, "categoryId": "27", "madeForKids": True, "ai_disclosure": True}}}
 
 _VALID_YOUTUBE_RESPONSE = {
     "platforms": {

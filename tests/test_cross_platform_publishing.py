@@ -46,7 +46,7 @@ BUNDLE = DeliverableBundleDefinition(channel_id=CHANNEL_ID, bundle_id="main_epis
 SHORT_DELIVERABLE_IDS = ["short_sh_0", "short_sh_1", "short_sh_2"]
 
 HYPOGEUM_MATRIX = {
-    "youtube": {"main_episode": {"enabled": True, "categoryId": "27"}, "shorts": {"enabled": True, "categoryId": "27"}},
+    "youtube": {"main_episode": {"enabled": True, "categoryId": "27", "madeForKids": True}, "shorts": {"enabled": True, "categoryId": "27", "madeForKids": True}},
     "tiktok": {"main_episode": {"enabled": False}, "shorts": {
         "enabled": True, "privacy": "PUBLIC_TO_EVERYONE",
         "content_preview_confirmed": True, "express_consent_given": True,

@@ -277,7 +277,7 @@ class TestCanonicalMetadataReachesTheRealSerializedRequestBody:
         from hypogeum.channel_config import update_channel_operations_profile
         update_channel_operations_profile(
             CHANNEL_ID, db_path=db_path,
-            platform_deliverable_policy={"youtube": {"main_episode": {"enabled": True, "categoryId": "27"}}},
+            platform_deliverable_policy={"youtube": {"main_episode": {"enabled": True, "categoryId": "27", "madeForKids": True}}},
         )
         _seed_complete_episode(db_path, assets_root, episode_id, title="A Real Title")
         _fully_bind(db_path)
@@ -374,7 +374,7 @@ class TestCanonicalMetadataReachesTheRealSerializedRequestBody:
         from hypogeum.channel_config import update_channel_operations_profile
         update_channel_operations_profile(
             CHANNEL_ID, db_path=db_path,
-            platform_deliverable_policy={"youtube": {"main_episode": {"enabled": True, "categoryId": "27"}}},
+            platform_deliverable_policy={"youtube": {"main_episode": {"enabled": True, "categoryId": "27", "madeForKids": True}}},
         )
         _seed_complete_episode(db_path, assets_root, "ep_no_canonical", title="A Real Title")
         _fully_bind(db_path)
@@ -411,7 +411,7 @@ class TestCanonicalMetadataAutoGeneration:
         from hypogeum.channel_config import update_channel_operations_profile
         update_channel_operations_profile(
             CHANNEL_ID, db_path=db_path,
-            platform_deliverable_policy={"youtube": {"main_episode": {"enabled": True, "categoryId": "27", "ai_disclosure": True}}},
+            platform_deliverable_policy={"youtube": {"main_episode": {"enabled": True, "categoryId": "27", "madeForKids": True, "ai_disclosure": True}}},
         )
         _seed_complete_episode(db_path, assets_root, episode_id, title="A Real Title")
         _fully_bind(db_path)
@@ -529,7 +529,7 @@ class TestCanonicalMetadataAutoGeneration:
         from hypogeum.channel_config import update_channel_operations_profile
         update_channel_operations_profile(
             CHANNEL_ID, db_path=db_path,
-            platform_deliverable_policy={"youtube": {"main_episode": {"enabled": True, "categoryId": "27"}}},
+            platform_deliverable_policy={"youtube": {"main_episode": {"enabled": True, "categoryId": "27", "madeForKids": True}}},
         )
         # No research_package/script_package written -- generation cannot
         # ground itself in anything real and must fail closed BEFORE ever

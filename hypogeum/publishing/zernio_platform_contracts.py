@@ -232,7 +232,10 @@ ZERNIO_PLATFORM_CONTRACTS: dict = {
         # generic required_fields loop) AND the pre-generation check in
         # hypogeum.agents.canonical_metadata_agent (skips the model call
         # entirely, zero external calls) key off this same tuple.
-        required_policy_fields=("categoryId",),
+        # madeForKids (2026-10-10): YouTube's COPPA declaration. Zernio drops it, but
+        # PostizProvider refuses to publish without it -- requiring it here fails
+        # closed at metadata time instead of at publish time.
+        required_policy_fields=("categoryId", "madeForKids"),
         settings_body_key=None,  # YouTube has no ROOT-level settings object (unlike tiktokSettings/facebookSettings) -- its fields live in platforms[].platformSpecificData, a PER-ENTRY dict, so build_platform_settings()'s root-key mechanism does not apply; see build_youtube_platform_specific_data() instead
         known_gaps=(
             "tags/hashtags are documented as ROOT-level request fields (array<string>), "

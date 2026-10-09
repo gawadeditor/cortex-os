@@ -304,6 +304,8 @@ def _local(iso: str) -> str:
 
 def _plain_error(err: str) -> str:
     e = err or ""
+    if e.startswith("backward plan infeasible"):
+        return "ميعاد النشر قريب أوي على وقت الإنتاج المطلوب (الخطة مش بتكفي)"
     if "already registered with implementation checksum" in e:
         return "كود الـ adapters اتغير ومتسجلش"
     if "credits exhausted" in e.lower() or "402" in e:

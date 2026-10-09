@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS operator_alert_checks (
 
 # per-check minimum interval (seconds) — run_operator_checks is called from
 # every worker iteration (~60s); the network-backed checks run less often.
-_INTERVALS = {"adapters": 300, "run_failures": 60, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
+_INTERVALS = {"adapters": 300, "run_failures": 60, "queue_failures": 120, "buffer_gap": 1800, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
               "youtube_covers": 300, "stuck_releases": 300, "youtube_flip_auth": 3600, "posts": 1800, "unpublished": 300, "accounts": 600, "archive": 300, "archive_backlog": 600, "disk": 1800}
 _DASHBOARD = "http://127.0.0.1:5001"
 _CREDIT_LOW_USD = 3.0
@@ -371,6 +371,113 @@ def check_run_failures(db_path, now: datetime) -> dict:
     return out
 
 
+def check_queue_failures(db_path, now: datetime) -> dict:
+    """Production attempts that died BEFORE a run existed (no `runs` row), so
+    check_run_failures can't see them: the backward plan was infeasible, no
+    topic, a gate refused it at admission... 2026-10-09: twinkle failed 7
+    times in one day this way and nobody was told. One alert per channel, with
+    the cause; it closes once a later attempt completes or the failures age
+    out (6h), exactly like check_run_failures."""
+    from hypogeum.db import get_worker_control
+    from hypogeum.operator_actions import _plain_error
+    since = (now - timedelta(hours=6)).isoformat()
+    cleared = get_worker_control("breaker_cleared_at", "", db_path=Path(db_path) if db_path else None) or ""
+    since = max(since, cleared)
+    conn = _conn(db_path, ddl=False)
+    try:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT q.channel_id, q.episode_id, q.error_message, "
+            "COALESCE(q.failed_at, q.created_at) AS t FROM run_queue q "
+            "WHERE q.status = 'failed' AND COALESCE(q.failed_at, q.created_at) >= ? "
+            "AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.episode_id = q.episode_id) "
+            "ORDER BY t DESC", (since,))]
+        done = {r[0]: r[1] for r in conn.execute(
+            "SELECT channel_id, MAX(completed_at) FROM run_queue WHERE status = 'completed' GROUP BY channel_id")}
+    except Exception:  # noqa: BLE001
+        return {}
+    finally:
+        conn.close()
+    by_channel: dict = {}
+    for r in rows:
+        by_channel.setdefault(r["channel_id"], []).append(r)
+    out = {}
+    for ch, fails in by_channel.items():
+        latest = fails[0]
+        if (done.get(ch) or "") > (latest["t"] or ""):
+            continue                                    # it produced again since
+        raw = (latest.get("error_message") or "").strip().splitlines()[0][:220] if latest.get("error_message") else ""
+        out[f"queue_failed:{ch}"] = (
+            f"إنتاج {ch} بيفشل قبل ما يبدأ",
+            f"السبب: {_plain_error(latest.get('error_message') or '')}\n"
+            f"المحاولات الفاشلة في آخر 6 ساعات: {len(fails)}\n"
+            f"آخر حلقة: {latest['episode_id']}\nالتفاصيل: {raw}",
+            _ws_extra(ch, db_path, (f"{ch}: production attempts are failing before they start",
+                                    f"{len(fails)} attempts in the last 6h. Cause: {raw[:160]}")))
+    return out
+
+
+_BUFFER_ALERT_HOURS = 72   # the next EMPTY publish slot is this close and nothing is being produced
+
+
+def check_buffer_gap(db_path, now: datetime) -> dict:
+    """A channel whose next empty publish slot is close, with no episode queued
+    or in production for it. The slot would go out empty. 72h leaves time for
+    the ~36h production lead the backward plan needs."""
+    from hypogeum.db import get_worker_control
+    dbp = Path(db_path) if db_path else None
+    if get_worker_control("queue_paused", "0", db_path=dbp) == "1":
+        return {}                                       # check_production_paused already says so
+    conn = _conn(db_path, ddl=False)
+    try:
+        channels = [r[0] for r in conn.execute(
+            "SELECT DISTINCT channel_id FROM schedules WHERE status = 'active' AND channel_id IS NOT NULL")]
+        busy = {r[0] for r in conn.execute(
+            "SELECT DISTINCT channel_id FROM run_queue WHERE status IN ('queued','claimed')")}
+        try:
+            busy |= {r[0] for r in conn.execute(
+                "SELECT DISTINCT channel_id FROM scheduled_runs WHERE status = 'pending'")}
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception:  # noqa: BLE001
+        return {}
+    finally:
+        conn.close()
+    from hypogeum.channel_config import get_channel_operations_profile
+    from hypogeum.queue import _occupied_publish_slots
+    from hypogeum.scheduler import next_unfilled_publish_slot
+    out = {}
+    for ch in channels:
+        if ch in busy:
+            continue
+        try:
+            profile = get_channel_operations_profile(ch, db_path=dbp)
+            if profile is None or not getattr(profile, "production_enabled", True):
+                continue
+            # same policy the claim-time target derivation and the release-time
+            # schedule compiler use (see queue.process_next)
+            dsp = getattr(profile, "deliverable_schedule_policy", None) or {}
+            policy = (dsp.get("main_episode") or next(iter(dsp.values()), None)
+                      if isinstance(dsp, dict) and dsp else None) or profile.publishing_schedule
+            slot = next_unfilled_publish_slot(policy, profile.timezone, now,
+                                              _occupied_publish_slots(ch, None, db_path=dbp, now=now))
+        except Exception:  # noqa: BLE001
+            continue
+        if slot is None:
+            continue
+        hours = (slot - now).total_seconds() / 3600
+        if hours > _BUFFER_ALERT_HOURS:
+            continue
+        local = (slot + timedelta(hours=4)).strftime("%a %d %b %H:%M")
+        out[f"buffer:{ch}"] = (
+            f"{ch}: مفيش حلقة جاهزة للميعاد الجاي",
+            f"أقرب ميعاد نشر فاضي: {local} (دبي)، بعد حوالي {int(hours)} ساعة.\n"
+            "مفيش حلقة جاهزة ولا شغالة عليه. الإنتاج محتاج حوالي 36 ساعة، فلو ما بدأش دلوقتي الميعاد هيروح فاضي.",
+            _ws_extra(ch, db_path, (f"{ch}: no episode is ready for the next publish slot",
+                                    f"Next empty slot: {slot.isoformat()} (UTC), about {int(hours)}h away, "
+                                    "and nothing is queued or in production for it.")))
+    return out
+
+
 def check_production_paused(db_path) -> dict:
     from hypogeum.db import get_worker_control
     dbp = Path(db_path) if db_path else None
@@ -479,6 +586,19 @@ def check_youtube_covers(db_path, now: datetime) -> dict:
         return {}
     finally:
         conn.close()
+    # A hold whose YouTube upload itself FAILED (e.g. 401) is not "waiting for
+    # a cover": the video isn't on YouTube at all (2026-10-08 Wren). The grid
+    # knows which platforms failed; best-effort, falls back to the old wording.
+    upload_failed: dict = {}
+    try:
+        from hypogeum.dashboard_content_grid import get_content_grid
+        for ch in {r["channel_id"] for r in rows}:
+            for it in get_content_grid(ch, db_path=Path(db_path) if db_path else None):
+                for fp in (it.get("failed_platforms") or []):
+                    if fp.get("platform") == "youtube":
+                        upload_failed[it["post_id"]] = str(fp.get("error") or "")
+    except Exception:  # noqa: BLE001
+        upload_failed = {}
     out = {}
     for r in rows:
         try:
@@ -486,6 +606,16 @@ def check_youtube_covers(db_path, now: datetime) -> dict:
             local = (rel + timedelta(hours=4)).strftime("%a %d %b %H:%M")
         except Exception:  # noqa: BLE001
             local = r["release_at"]
+        if r["post_id"] in upload_failed:
+            why = upload_failed[r["post_id"]].strip().replace("\n", " ")[:160]
+            out[f"cover:{r['post_id']}"] = (
+                f"رفع يوتيوب لشورت {r['channel_id']} فشل",
+                f"الفيديو مش على يوتيوب أصلاً (الرفع فشل، مش مستني غلاف).\nميعاد النشر: {local} (دبي)\n"
+                f"السبب: {why}\nالـ Content Grid: {_DASHBOARD}/channel/{r['channel_id']}/grid",
+                _ws_extra(r["channel_id"], db_path, (
+                    f"{r['channel_id']}: the YouTube upload failed",
+                    f"The Short is not on YouTube at all. Scheduled release: {r['release_at']} (UTC). {why}")))
+            continue
         late = r["status"] != "held"
         out[f"cover:{r['post_id']}"] = (
             f"شورت {r['channel_id']} " + ("فات ميعاده ولسه private" if late else "مستني غلاف يوتيوب"),
@@ -805,6 +935,8 @@ def run_operator_checks(*, db_path=None, config=None, now: Optional[datetime] = 
         ("adapters", "system:adapters", lambda: check_adapters(db_path)),
         ("production_paused", "production:", lambda: check_production_paused(db_path)),
         ("run_failures", "run_failed:", lambda: check_run_failures(db_path, now)),
+        ("queue_failures", "queue_failed:", lambda: check_queue_failures(db_path, now)),
+        ("buffer_gap", "buffer:", lambda: check_buffer_gap(db_path, now)),
         ("blocking_signals", "signal:", lambda: check_blocking_signals(db_path)),
         ("youtube_covers", "cover:", lambda: check_youtube_covers(db_path, now)),
         ("stuck_releases", "stuckrelease:", lambda: check_stuck_releases(db_path, now)),

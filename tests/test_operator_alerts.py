@@ -446,3 +446,104 @@ def test_expired_youtube_flip_authorization_alerts_but_network_blips_do_not(db):
     got = oa.check_youtube_flip_auth(db, probe=probe)
     assert set(got) == {"ytauth:hypogeum"}          # blip on twinkle ignored; zernio channel not probed
     assert oa.check_youtube_flip_auth(db, probe=lambda ch: None) == {}
+
+
+# --- failures that never reach `runs` (2026-10-09 twinkle: 7 silent failures) ---
+
+def _queue_row(db, ch, ep, status, created, err=None, completed_at=None):
+    import uuid
+    conn = get_connection(db)
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("INSERT INTO run_queue (queue_id, channel_id, episode_id, priority, status, queued_at, created_at, "
+                 "error_message, failed_at, completed_at) VALUES (?,?,?,0,?,?,?,?,?,?)",
+                 (str(uuid.uuid4()), ch, ep, status, created.isoformat(), created.isoformat(), err,
+                  created.isoformat() if status == "failed" else None, completed_at))
+    conn.commit()
+    conn.close()
+
+
+def test_queue_failure_before_a_run_exists_alerts_once_per_channel_with_the_cause(db):
+    err = "backward plan infeasible: required_lead_time_seconds=130830 available_lead_time_seconds=57399"
+    for i in range(3):
+        _queue_row(db, "twinkle", f"ep_q{i}", "failed", NOW - timedelta(minutes=50 - i * 10), err)
+    got = oa.check_queue_failures(db, NOW)
+    assert list(got) == ["queue_failed:twinkle"]                       # three attempts, one alert
+    assert "المحاولات الفاشلة في آخر 6 ساعات: 3" in got["queue_failed:twinkle"][1]
+    assert "الخطة مش بتكفي" in got["queue_failed:twinkle"][1]
+    # a later successful attempt closes it
+    _queue_row(db, "twinkle", "ep_ok", "completed", NOW - timedelta(minutes=5),
+               completed_at=(NOW - timedelta(minutes=1)).isoformat())
+    assert oa.check_queue_failures(db, NOW) == {}
+
+
+def test_queue_failure_that_has_a_run_row_is_left_to_check_run_failures(db):
+    _queue_row(db, "hypogeum", "ep_has_run", "failed", NOW - timedelta(minutes=20), "boom")
+    conn = get_connection(db)
+    conn.execute("PRAGMA foreign_keys = OFF")
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+    data = {"run_id": "r_has", "episode_id": "ep_has_run", "status": "failed", "channel_id": "hypogeum",
+            "started_at": (NOW - timedelta(minutes=25)).isoformat(), "error_message": "boom"}
+    if "created_at" in cols:
+        data["created_at"] = data["started_at"]
+    conn.execute(f"INSERT INTO runs ({','.join(data)}) VALUES ({','.join('?' * len(data))})", list(data.values()))
+    conn.commit()
+    conn.close()
+    assert oa.check_queue_failures(db, NOW) == {}
+
+
+def _channel_with_slots(db, monkeypatch, filled_slots):
+    conn = get_connection(db)
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("INSERT INTO schedules (schedule_id, scope, channel_id, cadence, status, created_at, updated_at) "
+                 "VALUES ('s1','channel','ch','daily','active',?,?)", (NOW.isoformat(), NOW.isoformat()))
+    for i, slot in enumerate(filled_slots):
+        conn.execute("INSERT INTO channel_publish_slots (channel_id, slot_utc, episode_id, created_at) "
+                     "VALUES (?,?,?,?)", ("ch", slot.isoformat(), f"ep{i}", NOW.isoformat()))
+    conn.commit()
+    conn.close()
+    import hypogeum.channel_config as cc
+    monkeypatch.setattr(cc, "get_channel_operations_profile", lambda ch, db_path=None: SimpleNamespace(
+        timezone="UTC", production_enabled=True, deliverable_schedule_policy={},
+        publishing_schedule={"weekly_slots": [{"day_of_week": "wednesday", "time_of_day": "19:00"},
+                                              {"day_of_week": "saturday", "time_of_day": "14:00"}],
+                             "timezone": "UTC"}))
+
+
+def test_buffer_gap_alerts_when_the_next_empty_slot_is_close_and_nothing_is_in_production(db, monkeypatch):
+    # NOW = Sun 2026-10-04 12:00 UTC; next slots: Wed 10-07 19:00 (79h), Sat 10-10 14:00
+    _channel_with_slots(db, monkeypatch, filled_slots=[])
+    assert oa.check_buffer_gap(db, NOW) == {}                       # 79h away: not yet
+    later = NOW + timedelta(days=1)                                 # now 55h away
+    got = oa.check_buffer_gap(db, later)
+    assert list(got) == ["buffer:ch"] and "مفيش حلقة جاهزة" in got["buffer:ch"][0]
+
+
+def test_buffer_gap_is_quiet_when_the_slot_is_filled_or_something_is_in_production(db, monkeypatch):
+    later = NOW + timedelta(days=1)
+    _channel_with_slots(db, monkeypatch, filled_slots=[datetime(2026, 10, 7, 19, 0, tzinfo=timezone.utc),
+                                                       datetime(2026, 10, 10, 14, 0, tzinfo=timezone.utc)])
+    assert oa.check_buffer_gap(db, later) == {}                     # both near slots are filled
+    conn = get_connection(db)
+    conn.execute("DELETE FROM channel_publish_slots")
+    conn.commit()
+    conn.close()
+    assert list(oa.check_buffer_gap(db, later)) == ["buffer:ch"]
+    _queue_row(db, "ch", "ep_inflight", "queued", later)
+    assert oa.check_buffer_gap(db, later) == {}                     # something is already in flight
+
+
+def test_cover_alert_says_the_upload_failed_when_the_video_never_reached_youtube(db, monkeypatch):
+    conn = get_connection(db)
+    conn.execute("INSERT INTO youtube_cover_holds (post_id, channel_id, episode_id, release_at, upload_at, status, "
+                 "held_at) VALUES ('p1','ch','ep1',?,?, 'late', ?)",
+                 ((NOW - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                  (NOW - timedelta(hours=25)).strftime("%Y-%m-%dT%H:%M:%S.000Z"), NOW.isoformat()))
+    conn.commit()
+    conn.close()
+    import hypogeum.dashboard_content_grid as grid
+    monkeypatch.setattr(grid, "get_content_grid", lambda ch, db_path=None: [
+        {"post_id": "p1", "failed_platforms": [{"platform": "youtube", "error": "upload failed: 401"}]}])
+    got = oa.check_youtube_covers(db, NOW)
+    assert "فشل" in got["cover:p1"][0] and "401" in got["cover:p1"][1]
+    monkeypatch.setattr(grid, "get_content_grid", lambda ch, db_path=None: [])
+    assert "فات ميعاده" in oa.check_youtube_covers(db, NOW)["cover:p1"][0]   # unchanged wording otherwise

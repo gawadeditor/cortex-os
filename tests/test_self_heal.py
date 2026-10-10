@@ -276,3 +276,13 @@ def test_a_post_postiz_marked_error_alerts_unless_superseded_or_not_ours(dbp, mo
     assert oa.check_postiz_post_errors(dbp, NOW) == {}
     monkeypatch.setattr(pz_mod.PostizProvider, "list_posts", lambda self, **k: (_ for _ in ()).throw(RuntimeError("down")))
     assert oa.check_postiz_post_errors(dbp, NOW) == {}
+
+
+def test_a_list_delivery_is_judged_per_post(dbp, monkeypatch):
+    from hypogeum import postiz_webhook as wh
+    sent, resolved = [], []
+    monkeypatch.setattr(oa, "alert", lambda key, title, body="", **k: sent.append(key) or True)
+    monkeypatch.setattr(oa, "resolve", lambda key, note="", **k: resolved.append(key) or True)
+    kind = wh.record_event([{"id": "a", "state": "PUBLISHED", "content": "x"},
+                            {"id": "b", "state": "ERROR", "content": "published? no"}], dbp, CFG)
+    assert kind == "failed" and sent == ["pzhook:b"] and resolved == ["pzhook:a"]

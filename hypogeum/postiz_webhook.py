@@ -70,7 +70,16 @@ def classify(payload) -> Tuple[str, Optional[str]]:
 
 
 def record_event(payload, db_path=None, config=None, now: Optional[datetime] = None) -> str:
-    """Store one delivery and raise/resolve the alert. Returns the kind. Never raises."""
+    """Store one delivery and raise/resolve the alert. Returns the kind. Never raises. Postiz sends a JSON LIST
+    (one entry per post of the group, each with its own `state`), so every entry is judged on its own; the
+    delivery's kind is "failed" if any entry failed."""
+    if isinstance(payload, list):
+        kinds = [_record_one(item, db_path, config, now) for item in payload[:50]] or ["other"]
+        return "failed" if "failed" in kinds else kinds[0]
+    return _record_one(payload, db_path, config, now)
+
+
+def _record_one(payload, db_path=None, config=None, now: Optional[datetime] = None) -> str:
     now = now or datetime.now(timezone.utc)
     try:
         from hypogeum.db import get_connection  # noqa: PLC0415

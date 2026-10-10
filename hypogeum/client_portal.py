@@ -24,25 +24,66 @@ from hypogeum import portal_auth as pa
 _COOKIE = "cortex_portal"
 
 _CSS = """
-:root{--bg:#fff;--fg:#1d1d1f;--muted:#5f6368;--line:#e5e5ea;--accent:#3b5bdb;--card:#f7f7f9}
-@media(prefers-color-scheme:dark){:root{--bg:#121214;--fg:#f2f2f4;--muted:#a1a1aa;--line:#2a2a2e;--accent:#8da2fb;--card:#1b1b1f}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 -apple-system,Segoe UI,Roboto,sans-serif}
-main{max-width:980px;margin:0 auto;padding:32px 16px 80px}header{border-bottom:1px solid var(--line)}
-header div{max-width:980px;margin:0 auto;padding:14px 16px;display:flex;gap:16px;align-items:center}
-header b{margin-right:auto}a{color:var(--accent)}h1{font-size:1.6rem;margin:0 0 4px}.muted{color:var(--muted);font-size:.9rem}
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:14px;margin-top:16px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden}
-.card img{width:100%;aspect-ratio:9/16;object-fit:cover;background:#000;display:block}.card div{padding:10px 12px;font-size:.9rem}
-.badge{display:inline-block;font-size:.75rem;padding:1px 8px;border-radius:99px;border:1px solid var(--line);color:var(--muted)}
-.alert{border:1px solid #d9480f;border-radius:8px;padding:10px 12px;margin:8px 0}.bar{height:8px;background:var(--line);border-radius:99px;overflow:hidden}
-.bar i{display:block;height:100%;background:var(--accent)}input,button{font:inherit;padding:8px 12px;border-radius:8px;border:1px solid var(--line)}
-button{background:var(--accent);color:#fff;border-color:var(--accent);cursor:pointer}form.inline{display:inline}
+:root{--bg:#090b11;--bg-2:#0c0f16;--surface:#14171d;--raised:#1b1f27;--border:#262b33;--border-strong:#363d47;
+--text:#f4f6f9;--muted:#a4aebd;--faint:#6b7481;--accent:#f0a838;--accent-ink:#1a1206;--accent-bg:rgba(240,168,56,.13);
+--accent-line:rgba(240,168,56,.45);--good:#4ec26f;--good-bg:rgba(78,194,111,.12);--warn:#e5a93a;--warn-bg:rgba(229,169,58,.13);
+--critical:#f0574a;--critical-bg:rgba(240,87,74,.12);--radius:13px;--radius-sm:8px;--gap:20px;
+--font:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;
+--mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;--ease:cubic-bezier(.16,.84,.28,1)}
+*{box-sizing:border-box}html{color-scheme:dark}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 var(--font);min-height:100vh;
+background-image:radial-gradient(1100px 520px at 72% -30%,rgba(240,168,56,.14),transparent 62%)}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+::selection{background:var(--accent-line);color:#fff}
+:focus-visible{outline:none;box-shadow:0 0 0 2px var(--bg),0 0 0 4px var(--accent);border-radius:6px}
+header{border-bottom:1px solid var(--border);background:rgba(9,11,17,.8);backdrop-filter:blur(8px);position:sticky;top:0;z-index:5}
+header .bar{max-width:1080px;margin:0 auto;padding:12px 20px;display:flex;gap:14px;align-items:center}
+.brand{font-weight:800;font-size:15px;letter-spacing:.07em;text-transform:uppercase;color:var(--text);display:inline-flex;gap:9px;align-items:center;margin-right:auto}
+.brand:hover{text-decoration:none}.brand:before{content:"";width:9px;height:9px;border-radius:2px;background:var(--accent);box-shadow:0 0 12px var(--accent-line)}
+.who{color:var(--muted);font-size:13px}
+main{max-width:1080px;margin:0 auto;padding:36px 20px 90px}
+h1{font-size:30px;letter-spacing:-.03em;margin:0 0 6px;line-height:1.15}h2{font-size:12px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin:34px 0 12px;font-weight:700}
+.sub{color:var(--muted);margin:0 0 4px}.crumb{font-size:13px;color:var(--muted);margin-bottom:14px;display:inline-block}
+.grid{display:grid;gap:var(--gap);grid-template-columns:repeat(auto-fill,minmax(260px,1fr))}
+.panel{background:linear-gradient(180deg,rgba(255,255,255,.03),transparent 40%),var(--raised);border:1px solid var(--border);border-radius:var(--radius);padding:20px;
+box-shadow:0 8px 24px -6px rgba(0,0,0,.55),0 2px 6px rgba(0,0,0,.4)}
+.chan{display:block;color:var(--text);transition:border-color .2s var(--ease),transform .2s var(--ease)}
+.chan:hover{text-decoration:none;border-color:var(--accent-line);transform:translateY(-2px)}
+.chan .name{font-size:17px;font-weight:700;letter-spacing:-.01em}.chan .go{font-size:12px;color:var(--accent);margin-top:10px;display:block;font-weight:600}
+.kpi{font-size:34px;font-weight:700;letter-spacing:-.03em;font-variant-numeric:tabular-nums}.kpi small{font-size:15px;color:var(--muted);font-weight:500;letter-spacing:0}
+.bar-track{height:8px;background:var(--border);border-radius:99px;overflow:hidden;margin-top:14px}
+.bar-track i{display:block;height:100%;background:linear-gradient(90deg,var(--accent-line),var(--accent));border-radius:99px}
+.alert{display:flex;gap:10px;align-items:flex-start;border:1px solid var(--critical);background:var(--critical-bg);color:#ffd7d3;border-radius:var(--radius-sm);padding:11px 14px;margin:8px 0;font-size:14px}
+.alert:before{content:"";flex:none;width:8px;height:8px;border-radius:99px;background:var(--critical);margin-top:7px;box-shadow:0 0 8px var(--critical)}
+.ok{border:1px solid var(--border);border-radius:var(--radius-sm);padding:11px 14px;color:var(--muted);font-size:14px}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:var(--gap);margin-top:8px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;display:flex;flex-direction:column;transition:border-color .2s var(--ease)}
+.card:hover{border-color:var(--border-strong)}.card.attn{border-color:var(--critical);border-width:2px}
+.poster{aspect-ratio:9/16;background:var(--bg);display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:12px}
+.poster img{width:100%;height:100%;object-fit:contain;display:block}
+.cbody{padding:12px 13px 13px;display:flex;flex-direction:column;gap:8px;flex:1}
+.title{font-size:13px;font-weight:600;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.when{font-size:11px;color:var(--faint)}
+.pill{align-self:flex-start;font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;padding:2px 8px;border-radius:999px;background:var(--border);color:var(--muted)}
+.pill.published{background:var(--good-bg);color:var(--good)}.pill.scheduled{background:var(--accent-bg);color:var(--accent)}.pill.bad{background:var(--critical-bg);color:var(--critical)}
+.plats{display:flex;flex-wrap:wrap;gap:5px;margin-top:auto;padding-top:4px}
+.plat{font-size:10px;font-weight:600;padding:2px 7px;border-radius:5px;border:1px solid var(--border);color:var(--muted)}
+.plat.on{color:var(--good);border-color:var(--good)}
+form.inline{display:inline;margin:0}
+input[type=email]{font:inherit;padding:11px 14px;border-radius:var(--radius-sm);border:1px solid var(--border-strong);background:var(--surface);color:var(--text);min-width:260px}
+input[type=email]:focus{border-color:var(--accent)}
+.btn{font:inherit;font-weight:600;padding:10px 16px;border-radius:var(--radius-sm);border:1px solid var(--accent);background:var(--accent);color:var(--accent-ink);cursor:pointer;transition:transform .15s var(--ease),box-shadow .15s}
+.btn:hover{transform:translateY(-1px);box-shadow:0 8px 24px -8px rgba(240,168,56,.55)}
+.btn.ghost{background:transparent;color:var(--muted);border-color:var(--border-strong);font-size:13px;padding:6px 12px}.btn.ghost:hover{color:var(--text);box-shadow:none}
+.center{max-width:460px;margin:9vh auto 0}
+@media(max-width:600px){main{padding:24px 16px 70px}h1{font-size:25px}input[type=email]{min-width:0;width:100%;margin-bottom:10px}.cards{grid-template-columns:repeat(2,1fr)}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
 """
 
 _BASE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{ title }} · Cortex</title><style>{{ css|safe }}</style></head><body>
-<header><div><b>Cortex</b>{% if user %}<span class="muted">{{ user.email }}</span>
-<form class="inline" method="post" action="/logout"><button type="submit">Sign out</button></form>{% endif %}</div></header>
+<header><div class="bar"><a class="brand" href="/">Cortex</a>{% if user %}<span class="who">{{ user.email }}</span>
+<form class="inline" method="post" action="/logout"><button class="btn ghost" type="submit">Sign out</button></form>{% endif %}</div></header>
 <main>{{ body|safe }}</main></body></html>"""
 
 
@@ -97,9 +138,9 @@ def create_app(db_path=None, config=None):
 
     @app.get("/login")
     def login_form():
-        return page("Sign in", "<h1>Sign in</h1><p class='muted'>Enter your email and we will send you a one-time link.</p>"
-                               "<form method='post' action='/login'><input type='email' name='email' required autofocus "
-                               "placeholder='you@example.com'> <button type='submit'>Send link</button></form>")
+        return page("Sign in", "<div class='center panel'><h1>Sign in</h1><p class='sub'>Enter your email and we will send you a one-time link.</p>"
+                               "<form method='post' action='/login' style='margin-top:18px'><input type='email' name='email' required autofocus "
+                               "placeholder='you@example.com'> <button class='btn' type='submit'>Send link</button></form></div>")
 
     @app.post("/login")
     def login_submit():
@@ -108,14 +149,14 @@ def create_app(db_path=None, config=None):
         if token:
             base = (getattr(config, "PORTAL_BASE_URL", None) or request.host_url).rstrip("/")
             pa.deliver_link(email.strip().lower(), f"{base}/auth/{token}", config)
-        return page("Check your email", "<h1>Check your email</h1><p>If that address is registered, a sign-in link is on its way. "
-                                         "It works once and expires in 15 minutes.</p>")
+        return page("Check your email", "<div class='center panel'><h1>Check your email</h1><p class='sub'>If that address is registered, a sign-in link is on its way. "
+                                         "It works once and expires in 15 minutes.</p></div>")
 
     @app.get("/auth/<token>")
     def auth(token):
         session = pa.consume_login_link(token, db_path)
         if session is None:
-            return page("Link expired", "<h1>This link has expired</h1><p><a href='/login'>Get a new one</a></p>", status=400)
+            return page("Link expired", "<div class='center panel'><h1>This link has expired</h1><p class='sub'><a href='/login'>Get a new one</a></p></div>", status=400)
         resp = make_response(redirect("/"))
         resp.set_cookie(_COOKIE, session, max_age=int(pa.SESSION_TTL.total_seconds()), httponly=True,
                         secure=secure_cookie, samesite="Lax")
@@ -144,12 +185,23 @@ def create_app(db_path=None, config=None):
         finally:
             conn.close()
         pct = 0 if not b["ceiling_usd"] else min(100, round(100 * b["month_spend_usd"] / b["ceiling_usd"]))
-        body = "<h1>Your channels</h1>"
-        body += "".join(f"<p><a href='/channel/{_esc(c)}'>{_esc(c)}</a></p>" for c in channels) or "<p class='muted'>No channels yet.</p>"
-        body += (f"<h2>This month</h2><p>${b['month_spend_usd']:.2f}" +
-                 (f" of ${b['ceiling_usd']:.2f}</p><div class='bar'><i style='width:{pct}%'></i></div>" if b["ceiling_usd"] else " spent</p>"))
-        if alerts:
-            body += "<h2>Needs attention</h2>" + "".join(f"<div class='alert'>{_esc(a['title'])}</div>" for a in alerts)
+        names = {}
+        try:
+            for r in get_connection(Path(db_path) if db_path else None).execute("SELECT channel_id, name FROM channel_profiles"):
+                names[r[0]] = r[1]
+        except Exception:  # noqa: BLE001
+            pass
+        body = "<h1>Your channels</h1><p class='sub'>Everything we are producing and publishing for you.</p><h2>Channels</h2>"
+        chans = "".join("<a class='panel chan' href='/channel/" + _esc(c) + "'><span class='name'>" + _esc(names.get(c) or c) +
+                        "</span><span class='go'>View posts →</span></a>" for c in channels)
+        body += "<div class='grid'>" + (chans or "<div class='ok'>No channels yet.</div>") + "</div>"
+        body += "<h2>This month</h2><div class='panel'><div class='kpi'>$" + format(b["month_spend_usd"], ".2f")
+        if b["ceiling_usd"]:
+            body += " <small>of $" + format(b["ceiling_usd"], ".2f") + "</small></div><div class='bar-track'><i style='width:" + str(pct) + "%'></i></div>"
+        else:
+            body += " <small>spent</small></div>"
+        body += "</div><h2>Needs attention</h2>"
+        body += "".join("<div class='alert'>" + _esc(a["title"]) + "</div>" for a in alerts) or "<div class='ok'>Nothing needs your attention.</div>"
         return page("Home", body, user)
 
     @app.get("/channel/<channel_id>")
@@ -167,12 +219,25 @@ def create_app(db_path=None, config=None):
             if thumb and not (thumb.startswith("/episode/") or thumb.startswith("https://media.zernio.com/")):
                 thumb = ""
             when = (it.get("published_at") or it.get("scheduled_for") or "")[:16].replace("T", " ")
-            img = '<img src="' + _esc(thumb) + '" alt="">' if thumb else ""
-            cards += ("<div class='card'>" + img + "<div><b>" + _esc(it.get("display_title")) + "</b><br>"
-                      "<span class='badge'>" + _esc(it.get("status")) + "</span> "
-                      "<span class='muted'>" + _esc(when) + " UTC</span></div></div>")
-        return page(channel_id, f"<p><a href='/'>← Home</a></p><h1>{_esc(channel_id)}</h1>"
-                                 f"<div class='cards'>{cards or '<p class=muted>No posts yet.</p>'}</div>", user)
+            st = str(it.get("status") or "")
+            pill = "published" if st == "published" else ("scheduled" if st == "scheduled" else ("bad" if it.get("needs_attention") else ""))
+            img = '<img src="' + _esc(thumb) + '" alt="" loading="lazy">' if thumb else "no cover"
+            plats = "".join("<span class='plat" + (" on" if pl.get("status") == "published" else "") + "'>" + _esc(pl.get("platform")) + "</span>"
+                            for pl in (it.get("platforms") or []))
+            cards += ("<div class='card" + (" attn" if it.get("needs_attention") else "") + "'><div class='poster'>" + img + "</div>"
+                      "<div class='cbody'><div class='title'>" + _esc(it.get("display_title")) + "</div>"
+                      "<span class='pill " + pill + "'>" + _esc(st) + "</span><div class='when'>" + _esc(when) + " UTC</div>"
+                      "<div class='plats'>" + plats + "</div></div></div>")
+        cname = channel_id
+        try:
+            from hypogeum.db import get_connection  # noqa: PLC0415
+            r = get_connection(Path(db_path) if db_path else None).execute(
+                "SELECT name FROM channel_profiles WHERE channel_id = ?", (channel_id,)).fetchone()
+            cname = (r[0] if r and r[0] else channel_id)
+        except Exception:  # noqa: BLE001
+            pass
+        return page(cname, "<a class='crumb' href='/'>← All channels</a><h1>" + _esc(cname) + "</h1><p class='sub'>Your posts and where they stand.</p>"
+                           "<div class='cards'>" + (cards or "<div class='ok'>No posts yet.</div>") + "</div>", user)
 
     @app.get("/episode/<episode_id>/thumbnail")
     def thumbnail(episode_id):

@@ -259,3 +259,22 @@ def test_the_daily_summary_lists_what_the_factory_fixed(dbp, fake):
     sh.handle_cleared("zz:1", dbp, NOW + timedelta(minutes=1))
     text = oa.build_daily_summary(dbp, NOW + timedelta(hours=1))
     assert "المصنع صلّح بنفسه" in text and "zz:1" in text and "عملت حاجة" in text
+
+
+def _err_post(pid="pe1", state="ERROR"):
+    return {"id": pid, "state": state, "publishDate": "2026-10-10T10:00:00.000Z",
+            "integration": {"providerIdentifier": "instagram", "name": "acct"}}
+
+
+def test_a_post_postiz_marked_error_alerts_unless_superseded_or_not_ours(dbp, monkeypatch):
+    from hypogeum.publishing import postiz as pz_mod
+    _map_post(dbp, pid="pe1")
+    monkeypatch.setattr(pz_mod.PostizProvider, "__init__", lambda self, *a, **k: None)
+    monkeypatch.setattr(pz_mod.PostizProvider, "list_posts", lambda self, **k: [_err_post(), _err_post("alien"), _err_post("ok", "PUBLISHED")])
+    assert list(oa.check_postiz_post_errors(dbp, NOW)) == ["pzerr:pe1"]
+    conn = db.get_connection(dbp)
+    conn.execute("UPDATE provider_content_mappings SET status='superseded'")
+    conn.commit()
+    assert oa.check_postiz_post_errors(dbp, NOW) == {}
+    monkeypatch.setattr(pz_mod.PostizProvider, "list_posts", lambda self, **k: (_ for _ in ()).throw(RuntimeError("down")))
+    assert oa.check_postiz_post_errors(dbp, NOW) == {}

@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS operator_alert_checks (
 
 # per-check minimum interval (seconds) — run_operator_checks is called from
 # every worker iteration (~60s); the network-backed checks run less often.
-_INTERVALS = {"adapters": 300, "run_failures": 60, "queue_failures": 120, "buffer_gap": 1800, "production_stalled": 1800, "partial_releases": 300, "public_youtube_shorts": 600, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
+_INTERVALS = {"adapters": 300, "run_failures": 60, "queue_failures": 120, "buffer_gap": 1800, "production_stalled": 1800, "partial_releases": 300, "public_youtube_shorts": 600, "postiz_post_errors": 600, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
               "youtube_covers": 300, "stuck_releases": 300, "youtube_flip_auth": 3600, "posts": 1800, "unpublished": 300, "accounts": 600, "archive": 300, "archive_backlog": 600, "disk": 1800}
 _DASHBOARD = "http://127.0.0.1:5001"
 _CREDIT_LOW_USD = 3.0
@@ -655,6 +655,49 @@ def check_public_youtube_shorts(db_path, now: datetime) -> dict:
     return out
 
 
+def check_postiz_post_errors(db_path, now: datetime) -> dict:
+    """A post Postiz itself marked ERROR within the last 24h (rejected by the platform, token expired, media
+    refused ...) and not superseded by a newer post for the same episode/platform. The factory's own publish
+    check only looks at what it sent; this reads Postiz's verdict, so a failure that happens AFTER the send
+    reaches the operator on the next tick. A Postiz outage is not a finding: returns {}."""
+    try:
+        from hypogeum.db import get_connection
+        from hypogeum.publishing.postiz import PostizProvider
+        dbp = Path(db_path) if db_path else None
+        posts = PostizProvider().list_posts(start=now - timedelta(hours=24), end=now + timedelta(hours=1), db_path=dbp)
+        bad = [p for p in posts if str(p.get("state") or "").upper() == "ERROR" and p.get("id")]
+        if not bad:
+            return {}
+        conn = get_connection(dbp)
+        try:
+            out = {}
+            for p in bad:
+                pid = str(p["id"])
+                m = conn.execute("SELECT channel_id, episode_id, platform, deliverable_id, status FROM provider_content_mappings "
+                                 "WHERE provider_content_id = ? LIMIT 1", (pid,)).fetchone()
+                if m is None or m["status"] != "confirmed":
+                    continue                               # not one of ours / already superseded
+                newer = conn.execute(
+                    "SELECT 1 FROM provider_content_mappings WHERE episode_id = ? AND platform = ? AND deliverable_id = ? "
+                    "AND provider_content_id != ? AND created_at > (SELECT created_at FROM provider_content_mappings "
+                    "WHERE provider_content_id = ? LIMIT 1) LIMIT 1",
+                    (m["episode_id"], m["platform"], m["deliverable_id"], pid, pid)).fetchone()
+                if newer:
+                    continue                               # already re-posted
+                integ = p.get("integration") if isinstance(p.get("integration"), dict) else {}
+                out[f"pzerr:{pid}"] = (
+                    f"Postiz رفض بوست {m['platform']} ({m['channel_id']})",
+                    f"الحلقة: {m['episode_id']} ({m['deliverable_id']})\nالحساب: {integ.get('name') or '-'}\n"
+                    f"ميعاد النشر: {p.get('publishDate')}\nPostiz علّم البوست ERROR، يعني مانزلش على المنصة.",
+                    _ws_extra(m["channel_id"], db_path, (f"{m['channel_id']}: a {m['platform']} post failed in Postiz",
+                                                         f"{m['episode_id']} was marked ERROR by Postiz.")))
+            return out
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def check_production_paused(db_path) -> dict:
     from hypogeum.db import get_worker_control
     dbp = Path(db_path) if db_path else None
@@ -1215,6 +1258,7 @@ def run_operator_checks(*, db_path=None, config=None, now: Optional[datetime] = 
         ("production_stalled", "stalled:", lambda: check_production_stalled(db_path, now)),
         ("partial_releases", "partial:", lambda: check_partial_releases(db_path, now)),
         ("public_youtube_shorts", "ytpublic:", lambda: check_public_youtube_shorts(db_path, now)),
+        ("postiz_post_errors", "pzerr:", lambda: check_postiz_post_errors(db_path, now)),
         ("blocking_signals", "signal:", lambda: check_blocking_signals(db_path)),
         ("youtube_covers", "cover:", lambda: check_youtube_covers(db_path, now)),
         ("stuck_releases", "stuckrelease:", lambda: check_stuck_releases(db_path, now)),

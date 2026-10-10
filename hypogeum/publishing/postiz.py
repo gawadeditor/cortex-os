@@ -254,6 +254,27 @@ def _iso_utc(value: datetime) -> str:
     return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
+_YOUTUBE_TAGS_MAX_CHARS = 480   # YouTube/Postiz reject more than 500 characters in total for all tags
+
+
+def _fit_youtube_tags(tags) -> list:
+    """Keep tags, in order, while their total size stays under YouTube's 500-character limit
+    (each tag counts its length + a comma, + 2 quotes when it contains a space). Postiz rejects the
+    whole post otherwise (2026-10-10: ep_014876fc 'The maximum allowed is 500 characters in total for
+    all tags'). The earliest tags are the most important ones, so the tail is what gets dropped."""
+    kept, used = [], 0
+    for t in tags:
+        t = str(t).strip()
+        if not t:
+            continue
+        cost = len(t) + 1 + (2 if " " in t else 0)
+        if used + cost > _YOUTUBE_TAGS_MAX_CHARS:
+            break
+        kept.append(t)
+        used += cost
+    return kept
+
+
 def build_platform_settings(platform: str, *, title: Optional[str], options: dict,
                             thumbnail: Optional[dict] = None) -> dict:
     """
@@ -288,7 +309,7 @@ def build_platform_settings(platform: str, *, title: Optional[str], options: dic
             "title": title,
             "type": privacy,
             "selfDeclaredMadeForKids": "yes" if options["made_for_kids"] else "no",
-            "tags": [{"value": t, "label": t} for t in (options.get("tags") or [])],
+            "tags": [{"value": t, "label": t} for t in _fit_youtube_tags(options.get("tags") or [])],
         }
         if thumbnail:
             settings["thumbnail"] = thumbnail

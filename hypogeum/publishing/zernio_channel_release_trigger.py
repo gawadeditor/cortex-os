@@ -860,23 +860,36 @@ def _resolve_platform_settings_for_call(
 def _platforms_without_any_intent(
     channel_id: str, item_id: str, platforms: Sequence[str], db_path: Optional[Path],
 ) -> List[str]:
-    """`platforms` that have NO publication_intents row for this episode (any
-    status). Best-effort: [] on any error, so a query bug can never cause a
-    release for a platform that may already be booked."""
+    """`platforms` that still need releasing for an episode that already has some booking: those with
+    NO publication intent, plus those whose intent is not 'succeeded' and whose LATEST attempt was a
+    definitive rejection (safe to retry -- the provider took nothing). Ambiguous / in-flight attempts
+    are never returned. Best-effort: [] on any error, so a query bug can never cause a release for a
+    platform that may already be booked."""
     if not channel_id or not item_id or not platforms:
         return []
     try:
         from hypogeum.db import get_connection  # noqa: PLC0415
         conn = get_connection(Path(db_path) if db_path else None)
         try:
-            have = {r[0] for r in conn.execute(
-                "SELECT DISTINCT platform FROM publication_intents WHERE episode_id = ? AND channel_id = ?",
-                (item_id, channel_id)).fetchall()}
+            status = {r[0]: r[1] for r in conn.execute(
+                "SELECT platform, MAX(CASE WHEN status = 'succeeded' THEN 2 ELSE 1 END) FROM publication_intents "
+                "WHERE episode_id = ? AND channel_id = ? GROUP BY platform", (item_id, channel_id)).fetchall()}
+            if not status:
+                return []   # a slot with no intents at all came from elsewhere: never re-book it
+            latest_state = {}
+            for r in conn.execute(
+                    "SELECT platform, state FROM publishing_attempts WHERE episode_id = ? AND channel_id = ? "
+                    "ORDER BY created_at ASC", (item_id, channel_id)).fetchall():
+                latest_state[r[0]] = r[1]          # the last row per platform wins
         finally:
             conn.close()
-        if not have:
-            return []   # a slot with no intents at all came from elsewhere: never re-book it
-        return [p for p in platforms if p not in have]
+        out = []
+        for p in platforms:
+            if p not in status:
+                out.append(p)
+            elif status[p] != 2 and latest_state.get(p) == "failed_definitive":
+                out.append(p)
+        return out
     except Exception:  # noqa: BLE001
         return []
 

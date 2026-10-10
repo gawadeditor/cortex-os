@@ -974,3 +974,37 @@ class TestPlatformsWithoutAnyIntent:
         from hypogeum.publishing.zernio_channel_release_trigger import _platforms_without_any_intent as f
         db = self._db(tmp_path, [])
         assert f("ch", "ep1", ["facebook", "tiktok"], db) == []
+
+    def _attempt(self, db, plat, state, n=1):
+        import uuid
+        from hypogeum.db import get_connection
+        conn = get_connection(db)
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute(
+            "INSERT INTO publishing_attempts (attempt_id, publication_intent_id, channel_id, episode_id, deliverable_id, "
+            "platform, provider_id, attempt_number, state, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (str(uuid.uuid4()), "pi", "ch", "ep1", "main_episode", plat, "postiz", n, state,
+             f"2026-10-10T00:00:0{n}", f"2026-10-10T00:00:0{n}"))
+        conn.commit()
+        conn.close()
+
+    def test_a_definitively_rejected_platform_is_retried_but_an_ambiguous_one_never_is(self, tmp_path):
+        import uuid
+        from hypogeum.db import get_connection
+        from hypogeum.publishing.zernio_channel_release_trigger import _platforms_without_any_intent as f
+        db = self._db(tmp_path, ["tiktok"])
+        conn = get_connection(db)
+        conn.execute("PRAGMA foreign_keys = OFF")
+        for plat in ("youtube", "facebook"):      # intents that are open (not succeeded)
+            conn.execute(
+                "INSERT INTO publication_intents (publication_intent_id, channel_id, episode_id, deliverable_id, "
+                "platform, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                (str(uuid.uuid4()), "ch", "ep1", "main_episode", plat, "open", "2026-10-10T00:00:00", "2026-10-10T00:00:00"))
+        conn.commit()
+        conn.close()
+        self._attempt(db, "youtube", "failed_definitive")
+        self._attempt(db, "facebook", "ambiguous")
+        assert f("ch", "ep1", ["facebook", "tiktok", "youtube"], db) == ["youtube"]
+        # once the retry itself succeeds nothing more is returned for it
+        self._attempt(db, "youtube", "acknowledged", n=2)
+        assert f("ch", "ep1", ["facebook", "tiktok", "youtube"], db) == []

@@ -433,3 +433,18 @@ def test_draft_sends_draft_type(db_path):
     _provider(t).publish(platform="youtube", deliverable_type="short", episode_id="ep_1",
                          **_kwargs(db_path, scheduled_for=None, is_draft=True))
     assert t.creates()[0][3]["type"] == "draft"
+
+
+class TestYoutubeTagsFitTheFiveHundredCharacterLimit:
+    """2026-10-10: Postiz rejected a YouTube post with 'The maximum allowed is 500 characters in total for all tags'."""
+
+    def test_tags_are_trimmed_from_the_tail_to_fit(self):
+        from hypogeum.publishing.postiz import _fit_youtube_tags, _YOUTUBE_TAGS_MAX_CHARS
+        tags = [f"bedtime story for kids number {i}" for i in range(40)]
+        kept = _fit_youtube_tags(tags)
+        assert kept == tags[:len(kept)] and 0 < len(kept) < len(tags)
+        assert sum(len(t) + 1 + 2 for t in kept) <= _YOUTUBE_TAGS_MAX_CHARS
+
+    def test_a_short_tag_list_is_untouched(self):
+        from hypogeum.publishing.postiz import _fit_youtube_tags
+        assert _fit_youtube_tags(["history", "mystery"]) == ["history", "mystery"]

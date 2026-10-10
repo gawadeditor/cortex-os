@@ -118,7 +118,7 @@ def test_deliver_link_uses_smtp_only_when_configured_and_never_raises(monkeypatc
         def __exit__(self, *a): return False
         def starttls(self): sent.append(("tls",))
         def login(self, u, p): sent.append(("login", u))
-        def send_message(self, m): sent.append(("msg", m["To"], m["From"], "/auth/tok" in m.get_content()))
+        def send_message(self, m): sent.append(("msg", m["To"], m["From"], "/auth/tok" in m.get_body(preferencelist=("plain",)).get_content()))
 
     monkeypatch.setattr(pa.smtplib, "SMTP", FakeSMTP)
     assert pa.deliver_link("a@acme.com", "https://x/auth/tok", NS(PORTAL_SMTP_HOST=None)) is False and sent == []
@@ -188,7 +188,7 @@ class _Mail:
             def __exit__(self, *a): return False
             def starttls(self): pass
             def login(self, *a): pass
-            def send_message(self, m): outer.sent.append((m["To"], m["Subject"], m.get_content()))
+            def send_message(self, m): outer.sent.append((m["To"], m["Subject"], m.get_body(preferencelist=("plain",)).get_content(), m.get_body(preferencelist=("html",)).get_content()))
         monkeypatch.setattr(pa.smtplib, "SMTP", SMTP)
 
 
@@ -201,8 +201,8 @@ def test_invite_emails_a_week_long_single_use_link(env, monkeypatch):
     mail = _Mail(monkeypatch)
     res = pa.invite_and_send("new@acme.com", "acme", "owner", env, CFG_MAIL, "Acme")
     assert res["emailed"] and res["link"].startswith("https://app.example.com/auth/")
-    to, subject, body = mail.sent[0]
-    assert to == "new@acme.com" and "Acme" in subject and res["link"] in body
+    to, subject, body, html = mail.sent[0]
+    assert to == "new@acme.com" and "Acme" in subject and res["link"] in body and res["link"] in html and "#f0a838" in html
     token = res["link"].rsplit("/", 1)[1]
     assert pa.consume_login_link(token, env, now=datetime.now(timezone.utc) + timedelta(days=6)) is not None   # still valid on day 6
     assert pa.consume_login_link(token, env) is None                                                          # single use
@@ -230,3 +230,12 @@ def test_the_portal_lets_a_user_turn_alert_emails_off_and_on(env):
     assert pa.workspace_emails("acme", env) == []
     c.post("/notify", data={"on": "1"})
     assert pa.workspace_emails("acme", env) == ["a@acme.com"]
+
+
+def test_email_templates_are_multipart_branded_and_escape_their_input():
+    from hypogeum import email_templates as et
+    for subject, text, html in (et.sign_in("https://x/auth/t"), et.invitation("<b>Acme</b>", "https://x/auth/t", "https://x"),
+                                et.alert("🔴 Title <script>\nbody & more", "https://x")):
+        assert subject and text and "#f0a838" in html and "Cortex" in html and "<script>" not in html
+    assert "&lt;b&gt;Acme&lt;/b&gt;" in et.invitation("<b>Acme</b>", "https://x/auth/t", "https://x")[2]
+    assert "Resolved" in et.alert("✅ Back to normal\nfixed", "https://x")[2]

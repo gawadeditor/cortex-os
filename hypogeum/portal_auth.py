@@ -193,7 +193,7 @@ def logout(session_token: str, db_path=None) -> None:
         conn.close()
 
 
-def send_email(to: str, subject: str, text: str, config) -> bool:
+def send_email(to: str, subject: str, text: str, config, html: Optional[str] = None) -> bool:
     """Plain-text email over SMTP (PORTAL_SMTP_*). False = not configured or failed; never raises."""
     host = getattr(config, "PORTAL_SMTP_HOST", None)
     if not host:
@@ -204,6 +204,8 @@ def send_email(to: str, subject: str, text: str, config) -> bool:
         msg["From"] = getattr(config, "PORTAL_SMTP_FROM", None) or "no-reply@cortexchannels.com"
         msg["To"] = to
         msg.set_content(text)
+        if html:
+            msg.add_alternative(html, subtype="html")
         with smtplib.SMTP(host, int(getattr(config, "PORTAL_SMTP_PORT", 587) or 587), timeout=15) as s:
             s.starttls()
             user = getattr(config, "PORTAL_SMTP_USER", None)
@@ -220,9 +222,9 @@ def send_email(to: str, subject: str, text: str, config) -> bool:
 def deliver_link(email: str, link: str, config) -> bool:
     """The sign-in link email. False = not sent (the operator can still hand the link over:
     `scripts/workspaces.py login-link`)."""
-    return send_email(email, "Your Cortex sign-in link",
-                      f"Open this link to sign in (valid 15 minutes, single use):\n\n{link}\n\n"
-                      "If you did not ask for it, ignore this email.", config)
+    from hypogeum import email_templates as et  # noqa: PLC0415
+    subject, text, html = et.sign_in(link)
+    return send_email(email, subject, text, config, html)
 
 
 def _base_url(config) -> str:
@@ -239,13 +241,9 @@ def invite_and_send(email: str, workspace_id: str, role: str = "owner", db_path=
     link = f"{_base_url(config)}/auth/{token}" if token else None
     emailed = False
     if link:
-        name = workspace_name or workspace_id
-        emailed = send_email(
-            user["email"], f"You have been invited to Cortex ({name})",
-            f"You now have access to the Cortex portal for {name}: your channels, what we have published for you, "
-            f"this month's spending and anything that needs your attention.\n\nSign in with this link "
-            f"(valid 7 days, single use):\n\n{link}\n\nAfter that, you can request a new sign-in link any time from "
-            f"{_base_url(config)}/login using this email address.", config)
+        from hypogeum import email_templates as et  # noqa: PLC0415
+        subject, text, html = et.invitation(workspace_name or workspace_id, link, _base_url(config))
+        emailed = send_email(user["email"], subject, text, config, html)
     return {"user": user, "emailed": emailed, "link": link}
 
 
@@ -276,9 +274,8 @@ def send_workspace_alert_email(workspace_id: str, text: str, db_path=None, confi
         kind = {w["workspace_id"]: w["kind"] for w in ws.list_workspaces(Path(db_path) if db_path else None)}.get(workspace_id)
         if kind != "client":
             return False
-        lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
-        subject = (lines[0] if lines else "Cortex notification").lstrip("🔴✅🛠 ")[:120]
-        body = text.strip() + f"\n\n—\nOpen your portal: {_base_url(config)}\nTo stop these emails, turn off 'Email me about problems' there."
-        return any([send_email(e, subject, body, config) for e in workspace_emails(workspace_id, db_path)])
+        from hypogeum import email_templates as et  # noqa: PLC0415
+        subject, body, html = et.alert(text, _base_url(config))
+        return any([send_email(e, subject, body, config, html) for e in workspace_emails(workspace_id, db_path)])
     except Exception:  # noqa: BLE001
         return False

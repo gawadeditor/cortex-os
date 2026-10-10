@@ -52,7 +52,7 @@ def test_production_paused_opens_and_resolves(db):
     set_worker_control("queue_paused_reason", "muapi_spend_breaker: 3 failed runs", db_path=db)
     oa.run_operator_checks(db_path=db, config=_CFG, now=NOW, send=out, force=True)
     oa.run_operator_checks(db_path=db, config=_CFG, now=NOW, send=out, force=True)
-    paused = [m for m in out if "الإنتاج واقف" in m]
+    paused = [m for m in out if m.startswith("🔴") and "الإنتاج واقف" in m]
     assert len(paused) == 1 and "3 failed runs" in paused[0]   # the cause, in the message
     set_worker_control("queue_paused", "0", db_path=db)
     oa.run_operator_checks(db_path=db, config=_CFG, now=NOW, send=out, force=True)
@@ -612,3 +612,48 @@ def test_partial_release_alert_names_missing_platforms_and_errors_and_closes_whe
     for plat in ("instagram", "youtube"):
         _intent(db, "ep9", plat, "succeeded", NOW - timedelta(minutes=5), ch="hypogeum")
     assert oa.check_partial_releases(db, NOW) == {}                             # complete: closes
+
+
+# --- daily summary + a salvaged episode counts as finished ---
+
+def test_daily_summary_is_sent_once_per_uae_day_after_nine(db):
+    out = _Outbox()
+    early = datetime(2026, 10, 10, 4, 0, tzinfo=timezone.utc)      # 08:00 UAE
+    assert oa.maybe_send_daily_summary(db, _CFG, early, out) is False and not out
+    on = datetime(2026, 10, 10, 5, 5, tzinfo=timezone.utc)         # 09:05 UAE
+    assert oa.maybe_send_daily_summary(db, _CFG, on, out) is True
+    assert oa.maybe_send_daily_summary(db, _CFG, on + timedelta(hours=3), out) is False   # same UAE day
+    assert oa.maybe_send_daily_summary(db, _CFG, on + timedelta(days=1), out) is True     # next day
+    assert len(out) == 2 and "ملخص يومي" in out[0]
+
+
+def test_daily_summary_lists_buffer_upcoming_covers_and_open_alerts(db, monkeypatch):
+    conn = get_connection(db)
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("INSERT INTO schedules (schedule_id, scope, channel_id, cadence, status, created_at, updated_at) "
+                 "VALUES ('s1','channel','chA','daily','active',?,?)", (NOW.isoformat(), NOW.isoformat()))
+    conn.execute("INSERT INTO episodes (episode_id, title, topic, created_at, status) VALUES ('epA','Big Story','t',?,?)",
+                 (NOW.isoformat(), "complete"))
+    conn.execute("INSERT INTO channel_publish_slots (channel_id, slot_utc, episode_id, created_at) VALUES (?,?,?,?)",
+                 ("chA", (NOW + timedelta(days=2)).isoformat(), "epA", NOW.isoformat()))
+    conn.execute("INSERT INTO youtube_cover_holds (post_id, channel_id, episode_id, release_at, upload_at, status, held_at) "
+                 "VALUES ('p1','chA','epA',?,?,'held',?)",
+                 ((NOW + timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%S.000Z"), NOW.isoformat(), NOW.isoformat()))
+    conn.commit()
+    conn.close()
+    oa.alert("x:1", "مشكلة تجريبية", db_path=db, send=_Outbox())
+    text = oa.build_daily_summary(db, NOW)
+    assert "chA" in text and "Big Story" in text and "أغلفة يوتيوب" in text and "مشكلة تجريبية" in text
+
+
+def test_an_episode_finished_by_a_salvage_run_counts_as_finished(db, monkeypatch):
+    monkeypatch.setenv("PRODUCTION_BUFFER_TARGET", "3")
+    _channel_with_slots(db, monkeypatch, filled_slots=[])
+    _queue_row(db, "ch", "ep_old", "completed", NOW - timedelta(days=30), completed_at=(NOW - timedelta(days=30)).isoformat())
+    conn = get_connection(db)
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("INSERT INTO runs (run_id, episode_id, started_at, completed_at, status, channel_id) VALUES (?,?,?,?,?,?)",
+                 ("r_salv", "ep_old", (NOW - timedelta(hours=2)).isoformat(), (NOW - timedelta(hours=1)).isoformat(), "completed", "ch"))
+    conn.commit()
+    conn.close()
+    assert oa.check_production_stalled(db, NOW) == {}

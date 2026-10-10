@@ -500,6 +500,23 @@ def check_buffer_gap(db_path, now: datetime) -> dict:
     return out
 
 
+def _last_finished_by_channel(conn) -> dict:
+    """{channel_id: ISO time of the newest finished episode}: a queue item that completed OR a run that
+    completed (an automatic/manual salvage finishes an episode without a queue item)."""
+    out: dict = {}
+    for sql in (
+        "SELECT channel_id, MAX(COALESCE(completed_at, queued_at)) FROM run_queue WHERE status = 'completed' GROUP BY channel_id",
+        "SELECT channel_id, MAX(completed_at) FROM runs WHERE status IN ('completed','complete') AND channel_id IS NOT NULL GROUP BY channel_id",
+    ):
+        try:
+            for ch, ts in conn.execute(sql):
+                if ts and (ch not in out or str(ts) > str(out[ch])):
+                    out[ch] = ts
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
 _STALL_ALERT_DAYS = 3   # no episode finished for this long while the buffer is below target
 
 
@@ -517,9 +534,7 @@ def check_production_stalled(db_path, now: datetime) -> dict:
     try:
         channels = [r[0] for r in conn.execute(
             "SELECT DISTINCT channel_id FROM schedules WHERE status = 'active' AND channel_id IS NOT NULL")]
-        last_done = {r[0]: r[1] for r in conn.execute(
-            "SELECT channel_id, MAX(COALESCE(completed_at, queued_at)) FROM run_queue "
-            "WHERE status = 'completed' GROUP BY channel_id")}
+        last_done = _last_finished_by_channel(conn)
         from hypogeum.scheduler import _PRODUCTION_BUFFER_TARGET, _env_int, channel_buffer_depth
         target = _env_int("PRODUCTION_BUFFER_TARGET", _PRODUCTION_BUFFER_TARGET)
         depths = {ch: channel_buffer_depth(ch, conn, now=now) for ch in channels} if target else {}
@@ -1039,6 +1054,94 @@ def check_disk(path: str = "/System/Volumes/Data", *, usage=None) -> dict:
     return {} if free_gb >= _DISK_OK_GB else None   # between thresholds: keep current state
 
 
+# ---------------------------------------------------------------------------
+# Daily summary -- the operator should not have to ask what the state is.
+# ---------------------------------------------------------------------------
+
+_SUMMARY_HOUR_UAE = 9          # sent once a day, the first tick at/after 09:00 UAE (UTC+4)
+_UAE = timedelta(hours=4)
+
+
+def _uae(dt: datetime) -> str:
+    return (dt + _UAE).strftime("%a %d %b %H:%M")
+
+
+def build_daily_summary(db_path, now: datetime) -> str:
+    """One Arabic message: per channel the buffer, the last finished episode and what is booked
+    next; plus YouTube covers waiting for the operator, open alerts and automatic salvages."""
+    import os  # noqa: PLC0415
+    from hypogeum.scheduler import _PRODUCTION_BUFFER_TARGET, _env_int, channel_buffer_depth
+    target = _env_int("PRODUCTION_BUFFER_TARGET", _PRODUCTION_BUFFER_TARGET)
+    now_iso = now.isoformat()
+    lines = [f"📋 ملخص يومي — {_uae(now)} (الإمارات)", ""]
+    conn = _conn(db_path)
+    try:
+        channels = [r[0] for r in conn.execute(
+            "SELECT DISTINCT channel_id FROM schedules WHERE status = 'active' AND channel_id IS NOT NULL ORDER BY channel_id")]
+        for ch in channels:
+            depth = channel_buffer_depth(ch, conn, now=now)
+            last = _last_finished_by_channel(conn).get(ch)
+            lines.append(f"▪️ {ch}")
+            lines.append(f"   البافر: {depth} من {target}" + (f" · آخر حلقة خلصت: {_uae(_parse_iso(last))}" if last else ""))
+            slots = conn.execute(
+                "SELECT s.slot_utc, COALESCE(NULLIF(e.title,''), s.episode_id) AS t FROM channel_publish_slots s "
+                "LEFT JOIN episodes e ON e.episode_id = s.episode_id "
+                "WHERE s.channel_id = ? AND s.slot_utc > ? ORDER BY s.slot_utc LIMIT 4", (ch, now_iso)).fetchall()
+            if slots:
+                for sl in slots:
+                    lines.append(f"   ⏭ {_uae(_parse_iso(sl['slot_utc']))} — {str(sl['t'])[:48]}")
+            else:
+                lines.append("   ⚠️ مفيش حاجة متجدولة")
+        try:
+            covers = conn.execute(
+                "SELECT h.channel_id, h.release_at, COALESCE(NULLIF(e.title,''), h.episode_id) AS t FROM youtube_cover_holds h "
+                "LEFT JOIN episodes e ON e.episode_id = h.episode_id WHERE h.status IN ('held','late') "
+                "AND h.post_id NOT IN (SELECT post_id FROM youtube_cover_confirmations) ORDER BY h.release_at").fetchall()
+        except Exception:  # noqa: BLE001
+            covers = []
+        if covers:
+            lines += ["", "🖼 أغلفة يوتيوب مطلوبة منك:"]
+            lines += [f"   • {c['channel_id']}: {str(c['t'])[:44]} (قبل {_uae(_parse_iso(c['release_at']))})" for c in covers]
+        opened = conn.execute("SELECT title FROM operator_alerts WHERE status = 'open' ORDER BY opened_at").fetchall()
+        lines += ["", "🔴 تنبيهات مفتوحة: " + (str(len(opened)) if opened else "مفيش")]
+        lines += [f"   • {str(r['title'])[:70]}" for r in opened[:5]]
+    finally:
+        conn.close()
+    try:
+        from hypogeum.auto_salvage import list_records
+        recs = list_records(db_path, since=now - timedelta(hours=24))
+        if recs:
+            lines += ["", "🛟 إنقاذ تلقائي (آخر 24 ساعة):"]
+            lines += [f"   • {r['episode_id']}: " + ("نجح" if r.get("ok") else ("شغال" if r.get("ok") is None else "فشل")) for r in recs[:4]]
+    except Exception:  # noqa: BLE001
+        pass
+    return "\n".join(lines)
+
+
+def _parse_iso(ts) -> datetime:
+    dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def maybe_send_daily_summary(db_path, config, now: datetime, send: Optional[Callable[[str], bool]] = None) -> bool:
+    """Send the summary once per UAE day, at the first tick at/after 09:00 UAE. Never raises."""
+    try:
+        from hypogeum.db import get_worker_control, set_worker_control
+        dbp = Path(db_path) if db_path else None
+        local = now + _UAE
+        today = local.strftime("%Y-%m-%d")
+        if local.hour < _SUMMARY_HOUR_UAE or get_worker_control("daily_summary_sent", "", db_path=dbp) == today:
+            return False
+        set_worker_control("daily_summary_sent", today, db_path=dbp)       # mark first: a send problem must not repeat
+        text = build_daily_summary(db_path, now)
+        if send is not None:
+            return bool(send(text))
+        return bool(_deliver("summary:daily", None, text, None, config, db_path, with_buttons=False))
+    except Exception as exc:  # noqa: BLE001
+        log.warn("daily_summary_failed", error=str(exc)[:200])
+        return False
+
+
 def run_operator_checks(*, db_path=None, config=None, now: Optional[datetime] = None,
                         send: Optional[Callable[[str], bool]] = None, force: bool = False) -> dict:
     """Run every due check; open/resolve alerts. Returns {check: n_open}."""
@@ -1089,6 +1192,7 @@ def run_operator_checks(*, db_path=None, config=None, now: Optional[datetime] = 
         _retry_unsent(db_path, config, send, now)
     except Exception as exc:  # noqa: BLE001
         log.warn("operator_alert_retry_failed", error=str(exc)[:200])
+    maybe_send_daily_summary(db_path, config, now, send)
     return out
 
 

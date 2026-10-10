@@ -14,7 +14,7 @@
     .rail-foot form { margin: 0; } .rail-foot .btn { width: 100%; justify-content: center; }
     .ws-ring { display: flex; align-items: center; gap: 14px; }
     .kv { display: flex; justify-content: space-between; gap: 16px; padding: 9px 0; border-bottom: 1px solid var(--hairline); font-size: 13px; }
-    .kv:last-child { border-bottom: none; } .kv .k { color: var(--faint); } .kv .v { text-align: right; font-variant-numeric: tabular-nums; }
+    .kv:last-child { border-bottom: none; } .kv .k { color: var(--muted); } .kv .v { color: var(--text); text-align: right; font-variant-numeric: tabular-nums; }
     .bar-row { display: grid; grid-template-columns: 140px 1fr 84px; gap: 14px; align-items: center; padding: 8px 0; font-size: 13px; }
     .bar-row .t { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
     .bar-track { height: 8px; background: var(--border); border-radius: 999px; overflow: hidden; }
@@ -76,9 +76,16 @@
     <a href="/">{{ workspace_name }}</a>{% if crumb %}<span class="breadcrumb-sep"> › </span><span>{{ crumb }}</span>{% endif %}
   </div>
   <nav class="topbar-tabs" aria-label="section">
-    <a href="/" class="topbar-tab {{ 'active' if active == 'home' or (active or '').startswith('channel:') }}">Overview</a>
+    {% if channel_id %}
+    <a href="/channel/{{ channel_id }}" class="topbar-tab {{ 'active' if tab == 'overview' }}">Overview</a>
+    <a href="/channel/{{ channel_id }}/episodes" class="topbar-tab {{ 'active' if tab == 'episodes' }}">Episodes</a>
+    <a href="/channel/{{ channel_id }}/analytics" class="topbar-tab {{ 'active' if tab == 'analytics' }}">Analytics</a>
+    <a href="/channel/{{ channel_id }}/posts" class="topbar-tab {{ 'active' if tab == 'posts' }}">Posts</a>
+    {% else %}
+    <a href="/" class="topbar-tab {{ 'active' if active == 'home' }}">Overview</a>
     <a href="/usage" class="topbar-tab {{ 'active' if active == 'usage' }}">Usage</a>
     <a href="/welcome" class="topbar-tab {{ 'active' if active == 'setup' }}">Setup</a>
+    {% endif %}
   </nav>
 </header>
 

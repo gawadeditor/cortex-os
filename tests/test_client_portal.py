@@ -108,7 +108,9 @@ def test_the_portal_has_no_operator_routes():
     rules = {r.rule for r in app.url_map.iter_rules()}
     assert rules <= {"/login", "/auth/<token>", "/logout", "/", "/channel/<channel_id>", "/episode/<episode_id>/thumbnail",
                      "/static/<path:filename>", "/notify", "/welcome", "/welcome/keys/<provider>",
-                     "/welcome/telegram", "/usage", "/usage.csv"}
+                     "/welcome/telegram", "/usage", "/usage.csv",
+                     "/channel/<channel_id>/posts", "/channel/<channel_id>/episodes", "/channel/<channel_id>/episodes/<episode_id>",
+                     "/channel/<channel_id>/analytics"}
 
 
 def test_deliver_link_uses_smtp_only_when_configured_and_never_raises(monkeypatch):
@@ -435,3 +437,85 @@ def test_a_link_survives_being_fetched_by_a_mail_scanner_and_still_works_once(en
     assert person.post(f"/auth/{tok}").status_code == 303 and person.get("/").status_code == 200
     assert pa.peek_login_link(tok, env) is False and app.test_client().get(f"/auth/{tok}").status_code == 400
     assert app.test_client().post(f"/auth/{tok}").status_code == 400 and app.test_client().get("/auth/not-a-token").status_code == 400
+
+
+# --- channel pages: overview / episodes / analytics -------------------------------------------------------
+
+@pytest.fixture()
+def shows(env):
+    conn = db.get_connection(env)
+    conn.execute("PRAGMA foreign_keys = OFF")
+    for rid, ep, ch, title in (("ra", "ep_a1", "acme_ch", "Acme first story"), ("rb", "ep_b1", "beta_ch", "Beta secret story")):
+        conn.execute("INSERT INTO episodes (episode_id, title, topic, created_at, status, total_cost_usd) VALUES (?,?,?,?,?,?)",
+                     (ep, title, title, "2026-10-01T10:00:00", "complete", 9.5))
+        conn.execute("INSERT INTO runs (run_id, episode_id, started_at, completed_at, status, channel_id) VALUES (?,?,?,?,?,?)",
+                     (rid, ep, "2026-10-01T10:00:00", "2026-10-01T11:00:00", "completed", ch))
+        for day, views in (("2026-10-02", 100), ("2026-10-03", 160), ("2026-10-04", 400)):
+            conn.execute("INSERT INTO platform_analytics (record_id, episode_id, platform, snapshot_date, window_days, views, likes, comments, "
+                         "total_watch_time_s, source, imported_at, metadata_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                         (f"{ep}_{day}", ep, "youtube", day, 1, views, views // 10, 3, views * 20, "api", day, "1"))
+        conn.execute("INSERT INTO costs (cost_id, run_id, episode_id, provider, model, call_type, tokens_or_credits, cost_usd, called_at) "
+                     "VALUES (?,?,?,?,?,?,?,?,?)", (f"c_{ep}", rid, ep, "muapi", "m", "scene", 0, 7.25, "2026-10-01T10:30:00"))
+    conn.commit()
+    conn.close()
+    return env
+
+
+def test_the_channel_pages_show_real_numbers_for_the_clients_own_channel_only(shows, monkeypatch):
+    from hypogeum import client_grants as cg
+    monkeypatch.setattr(cg, "grant_state", lambda ch, db=None, now=None: _fake_state(True))
+    app = create_app(shows)
+    a = _login(app, shows, "a@acme.com")
+    home = a.get("/channel/acme_ch").get_data(as_text=True)
+    assert "400" in home and "Acme first story" in home and "Beta secret story" not in home                     # latest snapshot (400), not the sum (660)
+    assert "Is this channel running on its own?" in home and "Production is authorized" in home
+    ep = a.get("/channel/acme_ch/episodes").get_data(as_text=True)
+    assert "Acme first story" in ep and "$7.25" in ep and "Finished" in ep and "Beta secret story" not in ep
+    detail = a.get("/channel/acme_ch/episodes/ep_a1").get_data(as_text=True)
+    assert "Acme first story" in detail and "Results by platform" in detail and "What it cost" in detail and "Muapi" in detail.replace("MUAPI", "Muapi")
+    an = a.get("/channel/acme_ch/analytics?days=30").get_data(as_text=True)
+    assert "Views gained per day" in an and "Top episodes" in an and "Acme first story" in an and "Youtube" in an
+    assert a.get("/channel/acme_ch/analytics?days=bogus").status_code == 200 and a.get("/channel/acme_ch/analytics?days=all").status_code == 200
+
+
+def test_another_workspaces_channel_episode_and_pages_are_404(shows):
+    app = create_app(shows)
+    a = _login(app, shows, "a@acme.com")
+    for url in ("/channel/beta_ch", "/channel/beta_ch/episodes", "/channel/beta_ch/analytics", "/channel/beta_ch/posts",
+                "/channel/beta_ch/episodes/ep_b1", "/channel/acme_ch/episodes/ep_b1", "/channel/plat_ch/episodes/ep_b1", "/channel/acme_ch/episodes/nope"):
+        assert a.get(url).status_code == 404, url
+    anon = app.test_client()
+    assert anon.get("/channel/acme_ch/analytics").status_code == 302 and anon.get("/channel/acme_ch/episodes/ep_a1").status_code == 302
+
+
+def test_a_channel_with_no_data_shows_calm_empty_states(env):
+    a = _login(create_app(env), env, "a@acme.com")
+    assert "No episodes yet" in a.get("/channel/acme_ch/episodes").get_data(as_text=True)
+    assert "Not enough measurements yet" in a.get("/channel/acme_ch/analytics").get_data(as_text=True)
+    assert a.get("/channel/acme_ch").status_code == 200 and a.get("/channel/acme_ch/posts").status_code == 200
+
+
+def test_the_daily_series_counts_gains_not_totals(shows):
+    from hypogeum import portal_channel as pc
+    d = pc.analytics("acme_ch", None, shows)
+    assert [x["views"] for x in d["daily"]] == [60, 240] and d["gained"] == 300 and d["totals"]["views"] == 400
+
+
+def test_an_episode_cover_falls_back_to_the_publishers_poster_then_to_a_placeholder(shows):
+    conn = db.get_connection(shows)
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("INSERT INTO content_grid_cache (post_id, channel_id, episode_id, deliverable_id, title, status, thumbnail_url, platforms_json, cached_at) "
+                 "VALUES ('p1','acme_ch','ep_a1','main_episode','t','published','https://media.zernio.com/media/x_main_episode.jpg','[]','2026-10-05')")
+    conn.execute("INSERT INTO content_grid_cache (post_id, channel_id, episode_id, deliverable_id, title, status, thumbnail_url, platforms_json, cached_at) "
+                 "VALUES ('p2','acme_ch','ep_a1','short_001','t','published','https://evil.example/x.jpg','[]','2026-10-05')")
+    conn.commit()
+    conn.close()
+    a = _login(create_app(shows), shows, "a@acme.com")
+    page = a.get("/channel/acme_ch/episodes/ep_a1").get_data(as_text=True)
+    assert 'src="https://media.zernio.com/media/x_main_episode.jpg"' in page and "evil.example" not in page          # no local file here: the poster
+    assert a.get("/episode/ep_a1/thumbnail").status_code == 404
+    conn = db.get_connection(shows)
+    conn.execute("DELETE FROM content_grid_cache")
+    conn.commit()
+    conn.close()
+    assert "cg-poster-empty" in a.get("/channel/acme_ch/episodes/ep_a1").get_data(as_text=True)                       # nothing at all: a calm placeholder

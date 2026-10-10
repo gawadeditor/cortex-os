@@ -2,9 +2,9 @@
 {% from '_icons.html' import icon %}
 {% from '_hero.html' import hero %}
 {% block content %}
-<div class="breadcrumb"><a href="/">Overview</a><span class="breadcrumb-sep">›</span><span>{{ name }}</span></div>
+<div class="breadcrumb"><a href="/">Overview</a><span class="breadcrumb-sep">›</span><a href="/channel/{{ channel_id }}">{{ name }}</a><span class="breadcrumb-sep">›</span><span>Posts</span></div>
 
-{% call hero(eyebrow='Channel', title=name, lede=(description or 'Your channel, produced and published by Cortex.'),
+{% call hero(eyebrow=name, title='Posts', lede='Every post of this channel: its cover, where it stands and where it is live.',
              pill=('Production authorized' if auth.active else 'Waiting for authorization'), pill_class=('is-good' if auth.active else 'is-warn'),
              meta=[{'label': 'posts', 'value': items|length}, {'label': 'published', 'value': published}, {'label': 'scheduled', 'value': scheduled},
                    {'label': 'spent this month', 'value': '$' ~ ('%.2f'|format(spend))}]) %}

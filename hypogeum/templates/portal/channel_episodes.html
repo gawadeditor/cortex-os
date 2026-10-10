@@ -1,0 +1,25 @@
+{% extends 'portal/_layout.html' %}
+{% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
+{% block content %}
+<div class="breadcrumb"><a href="/">Overview</a><span class="breadcrumb-sep">›</span><a href="/channel/{{ channel_id }}">{{ name }}</a><span class="breadcrumb-sep">›</span><span>Episodes</span></div>
+{% call hero(eyebrow=name, title='Episodes', lede='Everything Cortex has made for this channel, with how each one is doing.',
+             meta=[{'label': 'episodes', 'value': items|length}, {'label': 'total views', 'value': '{:,}'.format(total_views)},
+                   {'label': 'spent on these episodes', 'value': '$' ~ ('%.2f'|format(total_cost))}]) %}{% endcall %}
+{% if not items %}
+<div class="dv-empty">{{ icon('review') }}<div class="dv-empty-title">No episodes yet</div><div class="dv-empty-sub">Episodes appear here as soon as Cortex starts making them.</div></div>
+{% else %}
+<div class="card" style="padding:0;"><div class="table-wrap" style="border:none;"><table>
+  <thead><tr><th>Episode</th><th>Status</th><th>Views</th><th>Cost</th><th>When</th></tr></thead>
+  <tbody>
+  {% for e in items %}
+  <tr><td style="max-width:420px;"><a href="/channel/{{ channel_id }}/episodes/{{ e.episode_id }}" style="color:var(--text);font-weight:600;"><span class="cell-title">{{ e.title }}</span></a>
+      {% if e.platforms %}<div class="cg-platforms" style="padding-top:4px;">{% for pl in e.platforms %}<span class="cg-plat">{{ pl }}</span>{% endfor %}</div>{% endif %}</td>
+      <td><span class="badge badge-{{ 'complete' if e.tone == 'good' else ('failed' if e.tone == 'critical' else 'running') }}">{{ e.label }}</span></td>
+      <td class="muted">{% if e.views is not none %}{{ '{:,}'.format(e.views|int) }}{% else %}—{% endif %}</td>
+      <td class="muted">${{ '%.2f'|format(e.cost) }}</td>
+      <td class="muted" style="white-space:nowrap;">{{ e.when or '—' }}</td></tr>
+  {% endfor %}
+  </tbody></table></div></div>
+{% endif %}
+{% endblock %}

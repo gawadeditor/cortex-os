@@ -1,0 +1,38 @@
+{% extends 'portal/_layout.html' %}
+{% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
+{% from '_charts.html' import areachart %}
+{% block content %}
+<div class="breadcrumb"><a href="/">Overview</a><span class="breadcrumb-sep">›</span><a href="/channel/{{ channel_id }}">{{ name }}</a><span class="breadcrumb-sep">›</span><span>Analytics</span></div>
+{% call hero(eyebrow=name, title='Analytics', lede='How this channel is performing across every platform. Numbers come straight from the platforms.',
+             meta=[{'label': 'episodes measured', 'value': a.episodes_measured}, {'label': 'views gained', 'value': '{:,}'.format(a.gained) ~ (' in ' ~ a.days ~ ' days' if a.days else '')}]) %}{% endcall %}
+<div class="mtabs">{% for d, lbl in ranges %}<a class="topbar-tab {{ 'active' if (d or 'all') == (a.days or 'all')|string or (d == a.days) }}" href="/channel/{{ channel_id }}/analytics?days={{ d or 'all' }}">{{ lbl }}</a>{% endfor %}</div>
+<div class="stat-grid">
+  <div class="stat-card"><div class="stat-lbl">{{ icon('live') }} Views</div><div class="stat-val">{{ '{:,}'.format(a.totals.views) }}</div><div class="stat-note">all-time</div></div>
+  <div class="stat-card"><div class="stat-lbl">{{ icon('play') }} Watch time</div><div class="stat-val">{{ (a.totals.watch_s / 3600)|round(1) }}h</div></div>
+  <div class="stat-card"><div class="stat-lbl">{{ icon('check') }} Likes</div><div class="stat-val">{{ '{:,}'.format(a.totals.likes) }}</div></div>
+  <div class="stat-card"><div class="stat-lbl">{{ icon('pencil') }} Comments</div><div class="stat-val">{{ '{:,}'.format(a.totals.comments) }}</div></div>
+</div>
+{% if a.daily|length > 1 %}
+<div class="sec-head"><h2>Views gained per day</h2><span class="sec-count">{{ '{:,}'.format(a.gained) }} in total</span></div>
+<div class="card">{{ areachart(a.daily | map(attribute='views') | list, width=900, height=170) }}</div>
+{% else %}
+<div class="dv-empty">{{ icon('analytics') }}<div class="dv-empty-title">Not enough measurements yet</div><div class="dv-empty-sub">A trend needs at least two daily snapshots of an episode.</div></div>
+{% endif %}
+{% if a.platforms %}
+<div class="sec-head"><h2>By platform</h2></div>
+<div class="card" style="padding:0;"><div class="table-wrap" style="border:none;"><table>
+  <thead><tr><th>Platform</th><th>Views</th><th>Likes</th><th>Comments</th><th style="width:34%;">Share of views</th></tr></thead><tbody>
+  {% for p in a.platforms %}<tr><td style="font-weight:600;">{{ p.platform | capitalize }}</td><td>{{ '{:,}'.format(p.views) }}</td><td>{{ '{:,}'.format(p.likes) }}</td><td>{{ '{:,}'.format(p.comments) }}</td>
+    <td><div class="bar-track"><i style="width:{{ (100 * p.views / (a.totals.views or 1))|round }}%"></i></div></td></tr>{% endfor %}
+  </tbody></table></div></div>
+{% endif %}
+{% if a.top %}
+<div class="sec-head"><h2>Top episodes</h2></div>
+<div class="card" style="padding:0;"><div class="table-wrap" style="border:none;"><table>
+  <thead><tr><th>Episode</th><th>Views</th><th>Likes</th><th>Comments</th></tr></thead><tbody>
+  {% for t in a.top %}<tr><td style="max-width:420px;"><a href="/channel/{{ channel_id }}/episodes/{{ t.episode_id }}" style="color:var(--text);font-weight:600;"><span class="cell-title">{{ t.title }}</span></a></td>
+    <td>{{ '{:,}'.format(t.views) }}</td><td>{{ '{:,}'.format(t.likes) }}</td><td>{{ '{:,}'.format(t.comments) }}</td></tr>{% endfor %}
+  </tbody></table></div></div>
+{% endif %}
+{% endblock %}

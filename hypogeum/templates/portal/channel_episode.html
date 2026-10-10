@@ -1,0 +1,38 @@
+{% extends 'portal/_layout.html' %}
+{% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
+{% block content %}
+<div class="breadcrumb"><a href="/">Overview</a><span class="breadcrumb-sep">›</span><a href="/channel/{{ channel_id }}">{{ name }}</a><span class="breadcrumb-sep">›</span><a href="/channel/{{ channel_id }}/episodes">Episodes</a><span class="breadcrumb-sep">›</span><span>{{ e.title }}</span></div>
+{% call hero(eyebrow='Episode', title=e.title, lede='',
+             pill=e.label, pill_class=('is-good' if e.tone == 'good' else ('is-critical' if e.tone == 'critical' else 'is-warn')),
+             meta=[{'label': 'views', 'value': '{:,}'.format(e.stats.views or 0)}, {'label': 'likes', 'value': '{:,}'.format(e.stats.likes or 0)},
+                   {'label': 'comments', 'value': '{:,}'.format(e.stats.comments or 0)}, {'label': 'cost', 'value': '$' ~ ('%.2f'|format(e.spend_total))}]) %}{% endcall %}
+
+<div class="grid2" style="display:grid;grid-template-columns:minmax(0,260px) 1fr;gap:var(--gap);align-items:start;">
+  <div class="cg-card"><div class="cg-poster">{% if cover %}<img src="{{ cover }}" alt="">{% else %}<div class="cg-poster-empty">{{ icon('grid') }}</div>{% endif %}</div></div>
+  <div>
+    {% if e.stats.platforms %}
+    <div class="sec-head" style="margin-top:0;"><h2>Results by platform</h2></div>
+    <div class="card" style="padding:0;"><div class="table-wrap" style="border:none;"><table>
+      <thead><tr><th>Platform</th><th>Views</th><th>Likes</th><th>Comments</th></tr></thead><tbody>
+      {% for p, v in e.stats.platforms.items() %}<tr><td style="font-weight:600;">{{ p | capitalize }}</td><td>{{ '{:,}'.format(v.views) }}</td><td>{{ '{:,}'.format(v.likes) }}</td><td>{{ '{:,}'.format(v.comments) }}</td></tr>{% endfor %}
+      </tbody></table></div></div>
+    {% else %}
+    <div class="dv-empty">{{ icon('analytics') }}<div class="dv-empty-title">No results yet</div><div class="dv-empty-sub">Numbers appear once the platforms report on this episode (usually within a day of publishing).</div></div>
+    {% endif %}
+
+    {% if e.spend %}
+    <div class="sec-head"><h2>What it cost</h2><span class="sec-count">${{ '%.2f'|format(e.spend_total) }}</span></div>
+    <div class="card">{% for s in e.spend %}<div class="kv"><span class="k">{{ labels.get(s.provider, s.provider|capitalize) }}</span><span class="v">${{ '%.2f'|format(s.total) }}</span></div>{% endfor %}</div>
+    {% endif %}
+
+    {% if e.posts %}
+    <div class="sec-head"><h2>Where it goes live</h2></div>
+    <div class="card">{% for p in e.posts %}
+      <div class="kv"><span class="k">{{ p.deliverable | replace('_', ' ') | capitalize }} · <span class="cg-status-pill {{ 'published' if p.status == 'published' else ('scheduled' if p.status == 'scheduled' else 'other') }}">{{ p.status }}</span></span>
+        <span class="v">{% for pl in p.platforms %}<span class="cg-plat {{ 'is-published' if pl.status == 'published' }}">{{ pl.platform }}</span> {% endfor %}{{ p.when }}</span></div>
+    {% endfor %}</div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

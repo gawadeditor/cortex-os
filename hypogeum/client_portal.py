@@ -80,7 +80,9 @@ def create_app(db_path=None, config=None):
         import sqlite3  # noqa: PLC0415
         from hypogeum.logger import get_logger  # noqa: PLC0415
         busy = isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc)
-        get_logger(agent="client_portal").warn("portal_request_failed", path=request.path, error=type(exc).__name__, busy=busy)
+        get_logger(agent="client_portal").warn("portal_request_failed", path=request.path, error=type(exc).__name__, busy=busy,
+                                               detail=str(exc)[:200])
+        app.logger.exception("portal request failed: %s", request.path)       # full traceback in the service log
         return render_template("portal/message.html", title="Please try again", heading="One moment",
                                text=("Cortex is busy for a few seconds. Please try again." if busy else
                                      "Something went wrong on our side. Please try again in a minute."),
@@ -116,7 +118,7 @@ def create_app(db_path=None, config=None):
         from hypogeum import workspaces as ws  # noqa: PLC0415
         return next((w["name"] for w in ws.list_workspaces(dbp) if w["workspace_id"] == ws_id), ws_id)
 
-    def shell(user, active, title, crumb=None) -> dict:
+    def shell(user, active, title, crumb=None, channel_id=None, tab=None) -> dict:
         """Everything the layout (rail + topbar) needs."""
         from hypogeum import portal_setup as ps, workspaces as ws  # noqa: PLC0415
         names = channel_names()
@@ -125,7 +127,8 @@ def create_app(db_path=None, config=None):
             left = sum(1 for x in ps.steps(user["workspace_id"], dbp) if not x["done"])
         except Exception:  # noqa: BLE001
             left = 0
-        return {"user": user, "active": active, "title": title, "crumb": crumb, "workspace_name": workspace_name(user["workspace_id"]),
+        return {"user": user, "active": active, "title": title, "crumb": crumb, "channel_id": channel_id, "tab": tab,
+                "workspace_name": workspace_name(user["workspace_id"]),
                 "nav_channels": [{"channel_id": c, "name": names.get(c) or c} for c in chans],
                 "setup_left": left if user["role"] == "owner" else 0}
 
@@ -251,9 +254,63 @@ def create_app(db_path=None, config=None):
                                setup_total=len(sts),
                                channels=[{"channel_id": ch, "name": names.get(ch) or ch, "auth": cg.grant_state(ch, dbp)} for ch in chans])
 
-    # ---- one channel ---------------------------------------------------------------------------------------
+    def channel_name(channel_id):
+        c = conn()
+        try:
+            r = c.execute("SELECT name, description FROM channel_profiles WHERE channel_id = ?", (channel_id,)).fetchone()
+        except Exception:  # noqa: BLE001
+            r = None
+        finally:
+            c.close()
+        return (r["name"] if r and r["name"] else channel_id), (r["description"] if r else None)
+
     @app.get("/channel/<channel_id>")
     def channel(channel_id):
+        user = need_user()
+        own_channel(user, channel_id)
+        from hypogeum import client_grants as cg, portal_channel as pc  # noqa: PLC0415
+        name, description = channel_name(channel_id)
+        return render_template("portal/channel_overview.html", **shell(user, f"channel:{channel_id}", name, name, channel_id, "overview"),
+                               name=name, description=description, o=pc.overview(channel_id, user["workspace_id"], dbp),
+                               auth=cg.grant_state(channel_id, dbp))
+
+    @app.get("/channel/<channel_id>/episodes")
+    def channel_episodes(channel_id):
+        user = need_user()
+        own_channel(user, channel_id)
+        from hypogeum import portal_channel as pc  # noqa: PLC0415
+        name, _ = channel_name(channel_id)
+        items = pc.episodes(channel_id, dbp)
+        return render_template("portal/channel_episodes.html", **shell(user, f"channel:{channel_id}", name, name, channel_id, "episodes"),
+                               name=name, items=items, total_views=sum(i["views"] or 0 for i in items), total_cost=sum(i["cost"] for i in items))
+
+    @app.get("/channel/<channel_id>/episodes/<episode_id>")
+    def channel_episode(channel_id, episode_id):
+        user = need_user()
+        own_channel(user, channel_id)
+        from hypogeum import portal_channel as pc  # noqa: PLC0415
+        e = pc.episode(channel_id, episode_id, dbp)
+        if e is None:
+            abort(404)                                    # another channel's episode looks exactly like a missing one
+        name, _ = channel_name(channel_id)
+        cover = f"/episode/{episode_id}/thumbnail" if find_cover_path(channel_id, episode_id) else remote_cover(channel_id, episode_id)
+        return render_template("portal/channel_episode.html", **shell(user, f"channel:{channel_id}", e["title"], name, channel_id, "episodes"),
+                               name=name, e=e, labels=_PROVIDER_LABELS, cover=cover)
+
+    @app.get("/channel/<channel_id>/analytics")
+    def channel_analytics(channel_id):
+        user = need_user()
+        own_channel(user, channel_id)
+        from hypogeum import portal_channel as pc  # noqa: PLC0415
+        raw = request.args.get("days", "30")
+        days = None if raw == "all" else (int(raw) if raw in ("7", "30", "90") else 30)
+        name, _ = channel_name(channel_id)
+        return render_template("portal/channel_analytics.html", **shell(user, f"channel:{channel_id}", name, name, channel_id, "analytics"),
+                               name=name, a=pc.analytics(channel_id, days, dbp), ranges=[(7, "7 days"), (30, "30 days"), (90, "90 days"), (None, "All time")])
+
+    # ---- one channel: posts ---------------------------------------------------------------------------------
+    @app.get("/channel/<channel_id>/posts")
+    def channel_posts(channel_id):
         user = need_user()
         own_channel(user, channel_id)
         from hypogeum import client_grants as cg, portal_usage as pu  # noqa: PLC0415
@@ -281,25 +338,21 @@ def create_app(db_path=None, config=None):
         name = (r["name"] if r and r["name"] else channel_id)
         month = datetime.now(timezone.utc).strftime("%Y-%m")
         spend = next((x["total"] for x in pu.usage(user["workspace_id"], month, dbp)["by_channel"] if x["channel_id"] == channel_id), 0.0)
-        return render_template("portal/channel.html", **shell(user, f"channel:{channel_id}", name, name), name=name,
+        return render_template("portal/channel_posts.html", **shell(user, f"channel:{channel_id}", name, name, channel_id, "posts"), name=name,
                                description=(r["description"] if r else None), items=items, spend=spend,
                                published=sum(1 for i in items if i["status"] == "published"),
                                scheduled=sum(1 for i in items if i["status"] == "scheduled"), auth=cg.grant_state(channel_id, dbp))
 
-    @app.get("/episode/<episode_id>/thumbnail")
-    def thumbnail(episode_id):
-        user = need_user()
-        cid = channel_of_episode(episode_id)
-        if not cid:
-            abort(404)
-        own_channel(user, cid)
+    def find_cover_path(cid, episode_id) -> Optional[Path]:
+        """The episode's designed cover as a file THIS process can read: the working copy, else the archived one.
+        (The service runs under launchd, which may not be allowed onto the NAS: an unreadable file counts as missing.)"""
         from hypogeum.episode_artifacts import safe_episode_asset_path  # noqa: PLC0415
         archived = archived_dir(cid, episode_id)
         for stem in ("main_episode", "main"):
             for ext in ("jpg", "jpeg", "png", "webp"):
                 p = safe_episode_asset_path(episode_id, "thumbnail", f"{stem}.{ext}")
-                if not p and archived is not None:               # the working copy moves to the archive after publishing
-                    cand = (archived / "thumbnails" / f"{stem}.{ext}")
+                if not p and archived is not None:
+                    cand = archived / "thumbnails" / f"{stem}.{ext}"
                     try:
                         cand = cand.resolve()
                         cand.relative_to(archived.resolve())
@@ -308,8 +361,37 @@ def create_app(db_path=None, config=None):
                     except (OSError, ValueError):
                         p = None
                 if p:
-                    return send_file(str(p), mimetype="image/jpeg" if ext in ("jpg", "jpeg") else f"image/{ext}")
-        abort(404)
+                    try:
+                        with open(p, "rb") as fh:
+                            fh.read(1)
+                    except OSError:
+                        continue
+                    return Path(p)
+        return None
+
+    def remote_cover(cid, episode_id) -> Optional[str]:
+        """A published post's poster (the publisher's own copy) when the file itself cannot be read here."""
+        c = conn()
+        try:
+            rows = c.execute("SELECT thumbnail_url FROM content_grid_cache WHERE episode_id = ? AND channel_id = ? AND thumbnail_url IS NOT NULL "
+                             "ORDER BY (deliverable_id = 'main_episode') DESC", (episode_id, cid)).fetchall()
+        except Exception:  # noqa: BLE001
+            rows = []
+        finally:
+            c.close()
+        return next((r[0] for r in rows if str(r[0]).startswith("https://media.zernio.com/")), None)
+
+    @app.get("/episode/<episode_id>/thumbnail")
+    def thumbnail(episode_id):
+        user = need_user()
+        cid = channel_of_episode(episode_id)
+        if not cid:
+            abort(404)
+        own_channel(user, cid)
+        p = find_cover_path(cid, episode_id)
+        if p is None:
+            abort(404)
+        return send_file(str(p), mimetype="image/jpeg" if p.suffix.lower() in (".jpg", ".jpeg") else f"image/{p.suffix.lower().lstrip('.')}")
 
     # ---- usage ---------------------------------------------------------------------------------------------
     @app.get("/usage")

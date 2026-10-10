@@ -1,0 +1,74 @@
+{% extends 'portal/_layout.html' %}
+{% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
+{% from '_charts.html' import radial, areachart %}
+{% block content %}
+<div class="breadcrumb"><a href="/">Overview</a><span class="breadcrumb-sep">›</span><span>{{ name }}</span></div>
+
+{% call hero(eyebrow='Channel', title=name, lede=(description or 'Your channel, produced and published by Cortex.'),
+             pill=('Production authorized' if auth.active else 'Waiting for authorization'), pill_class=('is-good' if auth.active else 'is-warn')) %}
+  <a href="/channel/{{ channel_id }}/analytics" class="btn btn-primary">Analytics</a>
+  <a href="/channel/{{ channel_id }}/episodes" class="btn">Episodes</a>
+  <a href="/channel/{{ channel_id }}/posts" class="btn">Posts</a>
+{% endcall %}
+
+{% set r = o.rollup %}
+<div class="stat-grid">
+  {% if o.weekly and o.weekly.ceiling %}
+  <div class="stat-card ws-ring">
+    {{ radial(o.weekly.pct or 0, size=72, tone=('critical' if (o.weekly.pct or 0) >= 90 else ('warn' if (o.weekly.pct or 0) >= 70 else 'good'))) }}
+    <div><div class="stat-lbl">This week's budget</div>
+      <div class="stat-val" style="font-size:19px;">${{ '%.2f'|format(o.weekly.used) }}<span style="font-size:12px;color:var(--muted);font-weight:400;"> / ${{ '%.0f'|format(o.weekly.ceiling) }}</span></div></div>
+  </div>
+  {% endif %}
+  <div class="stat-card"><div class="stat-lbl">{{ icon('live') }} Views</div>
+    <div class="stat-val {% if r.views is none %}is-muted{% endif %}">{% if r.views is not none %}{{ '{:,}'.format(r.views|int) }}{% else %}—{% endif %}</div>
+    <div class="stat-note">all-time, across every platform</div></div>
+  <div class="stat-card"><div class="stat-lbl">{{ icon('play') }} Watch time</div>
+    <div class="stat-val {% if r.watch_time_s is none %}is-muted{% endif %}">{% if r.watch_time_s is not none %}{{ (r.watch_time_s / 3600)|round(1) }}h{% else %}—{% endif %}</div></div>
+  <div class="stat-card"><div class="stat-lbl">{{ icon('review') }} Live</div>
+    <div class="stat-val">{{ r.episodes_published }} <span style="font-size:14px;font-weight:400;color:var(--muted);">episodes</span></div>
+    <div class="stat-note">{{ r.videos_live }} videos live (incl. shorts)</div></div>
+  <div class="stat-card"><div class="stat-lbl">{{ icon('dollar') }} Spent</div>
+    <div class="stat-val">{% if r.spend_all_usd is not none %}${{ '%.2f'|format(r.spend_all_usd) }}{% else %}—{% endif %}</div>
+    <div class="stat-note">all-time production cost</div></div>
+</div>
+
+{% if o.series|length > 1 %}
+<div class="sec-head"><h2>Views, last 30 days</h2><a class="sec-link" href="/channel/{{ channel_id }}/analytics">Analytics →</a></div>
+<div class="card">{{ areachart(o.series, width=900, height=150) }}</div>
+{% endif %}
+
+{% if r.platforms %}
+<div class="sec-head"><h2>By platform</h2></div>
+<div class="stat-grid">
+  {% for p in r.platforms %}
+  <div class="stat-card"><div class="stat-lbl">{{ p.platform | capitalize }}</div><div class="stat-val">{{ '{:,}'.format(p.views|int) }}</div>
+    <div class="stat-note">views · {{ '{:,}'.format(p.engagements|int) }} reactions</div></div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<div class="sec-head"><h2>Is this channel running on its own?</h2>
+  <span class="sec-count">{% set warns = o.checks | selectattr('level', 'equalto', 'warn') | list %}{% if warns %}{{ warns|length }} to look at{% else %}all good{% endif %}</span></div>
+<div class="card {{ 'is-warn' if warns else 'is-good' }}">
+  {% for i in o.checks %}
+  <div class="rd-item"><span class="rd-mark rd-{{ 'ok' if i.level == 'ok' else 'warn' }}">{% if i.level == 'ok' %}{{ icon('check') }}{% else %}{{ icon('warning') }}{% endif %}</span>
+    <div><div class="rd-title">{{ i.title }}</div><div class="rd-detail">{{ i.detail }}</div></div></div>
+  {% endfor %}
+</div>
+
+{% if o.latest %}
+<div class="sec-head"><h2>Latest episodes</h2><a class="sec-link" href="/channel/{{ channel_id }}/episodes">All episodes →</a></div>
+<div class="card" style="padding:0;"><div class="table-wrap" style="border:none;"><table>
+  <thead><tr><th>Episode</th><th>Status</th><th>Views</th><th>When</th></tr></thead>
+  <tbody>
+  {% for e in o.latest %}
+  <tr><td style="max-width:380px;"><a href="/channel/{{ channel_id }}/episodes/{{ e.episode_id }}" style="color:var(--text);font-weight:600;"><span class="cell-title">{{ e.title }}</span></a></td>
+      <td><span class="badge badge-{{ 'complete' if e.tone == 'good' else ('failed' if e.tone == 'critical' else 'running') }}">{{ e.label }}</span></td>
+      <td class="muted">{% if e.views is not none %}{{ '{:,}'.format(e.views|int) }}{% else %}—{% endif %}</td>
+      <td class="muted" style="white-space:nowrap;">{{ e.when or '—' }}</td></tr>
+  {% endfor %}
+  </tbody></table></div></div>
+{% endif %}
+{% endblock %}

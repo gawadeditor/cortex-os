@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS operator_alert_checks (
 
 # per-check minimum interval (seconds) — run_operator_checks is called from
 # every worker iteration (~60s); the network-backed checks run less often.
-_INTERVALS = {"adapters": 300, "run_failures": 60, "queue_failures": 120, "buffer_gap": 1800, "production_stalled": 1800, "partial_releases": 300, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
+_INTERVALS = {"adapters": 300, "run_failures": 60, "queue_failures": 120, "buffer_gap": 1800, "production_stalled": 1800, "partial_releases": 300, "public_youtube_shorts": 600, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
               "youtube_covers": 300, "stuck_releases": 300, "youtube_flip_auth": 3600, "posts": 1800, "unpublished": 300, "accounts": 600, "archive": 300, "archive_backlog": 600, "disk": 1800}
 _DASHBOARD = "http://127.0.0.1:5001"
 _CREDIT_LOW_USD = 3.0
@@ -212,15 +212,32 @@ def _due(name: str, now: datetime, db_path) -> bool:
 def _sync(prefix: str, current: dict, db_path, config, send, resolved_note: str = "") -> None:
     """current = {key: (title, body)} for platform alerts, or
     {key: (title, body, {"ws": workspace_id, "en": (title_en, body_en)})} for
-    a workspace's own — open new ones, resolve vanished ones."""
+    a workspace's own — open new ones, resolve vanished ones.
+
+    Between detection and notification sits the self-healing engine (hypogeum.self_heal): a problem that has a
+    remediation is ATTEMPTED first and its alert deferred while attempts are left; if it clears afterwards the
+    operator gets one "the factory fixed it" message; if not, the normal alert (with what was tried)."""
+    from hypogeum import self_heal
     for key, val in current.items():
         title, body = val[0], val[1]
         extra = val[2] if len(val) > 2 else {}
         en = extra.get("en") or (None, None)
-        alert(key, title, body, db_path=db_path, config=config, send=send,
+        verdict, note = self_heal.handle_detected(key, db_path=db_path, config=config)
+        if verdict == "defer":
+            continue
+        alert(key, title, body + note, db_path=db_path, config=config, send=send,
               workspace_id=extra.get("ws"), title_en=en[0], body_en=en[1])
-    for key in open_alert_keys(prefix, db_path) - set(current):
-        resolve(key, resolved_note, db_path=db_path, config=config, send=send)
+    vanished = (open_alert_keys(prefix, db_path) | self_heal.healing_keys(prefix, db_path)) - set(current)
+    open_now = open_alert_keys(prefix, db_path)
+    for key in vanished:
+        if key in open_now:
+            resolve(key, resolved_note, db_path=db_path, config=config, send=send)
+        fixed = self_heal.handle_cleared(key, db_path=db_path)
+        if fixed:
+            if send is not None:
+                send(fixed)
+            else:
+                _deliver("selfheal:" + key, None, fixed, None, config, db_path, with_buttons=False)
 
 
 def _ws_extra(channel_id: Optional[str], db_path, en: tuple) -> dict:
@@ -614,6 +631,27 @@ def check_partial_releases(db_path, now: datetime) -> dict:
             _ws_extra(r["channel_id"], db_path, (f"{r['channel_id']}: an episode is only partly released",
                                                  f"{r['episode_id']} is booked on {', '.join(inc['succeeded'])}; still missing: "
                                                  f"{', '.join(inc['missing'])}")))
+    return out
+
+
+def check_public_youtube_shorts(db_path, now: datetime) -> dict:
+    """A YouTube Short of a short-native channel sitting in Postiz's queue as PUBLIC with no cover hold would go
+    live with the auto-picked frame instead of its designed cover (2026-10-10: Fern). The remediation
+    (hypogeum.remediations.fix_public_youtube_short) turns it private and records the hold; this alert only
+    reaches the operator if that fails. A Postiz outage is not a finding: returns {}."""
+    try:
+        from hypogeum.remediations import find_public_youtube_shorts
+        found = find_public_youtube_shorts(db_path, now)
+    except Exception:  # noqa: BLE001
+        return {}
+    out = {}
+    for f in found:
+        out[f"ytpublic:{f['post_id']}"] = (
+            f"Short على يوتيوب هيتنشر public من غير غلاف ({f['channel_id']})",
+            f"الحلقة: {f['episode_id']}\nميعاد النشر: {f['publish_date']}\n"
+            "المنشور في طابور Postiz بإعداد public ومن غير hold، فهيظهر بصورة تلقائية بدل الغلاف المصمم.",
+            _ws_extra(f["channel_id"], db_path, (f"{f['channel_id']}: a Short will go public on YouTube without its cover",
+                                                  f"{f['episode_id']} is queued as public with no cover hold.")))
     return out
 
 
@@ -1108,6 +1146,16 @@ def build_daily_summary(db_path, now: datetime) -> str:
     finally:
         conn.close()
     try:
+        from hypogeum import self_heal
+        fixes = [i for i in self_heal.recent_incidents(db_path, since=now - timedelta(hours=24)) if i.get("acted")]
+        if fixes:
+            lines += ["", "🛠 المصنع صلّح بنفسه (آخر 24 ساعة):"]
+            for i in fixes[:5]:
+                last = [h for h in i["history"] if h.get("acted")][-1]["summary"]
+                lines.append(f"   • {i['incident_key']}: {last}" + (" ✅" if i["status"] == "resolved" else " ⏳"))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         from hypogeum.auto_salvage import list_records
         recs = list_records(db_path, since=now - timedelta(hours=24))
         if recs:
@@ -1166,6 +1214,7 @@ def run_operator_checks(*, db_path=None, config=None, now: Optional[datetime] = 
         ("buffer_gap", "buffer:", lambda: check_buffer_gap(db_path, now)),
         ("production_stalled", "stalled:", lambda: check_production_stalled(db_path, now)),
         ("partial_releases", "partial:", lambda: check_partial_releases(db_path, now)),
+        ("public_youtube_shorts", "ytpublic:", lambda: check_public_youtube_shorts(db_path, now)),
         ("blocking_signals", "signal:", lambda: check_blocking_signals(db_path)),
         ("youtube_covers", "cover:", lambda: check_youtube_covers(db_path, now)),
         ("stuck_releases", "stuckrelease:", lambda: check_stuck_releases(db_path, now)),

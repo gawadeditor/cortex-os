@@ -158,6 +158,9 @@ class PostizTransport(Protocol):
     def delete(self, *, url: str, headers: dict, timeout: float) -> PostizTransportResponse:
         ...
 
+    def put(self, *, url: str, headers: dict, json_body: dict, timeout: float) -> PostizTransportResponse:
+        ...
+
 
 class RequestsPostizTransport:
     """Production transport — real HTTP via `requests`. Tests inject a fake."""
@@ -182,6 +185,9 @@ class RequestsPostizTransport:
 
     def delete(self, *, url, headers, timeout=_DEFAULT_TIMEOUT_SECONDS):
         return self._send("DELETE", url, headers, timeout)
+
+    def put(self, *, url, headers, json_body, timeout=_DEFAULT_TIMEOUT_SECONDS):
+        return self._send("PUT", url, headers, timeout, json_body)
 
 
 # ---------------------------------------------------------------------------
@@ -763,6 +769,25 @@ class PostizProvider:
         if resp.status_code != 200 or not isinstance(resp.json_body, list):
             raise PostizAdapterError(f"GET /integrations HTTP {resp.status_code}: {_error_text(resp.json_body)}")
         return resp.json_body
+
+    def list_posts(self, *, start: datetime, end: datetime, db_path: Optional[Path] = None) -> list:
+        """Raw Postiz posts (GET /posts) between two instants -- one call, no per-post lookups."""
+        headers = self._headers(db_path)
+        q = urlencode({"startDate": _iso_utc(start), "endDate": _iso_utc(end)})
+        resp = self._transport.get(url=f"{self._base_url}/posts?{q}", headers=headers,
+                                   timeout=_DEFAULT_TIMEOUT_SECONDS)
+        if resp.status_code != 200 or not isinstance(resp.json_body, dict):
+            raise PostizAdapterError(f"GET /posts HTTP {resp.status_code}: {_error_text(resp.json_body)}")
+        return list(resp.json_body.get("posts") or [])
+
+    def set_post_settings(self, provider_post_id: str, settings: dict, *,
+                          db_path: Optional[Path] = None) -> bool:
+        """PUT /posts/{id}/settings: merge `settings` into an UNPUBLISHED post's provider settings (content and
+        publish date untouched; Postiz re-validates). True on HTTP 200. Rate limit: 30 requests per hour."""
+        headers = self._headers(db_path)
+        resp = self._transport.put(url=f"{self._base_url}/posts/{provider_post_id}/settings", headers=headers,
+                                   json_body={"settings": dict(settings)}, timeout=_DEFAULT_TIMEOUT_SECONDS)
+        return resp.status_code == 200
 
     def delete_post(self, provider_post_id: str, *, db_path: Optional[Path] = None) -> bool:
         headers = self._headers(db_path)

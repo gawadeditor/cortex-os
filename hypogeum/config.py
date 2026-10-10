@@ -684,6 +684,12 @@ class Config:
         # production policy (2026-08-01): Video Renderer must never compensate for missing
         # duration; insufficient beats block assembly and request additional MUAPI coverage.
         self.COVERAGE_CHECK_ENABLED = _get_bool("COVERAGE_CHECK_ENABLED", default=True)
+        # SELF_HEAL_ENABLED: the factory tries to fix a detected problem itself (hypogeum/self_heal.py,
+        # hypogeum/remediations.py) before telling the operator. SELF_HEAL_AUTO_PRODUCTION (default OFF): the
+        # one remediation that spends money -- starting a production run for a channel that is running out
+        # of episodes -- must be switched on explicitly.
+        self.SELF_HEAL_ENABLED = _get_bool("SELF_HEAL_ENABLED", default=True)
+        self.SELF_HEAL_AUTO_PRODUCTION = _get_bool("SELF_HEAL_AUTO_PRODUCTION", default=False)
         # COVERAGE_AUTO_STRETCH_MAX_DEFICIT_SECONDS (operator decision 2026-10-10): a beat that is still short
         # after the 1.10x editorial speed-up AND after extra-clip generation, by LESS than this many seconds,
         # has its longest clip slowed down (never looped / reversed) instead of sinking the whole episode at QA.

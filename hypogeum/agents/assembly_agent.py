@@ -746,6 +746,18 @@ def run_assembly_agent(
             coverage_result = check_timeline_coverage(_all_beat_entries())
 
         if not coverage_result.sufficient:
+            # Last resort for a beat that is only a little short (see coverage_check.stretch_short_clips):
+            # slow its longest clip down rather than sink the whole episode at QA.
+            from hypogeum.agents.coverage_check import stretch_short_clips  # noqa: PLC0415
+            _stretched = stretch_short_clips(
+                _all_beat_entries(), coverage_result.insufficient_beats,
+                max_deficit_seconds=float(getattr(config, "COVERAGE_AUTO_STRETCH_MAX_DEFICIT_SECONDS", 0) or 0),
+                log=log,
+            )
+            if _stretched:
+                coverage_result = check_timeline_coverage(_all_beat_entries())
+
+        if not coverage_result.sufficient:
             acr = build_additional_coverage_required(coverage_result, episode_id)
             log.error(
                 "assembly_additional_coverage_required",

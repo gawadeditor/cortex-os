@@ -684,6 +684,13 @@ class Config:
         # production policy (2026-08-01): Video Renderer must never compensate for missing
         # duration; insufficient beats block assembly and request additional MUAPI coverage.
         self.COVERAGE_CHECK_ENABLED = _get_bool("COVERAGE_CHECK_ENABLED", default=True)
+        # COVERAGE_AUTO_STRETCH_MAX_DEFICIT_SECONDS (operator decision 2026-10-10): a beat that is still short
+        # after the 1.10x editorial speed-up AND after extra-clip generation, by LESS than this many seconds,
+        # has its longest clip slowed down (never looped / reversed) instead of sinking the whole episode at QA.
+        # 0 disables. See hypogeum/agents/coverage_check.py::stretch_short_clips().
+        self.COVERAGE_AUTO_STRETCH_MAX_DEFICIT_SECONDS = _get_float(
+            "COVERAGE_AUTO_STRETCH_MAX_DEFICIT_SECONDS", default=1.5
+        )
         # COVERAGE_FILL_MAX_EXTRA_CLIPS_PER_BEAT: safety cap (2026-08-05: no longer a fixed
         # target — clip_repair_agent.fill_coverage_deficits() now plans the number of extra
         # clips per beat from the beat's own measured deficit, recalculated after each real

@@ -189,6 +189,70 @@ def check_timeline_coverage(timeline: List[TimelineEntry]) -> CoverageCheckResul
     )
 
 
+# Auto-stretch (operator decision 2026-10-10). A beat that is only a little short -- less than
+# `max_deficit_seconds` after the 1.10x editorial speed-up and after extra-clip generation -- used to sink
+# the whole (paid) episode at QA, and the gates refuse to buy the same scene twice. Instead its longest clip
+# is SLOWED DOWN (never looped, reversed or frozen). Bounded twice: by the deficit and by the slow-down
+# factor of that one clip.
+MAX_AUTO_STRETCH_FACTOR = 1.5
+
+
+def stretch_short_clips(
+    entries: List[TimelineEntry], insufficient_beats: List["BeatCoverage"], *,
+    max_deficit_seconds: float, log=None,
+) -> List[str]:
+    """Slow down one clip of each barely-insufficient beat so the beat reaches its narration length.
+    The original is kept as <name>.pre_stretch<ext>. Updates the entry's clip duration in place. Returns the
+    scene ids stretched; a beat that is too short (deficit >= max_deficit_seconds), has no usable clip,
+    would need more than MAX_AUTO_STRETCH_FACTOR, or fails to re-encode is left alone (never raises)."""
+    import shutil  # noqa: PLC0415
+    done: List[str] = []
+    if not max_deficit_seconds or max_deficit_seconds <= 0:
+        return done
+    for beat in insufficient_beats:
+        try:
+            if not (0.0 < beat.deficit_seconds < max_deficit_seconds) or not beat.usable_clips:
+                continue
+            entry = next((e for e in entries if e.scene_id == beat.scene_id and e.source_type == beat.source_type
+                          and e.short_id == beat.short_id), None)
+            if entry is None:
+                continue
+            path, dur = max(beat.usable_clips, key=lambda pd: pd[1])
+            if dur <= 0.5:
+                continue
+            needed_total = entry.duration_seconds / MAX_EDITORIAL_SPEED_FACTOR + 0.05
+            new_dur = dur + (needed_total - beat.available_duration_seconds)
+            factor = new_dur / dur
+            if factor <= 1.0 or factor > MAX_AUTO_STRETCH_FACTOR:
+                continue
+            backup = path.with_name(f"{path.stem}.pre_stretch{path.suffix}")
+            if not backup.exists():
+                shutil.copy2(str(path), str(backup))
+            tmp = path.with_name(f"{path.stem}.stretching{path.suffix}")
+            rc = subprocess.run(
+                ["ffmpeg", "-v", "error", "-y", "-i", str(backup), "-vf", f"setpts={factor:.5f}*PTS",
+                 "-r", "30", "-c:v", "libx264", "-crf", "14", "-preset", "slow", "-pix_fmt", "yuv420p", "-an", str(tmp)],
+                capture_output=True, text=True, timeout=600)
+            real = _probe_duration_seconds(tmp) if rc.returncode == 0 and tmp.exists() else 0.0
+            if real < dur:                      # failed or produced nothing usable: keep the original
+                tmp.unlink(missing_ok=True)
+                continue
+            tmp.replace(path)
+            if entry.clip_path == path:
+                entry.clip_duration_seconds = real
+            done.append(beat.scene_id)
+            if log is not None:
+                log.warn("coverage_auto_stretch_applied", scene_id=beat.scene_id, deficit_seconds=round(beat.deficit_seconds, 3),
+                         clip_seconds_before=round(dur, 3), clip_seconds_after=round(real, 3), slowdown_factor=round(factor, 3))
+        except Exception as exc:  # noqa: BLE001
+            if log is not None:
+                try:
+                    log.warn("coverage_auto_stretch_failed", scene_id=getattr(beat, "scene_id", None), error=str(exc)[:200])
+                except Exception:  # noqa: BLE001
+                    pass
+    return done
+
+
 def build_additional_coverage_required(
     coverage_result: CoverageCheckResult,
     episode_id: str,

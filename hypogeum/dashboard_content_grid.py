@@ -553,6 +553,11 @@ def get_content_grid(channel_id: str, db_path=None, *, force_refresh: bool = Fal
                 pass
 
             display_title = row.get("title") or _local_episode_title(conn, p["episode_id"])
+            # A TikTok-only post (FB/IG/YouTube moved to Postiz) is uploaded as a bare video: TikTok takes no
+            # custom cover, so Zernio keeps no thumbnail for it. That is not a missing cover -- show the
+            # episode's own designed cover as the poster instead of a "No cover" warning.
+            if not row.get("thumbnail_url") and platforms and all(pl.get("platform") == "tiktok" for pl in platforms):
+                row = {**row, "thumbnail_url": f"/episode/{p['episode_id']}/thumbnail"}
             zernio_has_cover = bool(row.get("thumbnail_url"))
             manual_key = _MANUAL_COVER_FILES.get(p["post_id"]) if not zernio_has_cover else None
             resolved_manually = p["post_id"] in _MANUALLY_COVER_RESOLVED

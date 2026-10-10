@@ -6856,15 +6856,18 @@ def _send_asset(path: Path | None, download_name: str | None = None, *, inline: 
 
 @app.route("/episode/<episode_id>/thumbnail")
 def episode_thumbnail(episode_id: str):
-    """Serve the main (rank-1) thumbnail image for an episode."""
-    for ext in ("jpg", "jpeg", "png", "webp"):
-        path = safe_episode_asset_path(
-            episode_id, "thumbnail", f"main.{ext}",
-            assets_root=_ASSETS_ROOT_PATH,
-        )
-        if path:
-            from flask import send_file
-            return send_file(str(path), mimetype=_MIME.get(ext, "image/jpeg"))
+    """Serve the main (rank-1) thumbnail image for an episode. The factory writes it as
+    thumbnails/main_episode.<ext> (older episodes: main.<ext>); once the working copy is relocated
+    after publish, the archived copy is served instead."""
+    for stem in ("main_episode", "main"):
+        for ext in ("jpg", "jpeg", "png", "webp"):
+            path = safe_episode_asset_path(
+                episode_id, "thumbnail", f"{stem}.{ext}",
+                assets_root=_ASSETS_ROOT_PATH,
+            ) or _archived_episode_asset(episode_id, "thumbnails", f"{stem}.{ext}")
+            if path:
+                from flask import send_file
+                return send_file(str(path), mimetype=_MIME.get(ext, "image/jpeg"))
     from flask import abort
     abort(404)
 

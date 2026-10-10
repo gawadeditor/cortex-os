@@ -857,6 +857,30 @@ def _resolve_platform_settings_for_call(
     return build_platform_settings(platform, policy_entry)
 
 
+def _platforms_without_any_intent(
+    channel_id: str, item_id: str, platforms: Sequence[str], db_path: Optional[Path],
+) -> List[str]:
+    """`platforms` that have NO publication_intents row for this episode (any
+    status). Best-effort: [] on any error, so a query bug can never cause a
+    release for a platform that may already be booked."""
+    if not channel_id or not item_id or not platforms:
+        return []
+    try:
+        from hypogeum.db import get_connection  # noqa: PLC0415
+        conn = get_connection(Path(db_path) if db_path else None)
+        try:
+            have = {r[0] for r in conn.execute(
+                "SELECT DISTINCT platform FROM publication_intents WHERE episode_id = ? AND channel_id = ?",
+                (item_id, channel_id)).fetchall()}
+        finally:
+            conn.close()
+        if not have:
+            return []   # a slot with no intents at all came from elsewhere: never re-book it
+        return [p for p in platforms if p not in have]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _item_has_future_publish_slot(
     channel_id: str, item_id: str, db_path: Optional[Path],
 ) -> bool:
@@ -998,12 +1022,25 @@ def process_channel_ready_bundles(
         # this guard every worker poll would compile a fresh slot and book
         # the same episode again (2026-09-07: one old episode ended up
         # scheduled on Zernio 4 times). Wait for the pending one to resolve.
+        item_platforms = list(resolved_platforms)
         if _item_has_future_publish_slot(channel_id, item.item_id, db_path):
+            # A slot only proves SOME platform was booked. Platforms that have no
+            # publication intent at all were never booked (2026-10-10: only TikTok
+            # went out because readiness demanded the Zernio provider for every
+            # platform) -- complete those, and only those. Platforms that already
+            # have an intent are never touched, so nothing is booked twice.
+            _missing = _platforms_without_any_intent(channel_id, item.item_id, item_platforms, db_path)
+            if not _missing:
+                resolved_log.info(
+                    "release_trigger_skip_already_scheduled_ahead",
+                    channel_id=channel_id, item_id=item.item_id,
+                )
+                continue
             resolved_log.info(
-                "release_trigger_skip_already_scheduled_ahead",
-                channel_id=channel_id, item_id=item.item_id,
+                "release_trigger_completing_missing_platforms",
+                channel_id=channel_id, item_id=item.item_id, platforms=_missing,
             )
-            continue
+            item_platforms = _missing
         try:
             package = build_publish_package_from_episode_dir(
                 channel_id, item.item_id, bundle_definition.bundle_id, assets_root,
@@ -1011,7 +1048,7 @@ def process_channel_ready_bundles(
                 enable_metadata_backfill=True, config=resolved_config,
                 titles_llm_call=titles_llm_call, captions_llm_call=captions_llm_call,
                 platform_deliverable_policy=platform_deliverable_policy,
-                target_platforms=resolved_platforms,
+                target_platforms=item_platforms,
                 canonical_metadata_llm_call=canonical_metadata_llm_call,
             )
         except MetadataResolutionError as exc:
@@ -1019,7 +1056,7 @@ def process_channel_ready_bundles(
             # missing/ambiguous title (no fallback to a Zernio server
             # default), and never let one item's unresolved metadata
             # abort another item's processing in the same channel tick.
-            for platform in resolved_platforms:
+            for platform in item_platforms:
                 results.append(ReadyBundle(
                     item_id=item.item_id, platform=platform,
                     result=ReleasePublishResult(
@@ -1053,7 +1090,7 @@ def process_channel_ready_bundles(
                     gate_result = run_production_output_gate(item.item_id, assets_root, resolved_config, resolved_log)
             if not gate_result.passed:
                 failed_capabilities = [c.capability for c in gate_result.checks if c.status == "fail"]
-                for platform in resolved_platforms:
+                for platform in item_platforms:
                     results.append(ReadyBundle(
                         item_id=item.item_id, platform=platform,
                         result=ReleasePublishResult(
@@ -1081,7 +1118,7 @@ def process_channel_ready_bundles(
                                item_id=item.item_id, error=str(exc)[:200])
             _decision = "hold"
         if _decision != "proceed":
-            for platform in resolved_platforms:
+            for platform in item_platforms:
                 results.append(ReadyBundle(
                     item_id=item.item_id, platform=platform,
                     result=ReleasePublishResult(
@@ -1126,7 +1163,7 @@ def process_channel_ready_bundles(
                 provider_id=provider_id, logical_alias=logical_alias,
                 metadata_override=metadata_override_by_item.get(item.item_id),
             )
-            for platform in resolved_platforms:
+            for platform in item_platforms:
                 cross_platform_passed_ids_by_platform[platform] = {
                     c.deliverable_id for c in cp_result.for_platform(platform)
                     if c.status == "pass"
@@ -1134,7 +1171,7 @@ def process_channel_ready_bundles(
                 }
 
         allowed_deliverable_ids_by_platform: Dict[str, List[str]] = {}
-        for platform in resolved_platforms:
+        for platform in item_platforms:
             allowed_deliverable_ids = _allowed_deliverable_ids_for_platform(
                 package, platform, platform_deliverable_policy,
             )

@@ -187,6 +187,9 @@ def _check_canonical_platform_metadata(
     )
 
 
+_ROUTABLE_PROVIDERS = ("zernio", "postiz")  # what zernio_publish_runtime._route_platforms_by_binding can publish through
+
+
 def check_cross_platform_readiness(
     episode_id: str,
     *,
@@ -296,7 +299,13 @@ def check_cross_platform_readiness(
                 db_path, channel_id=channel_id, capability="publishing",
                 platform=platform, logical_alias=logical_alias,
             )
-            if binding is None or binding.get("provider_id") != provider_id:
+            # A channel can be bound to a different provider per platform (TikTok on
+            # Zernio, Facebook/Instagram/YouTube on Postiz): the publish runtime routes
+            # each platform to the provider its OWN binding names, so readiness must
+            # accept any routable provider -- not only the one the caller defaulted to.
+            # (2026-10-10: demanding provider_id='zernio' kept every Postiz-bound
+            # platform out of the release; a new episode went out on TikTok only.)
+            if binding is None or binding.get("provider_id") not in (provider_id, *_ROUTABLE_PROVIDERS):
                 failures.append(
                     f"no enabled channel_provider_bindings row for provider_id={provider_id!r}, platform={platform!r}"
                 )

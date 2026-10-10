@@ -938,3 +938,39 @@ class TestShortNativeModeDerivedFromCadence:
             enable_production_output_gate=True,
         )
         assert seen.get("short_native") in (False, None)
+
+
+class TestPlatformsWithoutAnyIntent:
+    """The release trigger's guard against re-booking an episode that already sits in a
+    future slot must still let platforms that were NEVER booked through (2026-10-10)."""
+
+    def _db(self, tmp_path, platforms):
+        import uuid
+        from hypogeum.db import get_connection, initialize_schema
+        db = tmp_path / "t.db"
+        initialize_schema(db)
+        conn = get_connection(db)
+        conn.execute("PRAGMA foreign_keys = OFF")
+        for plat in platforms:
+            conn.execute(
+                "INSERT INTO publication_intents (publication_intent_id, channel_id, episode_id, deliverable_id, "
+                "platform, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                (str(uuid.uuid4()), "ch", "ep1", "main_episode", plat, "succeeded", "2026-10-10T00:00:00", "2026-10-10T00:00:00"))
+        conn.commit()
+        conn.close()
+        return db
+
+    def test_only_unbooked_platforms_are_returned(self, tmp_path):
+        from hypogeum.publishing.zernio_channel_release_trigger import _platforms_without_any_intent as f
+        db = self._db(tmp_path, ["tiktok"])
+        assert f("ch", "ep1", ["facebook", "instagram", "tiktok", "youtube"], db) == ["facebook", "instagram", "youtube"]
+
+    def test_everything_booked_returns_nothing(self, tmp_path):
+        from hypogeum.publishing.zernio_channel_release_trigger import _platforms_without_any_intent as f
+        db = self._db(tmp_path, ["facebook", "instagram", "tiktok", "youtube"])
+        assert f("ch", "ep1", ["facebook", "instagram", "tiktok", "youtube"], db) == []
+
+    def test_a_slot_with_no_intents_at_all_is_never_rebooked(self, tmp_path):
+        from hypogeum.publishing.zernio_channel_release_trigger import _platforms_without_any_intent as f
+        db = self._db(tmp_path, [])
+        assert f("ch", "ep1", ["facebook", "tiktok"], db) == []

@@ -552,6 +552,20 @@ class TestCrossPlatformReadinessBlocking:
         assert tiktok_checks and all(c.status == "fail" for c in tiktok_checks if c.deliverable_id != "main_episode")
         assert any("no enabled channel_provider_bindings" in c.reason for c in tiktok_checks)
 
+    def test_platform_bound_to_postiz_is_not_blocked_by_the_zernio_default(self, db_path, assets_root):
+        # 2026-10-10: readiness demanded provider_id='zernio' for EVERY platform, so Postiz-bound
+        # Facebook/Instagram/YouTube were never released and a new episode went out on TikTok only.
+        _setup_channel(db_path)
+        _seed_episode(db_path, assets_root)
+        profile = upsert_provider_profile(db_path, provider_id="postiz", external_profile_id="pz_1")
+        account = upsert_provider_account(db_path, provider_id="postiz", platform="youtube", external_account_id="pz_yt",
+                                          provider_profile_id=profile["provider_profile_id"], status="active")
+        bind_channel_provider(db_path, channel_id=CHANNEL_ID, capability="publishing", platform="youtube",
+                              provider_id="postiz", provider_profile_id=profile["provider_profile_id"],
+                              provider_account_id=account["provider_account_id"])
+        result = check_cross_platform_readiness(EPISODE_ID, channel_id=CHANNEL_ID, assets_root=assets_root, db_path=db_path)
+        assert not any("no enabled channel_provider_bindings" in c.reason for c in result.for_platform("youtube"))
+
     def test_missing_canonical_caption_blocks_before_media_staging(self, db_path, assets_root):
         _setup_channel(db_path)
         _seed_episode(db_path, assets_root, with_captions=False)

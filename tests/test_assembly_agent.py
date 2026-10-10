@@ -444,8 +444,9 @@ def _mock_ffmpeg_success(output_path_arg_index=-1):
         # Find output path in cmd (last positional argument before flags)
         # The output is the last element in the command
         out = Path(cmd[-1])
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"FAKEMP4" * 1000)
+        if str(cmd[-1]) != "-":      # "-" is a stdout/null sink (blackdetect, luminance probes), never a real output file
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"FAKEMP4" * 1000)
         result = MagicMock()
         result.returncode = 0
         result.stderr = ""
@@ -1492,8 +1493,9 @@ class TestProductionReadyEvaluation:
                 r.stderr = "error"
             else:
                 out = Path(cmd[-1])
-                out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_bytes(b"FAKEMP4" * 1000)
+                if str(cmd[-1]) != "-":      # "-" is a stdout/null sink (blackdetect, luminance probes), never a real output file
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    out.write_bytes(b"FAKEMP4" * 1000)
                 r.returncode = 0
                 r.stderr = ""
             r.stdout = ""

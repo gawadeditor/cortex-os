@@ -692,3 +692,22 @@ def _isolate_openrouter_drain_flag(tmp_path, monkeypatch):
     import hypogeum.openrouter_drain as _od
     monkeypatch.setattr(_od, "FLAG", tmp_path / "openrouter_drain_exhausted")
     monkeypatch.setattr(_od, "BASELINE", tmp_path / "openrouter_drain_total_credits")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_stray_dash_file():
+    """A test that mocks subprocess.run and writes `Path(cmd[-1])` creates a file named "-" in the repo root when
+    the real command ends in "-" (ffmpeg's stdout/null sink: blackdetect, luminance probes). That file is tracked
+    (a0367c2), so the damage shows up as a modified file. Fail the run, naming the cause, instead of leaving it."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent / "-"
+    before = root.read_bytes() if root.exists() else None
+    yield
+    after = root.read_bytes() if root.exists() else None
+    if after != before:
+        if before is not None:
+            root.write_bytes(before)            # put it back so the working tree stays clean
+        elif root.exists():
+            root.unlink()
+        raise AssertionError('a test wrote a file named "-" in the repo root: guard the mocked ffmpeg output with '
+                             '`if str(cmd[-1]) != "-":` (see test_end_page.py)')

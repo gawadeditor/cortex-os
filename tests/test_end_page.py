@@ -77,8 +77,9 @@ def _make_plan(main_entries=None, shorts=None) -> TimelinePlan:
 def _ffmpeg_success_side_effect(cmd, capture_output, text, timeout):
     """Write a fake mp4 to the last path argument so existence checks pass."""
     out = Path(cmd[-1])
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_bytes(b"FAKEMP4" * 500)
+    if str(cmd[-1]) != "-":      # "-" is a stdout/null sink (blackdetect, luminance probes), never a real output file
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"FAKEMP4" * 500)
     r = MagicMock()
     r.returncode = 0
     r.stderr = ""
@@ -105,8 +106,9 @@ def _spy_ffmpeg_recording(calls_recorded):
     def _side_effect(cmd, capture_output, text, timeout):
         calls_recorded.append(list(cmd))
         out = Path(cmd[-1])
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"FAKEMP4" * 500)
+        if str(cmd[-1]) != "-":      # "-" is a stdout/null sink (blackdetect, luminance probes), never a real output file
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"FAKEMP4" * 500)
         r = MagicMock()
         r.returncode = 0
         r.stderr = ""
@@ -136,8 +138,9 @@ class TestEndPageAppend:
         def spy_ffmpeg(cmd, capture_output, text, timeout):
             calls_recorded.append(list(cmd))
             out = Path(cmd[-1])
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_bytes(b"FAKEMP4" * 500)
+            if str(cmd[-1]) != "-":      # "-" is a stdout/null sink (blackdetect, luminance probes), never a real output file
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(b"FAKEMP4" * 500)
             r = MagicMock()
             r.returncode = 0
             r.stderr = ""
@@ -177,8 +180,9 @@ class TestEndPageAppend:
         def spy_ffmpeg(cmd, capture_output, text, timeout):
             calls_recorded.append(list(cmd))
             out = Path(cmd[-1])
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_bytes(b"FAKEMP4" * 500)
+            if str(cmd[-1]) != "-":      # "-" is a stdout/null sink (blackdetect, luminance probes), never a real output file
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(b"FAKEMP4" * 500)
             r = MagicMock()
             r.returncode = 0
             r.stderr = ""
@@ -283,8 +287,9 @@ class TestEndPageAppend:
             if call_count[0] == 1:
                 # First call = clip creation → succeed
                 out = Path(cmd[-1])
-                out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_bytes(b"FAKEMP4" * 100)
+                if str(cmd[-1]) != "-":      # "-" is a stdout/null sink (blackdetect, luminance probes), never a real output file
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    out.write_bytes(b"FAKEMP4" * 100)
                 r.returncode = 0
             else:
                 # Second call = concat → fail
@@ -312,8 +317,9 @@ class TestEndPageAppend:
         def spy_ffmpeg(cmd, capture_output, text, timeout):
             calls_recorded.append(list(cmd))
             out = Path(cmd[-1])
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_bytes(b"FAKEMP4" * 500)
+            if str(cmd[-1]) != "-":      # "-" is a stdout/null sink (blackdetect, luminance probes), never a real output file
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(b"FAKEMP4" * 500)
             r = MagicMock()
             r.returncode = 0
             r.stderr = ""
@@ -479,8 +485,9 @@ class TestRenderEpisodeEndPage:
             if "short" in str(cmd[-1]):
                 short_render_calls.append(list(cmd))
             out = Path(cmd[-1])
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_bytes(b"FAKEMP4" * 500)
+            if str(cmd[-1]) != "-":      # "-" is a stdout/null sink (blackdetect, luminance probes), never a real output file
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(b"FAKEMP4" * 500)
             r = MagicMock()
             r.returncode = 0
             r.stderr = ""

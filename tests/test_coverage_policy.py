@@ -241,8 +241,9 @@ def _fake_duration_probe(duration_by_substring: Dict[str, float]):
             return r
         if cmd and cmd[0] == "ffmpeg":
             out = Path(cmd[-1])
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_bytes(b"FAKEMP4" * 100)
+            if str(cmd[-1]) != "-":      # "-" is a stdout/null sink (blackdetect, luminance probes), never a real output file
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(b"FAKEMP4" * 100)
             return r
         return r
     return _side_effect

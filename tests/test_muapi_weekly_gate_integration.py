@@ -162,8 +162,9 @@ def _asset_for(config, *, scene_id, prompt, short_id=None):
 
 def _ffmpeg_placeholder(cmd, capture_output, text, timeout):
     out_path = Path(cmd[-1])
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_bytes(b"FAKEMP4" * 2000)
+    if str(cmd[-1]) != "-":      # "-" is a stdout/null sink (blackdetect, luminance probes), never a real output file
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(b"FAKEMP4" * 2000)
     result = MagicMock()
     result.returncode = 0
     result.stderr = ""

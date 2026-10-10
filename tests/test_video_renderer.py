@@ -118,8 +118,9 @@ def _make_music_track_named(tmp_path: Path, name: str, category: str = "Mystery"
 def _mock_ffmpeg_success():
     def _side_effect(cmd, capture_output, text, timeout):
         out = Path(cmd[-1])
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"FAKEMP4" * 1000)
+        if str(cmd[-1]) != "-":      # "-" is a stdout/null sink (blackdetect, luminance probes), never a real output file
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"FAKEMP4" * 1000)
         result = MagicMock()
         result.returncode = 0
         result.stderr = ""

@@ -16,6 +16,7 @@ Pages (all behind a session; a wrong channel/episode is a 404, same as one that 
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -37,8 +38,8 @@ a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
 ::selection{background:var(--accent-line);color:#fff}
 :focus-visible{outline:none;box-shadow:0 0 0 2px var(--bg),0 0 0 4px var(--accent);border-radius:6px}
 header{border-bottom:1px solid var(--border);background:rgba(9,11,17,.8);backdrop-filter:blur(8px);position:sticky;top:0;z-index:5}
-header .bar{max-width:1080px;margin:0 auto;padding:12px 20px;display:flex;gap:14px;align-items:center}
-.brand{font-weight:800;font-size:15px;letter-spacing:.07em;text-transform:uppercase;color:var(--text);display:inline-flex;gap:9px;align-items:center;margin-right:auto}
+header .bar{max-width:1080px;margin:0 auto;padding:12px 20px;display:flex;gap:18px;align-items:center}
+.brand{font-weight:800;font-size:15px;letter-spacing:.07em;text-transform:uppercase;color:var(--text);display:inline-flex;gap:9px;align-items:center}header .who{margin-left:auto}
 .brand:hover{text-decoration:none}.brand:before{content:"";width:9px;height:9px;border-radius:2px;background:var(--accent);box-shadow:0 0 12px var(--accent-line)}
 .who{color:var(--muted);font-size:13px}
 main{max-width:1080px;margin:0 auto;padding:36px 20px 90px}
@@ -86,13 +87,25 @@ input[type=email]:focus{border-color:var(--accent)}
 .msg{border:1px solid var(--good);background:var(--good-bg);color:#c9f0d4;border-radius:var(--radius-sm);padding:10px 14px;margin:0 0 16px;font-size:14px}.msg.bad{border-color:var(--critical);background:var(--critical-bg);color:#ffd7d3}
 .banner{display:flex;gap:14px;align-items:center;justify-content:space-between;border:1px solid var(--accent-line);background:var(--accent-bg);border-radius:var(--radius);padding:14px 18px;margin-bottom:8px}
 .progress{height:6px;background:var(--border);border-radius:99px;overflow:hidden;margin:14px 0 26px}.progress i{display:block;height:100%;background:linear-gradient(90deg,var(--accent-line),var(--accent))}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:var(--gap)}
+.kpi-l{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px}
+.mtabs{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 6px}.mtab{padding:6px 14px;border-radius:99px;border:1px solid var(--border-strong);color:var(--muted);font-size:13px;font-weight:600}
+.mtab:hover{text-decoration:none;color:var(--text)}.mtab.on{background:var(--accent-bg);border-color:var(--accent-line);color:var(--accent)}
+.row{display:grid;grid-template-columns:130px 1fr 80px;gap:12px;align-items:center;padding:7px 0;font-size:14px}.row .t{text-align:right;font-variant-numeric:tabular-nums}
+.row .bar-track{margin:0}.chart{display:flex;align-items:flex-end;gap:3px;height:120px;padding-top:8px}
+.chart i{flex:1;min-width:3px;background:linear-gradient(180deg,var(--accent),var(--accent-line));border-radius:3px 3px 0 0;min-height:2px}
+.chart i.zero{background:var(--border)}table.tbl{width:100%;border-collapse:collapse;font-size:14px}
+.tbl th{text-align:left;font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);padding:8px 10px;border-bottom:1px solid var(--border)}
+.tbl td{padding:9px 10px;border-bottom:1px solid var(--border)}.tbl td.n,.tbl th.n{text-align:right;font-variant-numeric:tabular-nums}
+.note{color:var(--faint);font-size:12.5px;margin-top:12px}
+header nav a{color:var(--muted);font-size:14px;font-weight:600}header nav a:hover{color:var(--text);text-decoration:none}
 @media(max-width:600px){main{padding:24px 16px 70px}h1{font-size:25px}input[type=email]{min-width:0;width:100%;margin-bottom:10px}.cards{grid-template-columns:repeat(2,1fr)}}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
 """
 
 _BASE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{ title }} · Cortex</title><style>{{ css|safe }}</style></head><body>
-<header><div class="bar"><a class="brand" href="/">Cortex</a>{% if user %}<span class="who">{{ user.email }}</span>
+<header><div class="bar"><a class="brand" href="/">Cortex</a>{% if user %}<nav style="display:flex;gap:16px"><a href="/">Channels</a><a href="/usage">Usage</a><a href="/welcome">Setup</a></nav><span class="who">{{ user.email }}</span>
 <form class="inline" method="post" action="/logout"><button class="btn ghost" type="submit">Sign out</button></form>{% endif %}</div></header>
 <main>{{ body|safe }}</main></body></html>"""
 
@@ -260,6 +273,74 @@ def create_app(db_path=None, config=None):
         if not link:
             return redirect("/welcome")
         return render_welcome(user, None, None, link)
+
+    @app.get("/usage")
+    def usage_page():
+        user = need_user()
+        from hypogeum import portal_usage as pu  # noqa: PLC0415
+        month = pu.valid_month(request.args.get("month")) or datetime.now(timezone.utc).strftime("%Y-%m")
+        u = pu.usage(user["workspace_id"], month, db_path)
+        ms = pu.months(user["workspace_id"], db_path)
+        names = {}
+        try:
+            from hypogeum.db import get_connection  # noqa: PLC0415
+            for r in get_connection(Path(db_path) if db_path else None).execute("SELECT channel_id, name FROM channel_profiles"):
+                names[r[0]] = r[1]
+        except Exception:  # noqa: BLE001
+            pass
+        label = datetime.strptime(month, "%Y-%m").strftime("%B %Y")
+        body = "<h1>Usage</h1><p class='sub'>What Cortex spent from your own provider keys. You pay your providers directly; this is the statement.</p>"
+        body += "<div class='mtabs'>" + "".join(
+            "<a class='mtab" + (" on" if m["month"] == month else "") + "' href='/usage?month=" + m["month"] + "'>" +
+            datetime.strptime(m["month"], "%Y-%m").strftime("%b %Y") + " · $" + format(m["total"], ".0f") + "</a>" for m in ms) + "</div>"
+        pct = 0 if not u["ceiling"] else min(100, round(100 * u["total"] / u["ceiling"]))
+        k = "<div class='kpis'><div class='panel'><div class='kpi-l'>Spent in " + _esc(label) + "</div><div class='kpi'>$" + format(u["total"], ".2f")
+        k += (" <small>of $" + format(u["ceiling"], ".0f") + "</small></div><div class='bar-track'><i style='width:" + str(pct) + "%'></i></div></div>"
+              if u["ceiling"] else "</div></div>")
+        if u["projected"] is not None:
+            k += "<div class='panel'><div class='kpi-l'>On track for</div><div class='kpi'>$" + format(u["projected"], ".0f") + "</div><div class='when'>by the end of the month</div></div>"
+        k += ("<div class='panel'><div class='kpi-l'>Episodes</div><div class='kpi'>" + str(len(u["episodes"])) + "</div><div class='when'>" +
+              (("about $" + format(u["avg_per_episode"], ".2f") + " each") if u["avg_per_episode"] else "none paid yet") + "</div></div></div>")
+        body += k
+        if not u["total"]:
+            body += "<h2>Activity</h2><div class='ok'>No spending recorded for this month.</div>"
+        else:
+            peak = max([d["total"] for d in u["daily"]] + [0.01])
+            body += "<h2>Day by day</h2><div class='panel'><div class='chart'>" + "".join(
+                "<i class='" + ("zero" if not d["total"] else "") + "' style='height:" + str(max(2, round(100 * d["total"] / peak))) + "%' title='" +
+                _esc(d["day"]) + " · $" + format(d["total"], ".2f") + "'></i>" for d in u["daily"]) + "</div></div>"
+
+            def bars(items, key, labeller):
+                top = max([i["total"] for i in items] + [0.01])
+                return "".join("<div class='row'><span>" + _esc(labeller(i)) + "</span><div class='bar-track'><i style='width:" +
+                               str(round(100 * i["total"] / top)) + "%'></i></div><span class='t'>$" + format(i["total"], ".2f") + "</span></div>"
+                               for i in items)
+            body += "<h2>By provider</h2><div class='panel'>" + bars(u["by_provider"], "provider", lambda i: i["provider"].capitalize()) + "</div>"
+            if len(u["by_channel"]) > 1 or any(c["channel_id"] for c in u["by_channel"]):
+                body += "<h2>By channel</h2><div class='panel'>" + bars(u["by_channel"], "channel_id",
+                                                                          lambda i: names.get(i["channel_id"]) or i["channel_id"] or "-") + "</div>"
+            rows = "".join("<tr><td>" + _esc(e["first"]) + "</td><td>" + _esc(e["title"]) + "</td><td>" + _esc(names.get(e["channel_id"]) or e["channel_id"] or "") +
+                           "</td><td class='n'>$" + format(e["total"], ".2f") + "</td></tr>" for e in u["episodes"])
+            body += ("<h2>Episodes</h2><div class='panel' style='padding:6px 10px'><table class='tbl'><thead><tr><th>Started</th><th>Episode</th><th>Channel</th>"
+                     "<th class='n'>Cost</th></tr></thead><tbody>" + rows + "</tbody></table></div>"
+                     "<p class='note'>Costs are recorded as each call is made, so the numbers can still grow a little while an episode is in production. "
+                     "<a href='/usage.csv?month=" + month + "'>Download this month as CSV</a>.</p>")
+        return page("Usage", body, user)
+
+    @app.get("/usage.csv")
+    def usage_csv():
+        user = need_user()
+        from hypogeum import portal_usage as pu  # noqa: PLC0415
+        month = pu.valid_month(request.args.get("month")) or datetime.now(timezone.utc).strftime("%Y-%m")
+        import csv, io  # noqa: PLC0415
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        for row in pu.csv_rows(user["workspace_id"], month, db_path):
+            w.writerow([("'" + c) if isinstance(c, str) and c[:1] in ("=", "+", "-", "@") else c for c in row])   # no spreadsheet formulas
+        resp = make_response(buf.getvalue())
+        resp.headers["Content-Type"] = "text/csv; charset=utf-8"
+        resp.headers["Content-Disposition"] = f"attachment; filename=cortex-usage-{month}.csv"
+        return resp
 
     @app.post("/notify")
     def notify():

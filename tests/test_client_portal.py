@@ -106,7 +106,7 @@ def test_the_portal_has_no_operator_routes():
     rules = {r.rule for r in app.url_map.iter_rules()}
     assert rules <= {"/login", "/auth/<token>", "/logout", "/", "/channel/<channel_id>", "/episode/<episode_id>/thumbnail",
                      "/static/<path:filename>", "/notify", "/welcome", "/welcome/keys/<provider>",
-                     "/welcome/telegram"}
+                     "/welcome/telegram", "/usage", "/usage.csv"}
 
 
 def test_deliver_link_uses_smtp_only_when_configured_and_never_raises(monkeypatch):
@@ -310,3 +310,59 @@ def test_the_wizard_page_owner_only_forms_and_cross_origin_posts_are_refused(env
     assert "<script>" not in c.get("/welcome?k=<script>&r=<script>").get_data(as_text=True)
     assert c.post("/welcome/keys/unknown", data={"key": "k" * 30}).status_code == 404
     assert "Continue setup" in c.get("/").get_data(as_text=True)                          # banner on the home page
+
+
+# --- usage / billing page ---------------------------------------------------------------------------------
+
+@pytest.fixture()
+def spend(env):
+    conn = db.get_connection(env)
+    conn.execute("PRAGMA foreign_keys = OFF")
+    now = datetime.now(timezone.utc)
+    this = now.strftime("%Y-%m")
+    for rid, ep, ch in (("r_a", "ep_a", "acme_ch"), ("r_b", "ep_b", "beta_ch"), ("r_p", "ep_p", "plat_ch")):
+        conn.execute("INSERT INTO runs (run_id, episode_id, started_at, status, channel_id) VALUES (?,?,?,?,?)", (rid, ep, f"{this}-01", "completed", ch))
+    rows = [("r_a", "ep_a", "muapi", 30.0, f"{this}-02T10:00:00"), ("r_a", "ep_a", "openrouter", 5.5, f"{this}-02T11:00:00"),
+            ("r_a", "ep_a", "elevenlabs", 1.25, f"{this}-03T09:00:00"), ("r_b", "ep_b", "muapi", 99.0, f"{this}-02T10:00:00"),
+            ("r_p", "ep_p", "muapi", 77.0, f"{this}-02T10:00:00"), ("r_a", "ep_old", "muapi", 12.0, "2026-08-15T10:00:00")]
+    for i, (rid, ep, prov, usd, at) in enumerate(rows):
+        conn.execute("INSERT INTO costs (cost_id, run_id, episode_id, provider, model, call_type, tokens_or_credits, cost_usd, called_at) "
+                     "VALUES (?,?,?,?,?,?,?,?,?)", (f"c{i}", rid, ep, prov, "=cmd|' /C calc'!A0" if i == 0 else "m", "scene", 0, usd, at))
+    conn.commit()
+    conn.close()
+    return env
+
+
+def test_usage_counts_only_the_workspaces_own_channels(spend):
+    from hypogeum import portal_usage as pu
+    now = datetime.now(timezone.utc)
+    u = pu.usage("acme", now.strftime("%Y-%m"), spend)
+    assert u["total"] == 36.75 and {p["provider"] for p in u["by_provider"]} == {"muapi", "openrouter", "elevenlabs"}
+    assert u["by_channel"] == [{"channel_id": "acme_ch", "total": 36.75}] and len(u["episodes"]) == 1
+    assert pu.usage("beta", now.strftime("%Y-%m"), spend)["total"] == 99.0
+    assert pu.usage("acme", "2026-08", spend)["total"] == 12.0
+    assert pu.usage("nobody", now.strftime("%Y-%m"), spend)["total"] == 0.0
+
+
+def test_months_projection_and_month_validation(spend):
+    from hypogeum import portal_usage as pu
+    now = datetime(2026, 10, 10, tzinfo=timezone.utc)
+    ms = pu.months("acme", spend, now)
+    assert ms[0]["month"] == "2026-10" and len(ms) == 6 and {m["month"]: m["total"] for m in ms}["2026-08"] == 12.0
+    assert pu.valid_month("2026-10", now) == "2026-10" and pu.valid_month("2027-01", now) is None
+    assert pu.valid_month("../../etc", now) is None and pu.valid_month("2026-13", now) is None and pu.valid_month(None, now) is None
+
+
+def test_the_usage_pages_are_scoped_and_the_csv_is_safe(spend):
+    app = create_app(spend)
+    assert app.test_client().get("/usage").status_code == 302
+    a = _login(app, spend, "a@acme.com")
+    page = a.get("/usage").get_data(as_text=True)
+    assert "$36.75" in page and "$99.00" not in page and "$77.00" not in page
+    assert "$12.00" in a.get("/usage?month=2026-08").get_data(as_text=True)
+    assert a.get("/usage?month=<script>").status_code == 200 and "<script>" not in a.get("/usage?month=<script>").get_data(as_text=True)
+    r = a.get("/usage.csv")
+    assert r.status_code == 200 and r.headers["Content-Type"].startswith("text/csv") and "attachment" in r.headers["Content-Disposition"]
+    text = r.get_data(as_text=True)
+    assert "acme_ch" in text and "beta_ch" not in text and "plat_ch" not in text
+    assert "'=cmd" in text and ",=cmd" not in text                                        # formula injection neutralised

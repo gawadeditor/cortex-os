@@ -106,3 +106,25 @@ def test_the_portal_has_no_operator_routes():
     rules = {r.rule for r in app.url_map.iter_rules()}
     assert rules <= {"/login", "/auth/<token>", "/logout", "/", "/channel/<channel_id>", "/episode/<episode_id>/thumbnail",
                      "/static/<path:filename>"}
+
+
+def test_deliver_link_uses_smtp_only_when_configured_and_never_raises(monkeypatch):
+    from types import SimpleNamespace as NS
+    sent = []
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout=0): sent.append(("connect", host, port))
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def starttls(self): sent.append(("tls",))
+        def login(self, u, p): sent.append(("login", u))
+        def send_message(self, m): sent.append(("msg", m["To"], m["From"], "/auth/tok" in m.get_content()))
+
+    monkeypatch.setattr(pa.smtplib, "SMTP", FakeSMTP)
+    assert pa.deliver_link("a@acme.com", "https://x/auth/tok", NS(PORTAL_SMTP_HOST=None)) is False and sent == []
+    cfg = NS(PORTAL_SMTP_HOST="smtp.resend.com", PORTAL_SMTP_PORT=587, PORTAL_SMTP_USER="resend",
+             PORTAL_SMTP_PASSWORD="k", PORTAL_SMTP_FROM="Cortex <login@cortexchannels.com>")
+    assert pa.deliver_link("a@acme.com", "https://x/auth/tok", cfg) is True
+    assert ("login", "resend") in sent and ("msg", "a@acme.com", "Cortex <login@cortexchannels.com>", True) in sent
+    monkeypatch.setattr(pa.smtplib, "SMTP", lambda *a, **k: (_ for _ in ()).throw(OSError("down")))
+    assert pa.deliver_link("a@acme.com", "https://x/auth/tok", cfg) is False

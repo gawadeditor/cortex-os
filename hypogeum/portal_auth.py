@@ -208,5 +208,7 @@ def deliver_link(email: str, link: str, config) -> bool:
                 s.login(user, getattr(config, "PORTAL_SMTP_PASSWORD", "") or "")
             s.send_message(msg)
         return True
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        from hypogeum.logger import get_logger  # noqa: PLC0415
+        get_logger(agent="portal_auth").warn("portal_email_failed", error=type(exc).__name__, detail=str(exc)[:120])
         return False

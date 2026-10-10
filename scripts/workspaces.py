@@ -96,6 +96,7 @@ def main() -> int:
     ll = sub.add_parser("login-link", help="print a one-time portal sign-in link (valid 15 minutes) to hand over")
     ll.add_argument("email")
     ll.add_argument("--base-url", default="http://127.0.0.1:5003")
+    sub.add_parser("grants", help="client channels without an active (or soon expiring) Operating Grant")
     off = sub.add_parser("disable-user", help="lock an email out of the portal and end its sessions")
     off.add_argument("email")
     args = ap.parse_args()
@@ -114,6 +115,19 @@ def main() -> int:
         return 0
     if args.cmd == "create":
         print(ws.create_workspace(args.name, workspace_id=args.id, language=args.language, db_path=DB))
+        return 0
+    if args.cmd == "grants":
+        from hypogeum.client_grants import channels_needing_grant, signing_preflight
+        rows = channels_needing_grant(DB)
+        for r in rows:
+            pf = signing_preflight(r["channel_id"], DB)
+            print(f"{r['workspace_id']:<20} {r['channel_id']:<24} {r['reason']}")
+            for b in pf["blockers"]:
+                print(f"    BLOCKED: {b}")
+            for w in pf["warnings"]:
+                print(f"    check:   {w}")
+        if not rows:
+            print("every client channel has an active grant")
         return 0
     if args.cmd in ("invite", "login-link", "disable-user"):
         from hypogeum import portal_auth as pa

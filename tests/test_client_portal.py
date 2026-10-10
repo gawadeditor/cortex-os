@@ -128,3 +128,48 @@ def test_deliver_link_uses_smtp_only_when_configured_and_never_raises(monkeypatc
     assert ("login", "resend") in sent and ("msg", "a@acme.com", "Cortex <login@cortexchannels.com>", True) in sent
     monkeypatch.setattr(pa.smtplib, "SMTP", lambda *a, **k: (_ for _ in ()).throw(OSError("down")))
     assert pa.deliver_link("a@acme.com", "https://x/auth/tok", cfg) is False
+
+
+# --- Phase 7: Operating Grants for client channels (the platform operator signs) -----------------------
+
+def _fake_state(active, days=60, weekly="45.00"):
+    return {"active": active, "days_left": days if active else 0, "weekly_ceiling_usd": weekly if active else None,
+            "expires_at": "2027-01-01T00:00:00+00:00" if active else None}
+
+
+def test_the_portal_tells_the_client_whether_production_is_authorized(env, monkeypatch):
+    from hypogeum import client_grants as cg
+    app = create_app(env)
+    c = _login(app, env, "a@acme.com")
+    monkeypatch.setattr(cg, "grant_state", lambda ch, db=None, now=None: _fake_state(False))
+    assert "Waiting for spending authorization" in c.get("/").get_data(as_text=True)
+    monkeypatch.setattr(cg, "grant_state", lambda ch, db=None, now=None: _fake_state(True))
+    html = c.get("/").get_data(as_text=True)
+    assert "Production authorized" in html and "60 days left" in html and "$45.00/week" in html
+
+
+def test_signing_preflight_blocks_a_client_channel_with_no_keys_and_ownerless_channels(env, monkeypatch):
+    from hypogeum import client_grants as cg
+    pf = cg.signing_preflight("acme_ch", env)
+    assert pf["client"] and any("no key for" in b for b in pf["blockers"])
+    assert cg.signing_preflight("plat_ch", env) == {"blockers": [], "warnings": [], "workspace_id": "plat", "client": False}
+    ownerless = cg.signing_preflight("nobody_ch", env)
+    assert ownerless["blockers"] and ownerless["workspace_id"] is None
+    from hypogeum import workspace_keys as wk
+    monkeypatch.setattr(wk, "workspace_key", lambda provider, ws_id, db_path=None: "k")
+    ok = cg.signing_preflight("acme_ch", env)
+    assert ok["blockers"] == [] and ok["client"]
+
+
+def test_only_client_channels_without_a_grant_need_one_and_it_reaches_the_operator(env, monkeypatch):
+    from hypogeum import client_grants as cg
+    from hypogeum import operator_alerts as oa
+    monkeypatch.setattr(cg, "grant_state", lambda ch, db=None, now=None: _fake_state(False))
+    rows = cg.channels_needing_grant(env)
+    assert {r["channel_id"] for r in rows} == {"acme_ch", "beta_ch"}                 # never the platform's own channel
+    alerts = oa.check_client_grants(env, datetime.now(timezone.utc))
+    assert set(alerts) == {"clientgrant:acme_ch", "clientgrant:beta_ch"}
+    monkeypatch.setattr(cg, "grant_state", lambda ch, db=None, now=None: _fake_state(True, days=10))
+    assert {r["reason"] for r in cg.channels_needing_grant(env)} == {"grant expires in 10 days"}
+    monkeypatch.setattr(cg, "grant_state", lambda ch, db=None, now=None: _fake_state(True, days=60))
+    assert cg.channels_needing_grant(env) == [] and oa.check_client_grants(env, datetime.now(timezone.utc)) == {}

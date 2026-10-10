@@ -120,6 +120,14 @@ def create_app(db_path=None, config=None):
                                                     "style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
         return resp
 
+    def auth_line(channel_id) -> str:
+        from hypogeum.client_grants import grant_state  # noqa: PLC0415
+        g = grant_state(channel_id, db_path)
+        if not g["active"]:
+            return "<span class='pill'>Waiting for spending authorization</span>"
+        lim = (" · up to $" + _esc(g["weekly_ceiling_usd"]) + "/week") if g.get("weekly_ceiling_usd") else ""
+        return "<span class='pill published'>Production authorized</span> <span class='when'>" + str(g["days_left"]) + " days left" + lim + "</span>"
+
     def own_channel(user, channel_id) -> str:
         from hypogeum import workspaces as ws  # noqa: PLC0415
         if ws.workspace_of(channel_id, db_path) != user["workspace_id"]:
@@ -193,7 +201,7 @@ def create_app(db_path=None, config=None):
             pass
         body = "<h1>Your channels</h1><p class='sub'>Everything we are producing and publishing for you.</p><h2>Channels</h2>"
         chans = "".join("<a class='panel chan' href='/channel/" + _esc(c) + "'><span class='name'>" + _esc(names.get(c) or c) +
-                        "</span><span class='go'>View posts →</span></a>" for c in channels)
+                        "</span><div style='margin-top:8px'>" + auth_line(c) + "</div><span class='go'>View posts →</span></a>" for c in channels)
         body += "<div class='grid'>" + (chans or "<div class='ok'>No channels yet.</div>") + "</div>"
         body += "<h2>This month</h2><div class='panel'><div class='kpi'>$" + format(b["month_spend_usd"], ".2f")
         if b["ceiling_usd"]:
@@ -236,7 +244,7 @@ def create_app(db_path=None, config=None):
             cname = (r[0] if r and r[0] else channel_id)
         except Exception:  # noqa: BLE001
             pass
-        return page(cname, "<a class='crumb' href='/'>← All channels</a><h1>" + _esc(cname) + "</h1><p class='sub'>Your posts and where they stand.</p>"
+        return page(cname, "<a class='crumb' href='/'>← All channels</a><h1>" + _esc(cname) + "</h1><p class='sub'>Your posts and where they stand.</p><p>" + auth_line(channel_id) + "</p>"
                            "<div class='cards'>" + (cards or "<div class='ok'>No posts yet.</div>") + "</div>", user)
 
     @app.get("/episode/<episode_id>/thumbnail")

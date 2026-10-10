@@ -172,6 +172,14 @@
   5. ربط تليجرام.
 - صفحة **Billing / Usage** لكل Workspace: صرف الشهر لكل provider مقابل السقف.
 
+### إذن الصرف لقنوات العملاء ✅ (قرار المشغّل 2026-10-10: **المنصة هي اللي بتوقّع**، والعميل ما يوقّعش)
+
+مفتاح التوقيع (ADR-016) فضل على جهازك بس، والتوقيع نفسه ما اتغيّرش (`tools/configure_channel_operating_grant.py` و`grant_signing.py`). الجديد في `hypogeum/client_grants.py`:
+- **فحص قبل التوقيع (`signing_preflight`):** بيظهر في صفحة `/channel/<id>/operating-grant`. **مانع (بيرفض التوقيع):** القناة من غير Workspace، أو Workspace العميل ناقصها مفتاح من (OpenRouter وMUAPI وElevenLabs وPerplexity). **تحذير:** مفيش مفتاح نشر، أو الحد الأسبوعي × 4.33 أعلى من سقف الشهر، أو مفيش سقف شهري أصلًا.
+- **تنبيه تليجرام ليك (`clientgrant:<channel>`):** قناة عميل مفيهاش إذن صرف فعّال، أو هيخلص خلال 14 يوم. للمشغّل بس.
+- **البورتال:** العميل بيشوف على كل قناة "Production authorized · N days left · up to $X/week" أو "Waiting for spending authorization".
+- **أداة:** `python3 scripts/workspaces.py grants` بتطبع القنوات المحتاجة إذن وإيه المانع.
+
 ### المرحلة 8 (بعدين): فصل الملفات
 
 - `.hypogeum-assets/` تتقسم بالـ Workspace والقناة (مرتبطة بخطة "Asset Root Rename" المؤجلة). مش ضرورية لعزل الفلوس أو البيانات طول ما الداشبورد بيفلتر صح، فتتعمل لما الحجم يكبر.

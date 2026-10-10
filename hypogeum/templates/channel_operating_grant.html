@@ -31,6 +31,10 @@
   </div>
 
   {% if error %}<div class="flash flash-err">{{ error }}</div>{% endif %}
+  {% if preflight %}
+    {% for b in preflight.blockers %}<div class="flash flash-err"><strong>Blocked:</strong> {{ b }}</div>{% endfor %}
+    {% for w in preflight.warnings %}<div class="og-warn"><strong>Check:</strong> {{ w }}</div>{% endfor %}
+  {% endif %}
 
   {% if grant and grant.active %}
   <div class="flash flash-ok">

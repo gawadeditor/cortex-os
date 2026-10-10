@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS operator_alert_checks (
 
 # per-check minimum interval (seconds) — run_operator_checks is called from
 # every worker iteration (~60s); the network-backed checks run less often.
-_INTERVALS = {"adapters": 300, "run_failures": 60, "queue_failures": 120, "buffer_gap": 1800, "production_stalled": 1800, "partial_releases": 300, "public_youtube_shorts": 600, "postiz_post_errors": 600, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
+_INTERVALS = {"adapters": 300, "run_failures": 60, "queue_failures": 120, "buffer_gap": 1800, "production_stalled": 1800, "partial_releases": 300, "public_youtube_shorts": 600, "postiz_post_errors": 600, "client_grants": 3600, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
               "youtube_covers": 300, "stuck_releases": 300, "youtube_flip_auth": 3600, "posts": 1800, "unpublished": 300, "accounts": 600, "archive": 300, "archive_backlog": 600, "disk": 1800}
 _DASHBOARD = "http://127.0.0.1:5001"
 _CREDIT_LOW_USD = 3.0
@@ -698,6 +698,25 @@ def check_postiz_post_errors(db_path, now: datetime) -> dict:
         return {}
 
 
+def check_client_grants(db_path, now: datetime) -> dict:
+    """A CLIENT workspace's channel cannot produce without an active Operating Grant, and only the platform
+    operator can sign it (ADR-016: the key stays on this machine). So a client channel with no grant -- or one
+    that expires within two weeks -- is the operator's to-do, and must reach Telegram."""
+    try:
+        from hypogeum.client_grants import channels_needing_grant
+        rows = channels_needing_grant(db_path, now)
+    except Exception:  # noqa: BLE001
+        return {}
+    out = {}
+    for r in rows:
+        ch = r["channel_id"]
+        out[f"clientgrant:{ch}"] = (
+            f"قناة عميل محتاجة توقيع إذن الصرف ({ch})",
+            f"السبب: {r['reason']}\nالـ Workspace: {r['workspace_id']}\n"
+            f"من الداشبورد: /channel/{ch}/operating-grant (أنت اللي بتوقّع، والعميل ما يقدرش).")
+    return out
+
+
 def check_production_paused(db_path) -> dict:
     from hypogeum.db import get_worker_control
     dbp = Path(db_path) if db_path else None
@@ -1259,6 +1278,7 @@ def run_operator_checks(*, db_path=None, config=None, now: Optional[datetime] = 
         ("partial_releases", "partial:", lambda: check_partial_releases(db_path, now)),
         ("public_youtube_shorts", "ytpublic:", lambda: check_public_youtube_shorts(db_path, now)),
         ("postiz_post_errors", "pzerr:", lambda: check_postiz_post_errors(db_path, now)),
+        ("client_grants", "clientgrant:", lambda: check_client_grants(db_path, now)),
         ("blocking_signals", "signal:", lambda: check_blocking_signals(db_path)),
         ("youtube_covers", "cover:", lambda: check_youtube_covers(db_path, now)),
         ("stuck_releases", "stuckrelease:", lambda: check_stuck_releases(db_path, now)),

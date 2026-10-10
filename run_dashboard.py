@@ -8047,10 +8047,22 @@ def channel_operating_grant_page(channel_id):
     )
     from hypogeum.channel_package_scaffold import channel_package_exists, scaffold_channel_package
 
+    from hypogeum.client_grants import signing_preflight
+    try:
+        preflight = signing_preflight(channel_id, db)
+    except Exception:  # noqa: BLE001
+        preflight = {"blockers": [], "warnings": []}
+
     if request.method == "POST":
         if not can_sign_from_dashboard():
             return redirect(url_for("channel_operating_grant_page",
                                     channel_id=channel_id, scope=channel_id))
+        if preflight["blockers"]:
+            return render_template("channel_operating_grant.html",
+                                   channel=channel, can_sign=True,
+                                   preview=preview_channel_operating_grant(channel_id, db),
+                                   grant=_grant_status(channel_id, db), preflight=preflight,
+                                   error="this channel's workspace is not ready — nothing signed"), 422
         # confirm friction: the operator must type the weekly ceiling
         try:
             from hypogeum.channel_budget_policy import resolve_configured_weekly_limit
@@ -8071,7 +8083,7 @@ def channel_operating_grant_page(channel_id):
             return render_template("channel_operating_grant.html",
                                    channel=channel, can_sign=True,
                                    preview=preview_channel_operating_grant(channel_id, db),
-                                   grant=_grant_status(channel_id, db),
+                                   grant=_grant_status(channel_id, db), preflight=preflight,
                                    error="the amount you typed doesn't match this "
                                          "channel's weekly budget — nothing signed"), 422
 
@@ -8094,7 +8106,7 @@ def channel_operating_grant_page(channel_id):
                            channel=channel,
                            can_sign=can_sign_from_dashboard(),
                            preview=preview_channel_operating_grant(channel_id, db),
-                           grant=_grant_status(channel_id, db),
+                           grant=_grant_status(channel_id, db), preflight=preflight,
                            error=None)
 
 

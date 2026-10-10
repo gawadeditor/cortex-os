@@ -346,7 +346,12 @@ def create_app(db_path=None, config=None):
             msg = {"ok": False, "text": "Could not create the Telegram link right now. Please try again in a minute."}
         elif r == "limit":
             msg = {"ok": False, "text": "Too many attempts. Please try again in an hour."}
-        return render_template("portal/welcome.html", **shell(user, "setup", "Setup", "Setup"), steps=sts, done=sum(1 for x in sts if x["done"]),
+        try:
+            from hypogeum import alert_recipients as ar  # noqa: PLC0415
+            chats = len(ar.recipients_for(user["workspace_id"], dbp))
+        except Exception:  # noqa: BLE001
+            chats = 0
+        return render_template("portal/welcome.html", **shell(user, "setup", "Setup", "Setup"), chats=chats, steps=sts, done=sum(1 for x in sts if x["done"]),
                                first_open=next((x["n"] for x in sts if not x["done"]), None), owner=user["role"] == "owner",
                                keys=ps.key_status(user["workspace_id"], dbp), providers=ps.PROVIDERS, msg=msg, tg_link=tg_link)
 

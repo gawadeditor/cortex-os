@@ -31,7 +31,7 @@
         <p style="margin-top:12px;"><a class="btn btn-primary" href="{{ tg_link }}" target="_blank" rel="noopener noreferrer">{{ icon('external') }} Open Telegram and press Start</a></p>
         <p class="muted" style="font-size:12px;">The link works once and expires in 30 minutes.</p>
       {% elif owner %}
-        <form method="post" action="/welcome/telegram" style="margin-top:12px;"><button class="btn" type="submit">Connect Telegram</button></form>
+        <form method="post" action="/welcome/telegram" style="margin-top:12px;"><button class="btn" type="submit">{{ 'Connect another chat' if chats else 'Connect Telegram' }}</button></form>
         <p class="muted" style="font-size:12px;margin-top:8px;">Email alerts can be turned on or off from your <a href="/">overview</a>.</p>
       {% endif %}
     {% endif %}

@@ -1,0 +1,6 @@
+{% extends 'portal/_bare.html' %}
+{% block content %}
+<h1>Sign in to Cortex</h1>
+<p>Press the button to finish signing in on this device.</p>
+<form method="post" action="/auth/{{ token }}"><button class="btn btn-primary" type="submit">Sign in</button></form>
+{% endblock %}

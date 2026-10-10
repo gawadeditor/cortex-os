@@ -152,6 +152,21 @@ def request_login_link(email: str, db_path=None, now: Optional[datetime] = None,
         conn.close()
 
 
+def peek_login_link(token: str, db_path=None, now: Optional[datetime] = None) -> bool:
+    """Is this link still good? Reads only -- mail scanners and link previewers open links with GET, so a GET must
+    never use the link up; the sign-in itself is a POST (consume_login_link)."""
+    now = now or _now()
+    if not token:
+        return False
+    conn = _conn(db_path)
+    try:
+        return conn.execute(
+            "SELECT 1 FROM portal_login_tokens t JOIN portal_users u ON u.user_id = t.user_id WHERE t.token_hash = ? "
+            "AND t.used_at IS NULL AND t.expires_at > ? AND u.status = 'active'", (_h(token), now.isoformat())).fetchone() is not None
+    finally:
+        conn.close()
+
+
 def consume_login_link(token: str, db_path=None, now: Optional[datetime] = None) -> Optional[str]:
     now = now or _now()
     if not token:

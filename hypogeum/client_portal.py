@@ -172,12 +172,21 @@ def create_app(db_path=None, config=None):
                                text="If that address is registered, a sign-in link is on its way. It works once and expires in 15 minutes.")
 
     @app.get("/auth/<token>")
+    def auth_page(token):
+        # A GET never uses the link up: email security scanners and link previews fetch it first. The person
+        # confirms with a button (POST), which is the only thing that signs in.
+        if not pa.peek_login_link(token, dbp):
+            return render_template("portal/message.html", title="Link expired", heading="This link has expired",
+                                   text="Sign-in links work once and only for a short time.", link_text="Get a new link", link_href="/login"), 400
+        return render_template("portal/confirm.html", title="Sign in", token=token)
+
+    @app.post("/auth/<token>")
     def auth(token):
         session = pa.consume_login_link(token, dbp)
         if session is None:
             return render_template("portal/message.html", title="Link expired", heading="This link has expired",
                                    text="Sign-in links work once and only for a short time.", link_text="Get a new link", link_href="/login"), 400
-        resp = make_response(redirect("/"))
+        resp = make_response(redirect("/", 303))
         resp.set_cookie(_COOKIE, session, max_age=int(pa.SESSION_TTL.total_seconds()), httponly=True,
                         secure=secure_cookie, samesite="Lax")
         return resp

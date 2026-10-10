@@ -234,3 +234,21 @@ def test_the_plan_page_attaches_material_and_clears_a_blocked_state(env, tmp_pat
         assert "Attach material" in page and "reel.mp4" in page
     finally:
         server.app.config["DB_PATH"] = old
+
+
+def test_one_bad_post_does_not_stop_the_others_and_a_repeated_block_does_not_rewrite(env, monkeypatch):
+    p, _ = env
+    from hypogeum.dashboard_clients import calendars_of
+    cp._store(p, "me", "2026-10-14", lambda x: x.update(time="not-a-time"))
+    prov = FakeProvider()
+    r = cp.publish_due(p, NOW + timedelta(days=1), prov)
+    assert [x["date"] for x in r] == ["2026-10-15"] and _post(p, "2026-10-14")["auto"]["instagram"]["state"] == "blocked"
+    stamp = _post(p, "2026-10-14")["auto"]["instagram"]["updated_at"]
+    cp.publish_due(p, NOW + timedelta(days=1), prov)
+    assert _post(p, "2026-10-14")["auto"]["instagram"]["updated_at"] == stamp                      # same reason: not rewritten
+    blocked = FakeProvider(integrations=[])
+    cp._store(p, "me", "2026-10-20", lambda x: x.update(status="approved"))
+    cp.publish_due(p, NOW + timedelta(days=6), blocked)
+    first = _post(p, "2026-10-20")["auto"]["instagram"]["updated_at"]
+    cp.publish_due(p, NOW + timedelta(days=6), blocked)
+    assert _post(p, "2026-10-20")["auto"]["instagram"]["updated_at"] == first

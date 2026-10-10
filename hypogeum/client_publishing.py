@@ -127,7 +127,13 @@ def publish_due(db_path=None, now: Optional[datetime] = None, provider=None, lea
             if (post.get("status") or "draft") != "approved" or "instagram" not in (post.get("platforms") or []) \
                     or auto.get("state") in _SENT or not post.get("date"):
                 continue
-            when = post_time(client, post)
+            try:
+                when = post_time(client, post)
+            except Exception:  # noqa: BLE001 — a bad timezone/time on one post must not stop the others
+                bad = ["the post time or the client's timezone is invalid"]
+                if auto.get("issues") != bad:
+                    _store(db_path, cid, post["date"], lambda p, pr=bad: _set_auto(p, "instagram", state="blocked", issues=pr))
+                continue
             if when - now > timedelta(hours=lead_hours) or post["date"] < now.date().isoformat():
                 continue                                    # not due yet / its day is gone (expire_past skips it)
             when = max(when, now + timedelta(minutes=10))
@@ -147,7 +153,8 @@ def publish_due(db_path=None, now: Optional[datetime] = None, provider=None, lea
                         if integration is None:
                             problems = [f"@{handle} is not connected in Postiz (add it as an Instagram channel)"]
             if problems:
-                _store(db_path, cid, post["date"], lambda p, pr=problems: _set_auto(p, "instagram", state="blocked", issues=pr))
+                if not (auto.get("state") == "blocked" and auto.get("issues") == problems):     # no write every round for the same reason
+                    _store(db_path, cid, post["date"], lambda p, pr=problems: _set_auto(p, "instagram", state="blocked", issues=pr))
                 results.append({"client_id": cid, "date": post["date"], "state": "blocked", "issues": problems})
                 continue
             media = post["media"]

@@ -29,8 +29,10 @@ def env(tmp_path):
 def _login(app, p, email):
     tok = pa.request_login_link(email, p)
     c = app.test_client()
-    r = c.get(f"/auth/{tok}")
-    assert r.status_code == 302
+    page = c.get(f"/auth/{tok}")                                  # a GET only shows the confirmation (scanners open links)
+    assert page.status_code == 200 and "Sign in" in page.get_data(as_text=True) and c.get("/").status_code == 302
+    r = c.post(f"/auth/{tok}")
+    assert r.status_code == 303
     return c
 
 
@@ -420,3 +422,16 @@ def test_a_start_that_hits_a_locked_database_is_retried_not_lost(monkeypatch):
     upd = {"result": [{"update_id": 1, "message": {"chat": {"id": 5, "type": "private"}, "text": "/start code123"}}]}
     assert ar.poll_once(None, http=lambda method, params: upd if method == "getUpdates" else {}) == 1
     assert len(calls) == 3
+
+
+def test_a_link_survives_being_fetched_by_a_mail_scanner_and_still_works_once(env):
+    app = create_app(env)
+    tok = pa.request_login_link("a@acme.com", env)
+    scanner = app.test_client()
+    for _ in range(3):
+        assert scanner.get(f"/auth/{tok}").status_code == 200                 # previews / safe-link checks do not burn it
+    assert pa.peek_login_link(tok, env) is True
+    person = app.test_client()
+    assert person.post(f"/auth/{tok}").status_code == 303 and person.get("/").status_code == 200
+    assert pa.peek_login_link(tok, env) is False and app.test_client().get(f"/auth/{tok}").status_code == 400
+    assert app.test_client().post(f"/auth/{tok}").status_code == 400 and app.test_client().get("/auth/not-a-token").status_code == 400

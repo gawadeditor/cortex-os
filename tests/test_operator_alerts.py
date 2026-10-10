@@ -593,3 +593,22 @@ def test_production_stalled_is_quiet_when_recent_full_or_never_produced(db, monk
     assert list(oa.check_production_stalled(db, NOW)) == ["stalled:ch"]     # 9 days idle, buffer empty
     monkeypatch.setenv("PRODUCTION_BUFFER_TARGET", "0")
     assert oa.check_production_stalled(db, NOW) == {}                       # buffer guard disabled
+
+
+# --- partial releases: booked on some platforms only (2026-10-10 Denisovans, TikTok only) ---
+
+def test_partial_release_alert_names_missing_platforms_and_errors_and_closes_when_complete(db, monkeypatch):
+    import hypogeum.publishing.zernio_channel_release_trigger as t
+    from tests.test_release_completeness import _intent
+    monkeypatch.setattr(t, "_resolve_target_platforms", lambda ch, d: ["instagram", "tiktok", "youtube"])
+    monkeypatch.setattr(t, "_resolve_platform_deliverable_policy", lambda ch, d: {})
+    _intent(db, "ep9", "tiktok", "succeeded", NOW - timedelta(minutes=45), ch="hypogeum")
+    _intent(db, "ep9", "youtube", "open", NOW - timedelta(minutes=44), ch="hypogeum", error="HTTP 400: tags too long")
+    got = oa.check_partial_releases(db, NOW)
+    assert list(got) == ["partial:ep9"]
+    body = got["partial:ep9"][1]
+    assert "instagram" in body and "youtube: HTTP 400: tags too long" in body and "اتحجزت على: tiktok" in body
+    assert oa.check_partial_releases(db, NOW - timedelta(minutes=20)) == {}     # younger than 30 min: not yet
+    for plat in ("instagram", "youtube"):
+        _intent(db, "ep9", plat, "succeeded", NOW - timedelta(minutes=5), ch="hypogeum")
+    assert oa.check_partial_releases(db, NOW) == {}                             # complete: closes

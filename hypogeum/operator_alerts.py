@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS operator_alert_checks (
 
 # per-check minimum interval (seconds) — run_operator_checks is called from
 # every worker iteration (~60s); the network-backed checks run less often.
-_INTERVALS = {"adapters": 300, "run_failures": 60, "queue_failures": 120, "buffer_gap": 1800, "production_stalled": 1800, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
+_INTERVALS = {"adapters": 300, "run_failures": 60, "queue_failures": 120, "buffer_gap": 1800, "production_stalled": 1800, "partial_releases": 300, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
               "youtube_covers": 300, "stuck_releases": 300, "youtube_flip_auth": 3600, "posts": 1800, "unpublished": 300, "accounts": 600, "archive": 300, "archive_backlog": 600, "disk": 1800}
 _DASHBOARD = "http://127.0.0.1:5001"
 _CREDIT_LOW_USD = 3.0
@@ -564,6 +564,44 @@ def check_production_stalled(db_path, now: datetime) -> dict:
     return out
 
 
+_PARTIAL_RELEASE_ALERT_SECONDS = 30 * 60
+
+
+def check_partial_releases(db_path, now: datetime) -> dict:
+    """An episode booked on some platforms but not all, for 30+ minutes (2026-10-10: Denisovans went
+    out on TikTok only and nothing said so). One alert per episode, naming the platforms still missing
+    and the last provider error for each; it closes once every target platform is booked. Only
+    episodes released in the last 7 days."""
+    from hypogeum.release_completeness import incomplete_release
+    since = (now - timedelta(days=7)).isoformat()
+    conn = _conn(db_path, ddl=False)
+    try:
+        eps = conn.execute(
+            "SELECT DISTINCT episode_id, channel_id FROM publication_intents "
+            "WHERE status = 'succeeded' AND updated_at >= ?", (since,)).fetchall()
+    except Exception:  # noqa: BLE001
+        return {}
+    finally:
+        conn.close()
+    out = {}
+    for r in eps:
+        inc = incomplete_release(r["episode_id"], r["channel_id"], db_path=db_path, now=now)
+        if not inc or inc["age_s"] < _PARTIAL_RELEASE_ALERT_SECONDS:
+            continue
+        lines = []
+        for p in inc["missing"]:
+            err = (inc["last_errors"].get(p) or "").strip().splitlines()[0][:140] if inc["last_errors"].get(p) else ""
+            lines.append(f"• {p}: " + (err or "ما اتعملش محاولة (غالبًا ملفات الحلقة أو الـ metadata ناقصة)"))
+        out[f"partial:{r['episode_id']}"] = (
+            f"حلقة {r['channel_id']} نزلت على بعض المنصات بس",
+            f"الحلقة: {r['episode_id']}\nاتحجزت على: {', '.join(inc['succeeded'])}\n"
+            f"لسه ناقص ({int(inc['age_s'] // 60)} دقيقة):\n" + "\n".join(lines),
+            _ws_extra(r["channel_id"], db_path, (f"{r['channel_id']}: an episode is only partly released",
+                                                 f"{r['episode_id']} is booked on {', '.join(inc['succeeded'])}; still missing: "
+                                                 f"{', '.join(inc['missing'])}")))
+    return out
+
+
 def check_production_paused(db_path) -> dict:
     from hypogeum.db import get_worker_control
     dbp = Path(db_path) if db_path else None
@@ -1024,6 +1062,7 @@ def run_operator_checks(*, db_path=None, config=None, now: Optional[datetime] = 
         ("queue_failures", "queue_failed:", lambda: check_queue_failures(db_path, now)),
         ("buffer_gap", "buffer:", lambda: check_buffer_gap(db_path, now)),
         ("production_stalled", "stalled:", lambda: check_production_stalled(db_path, now)),
+        ("partial_releases", "partial:", lambda: check_partial_releases(db_path, now)),
         ("blocking_signals", "signal:", lambda: check_blocking_signals(db_path)),
         ("youtube_covers", "cover:", lambda: check_youtube_covers(db_path, now)),
         ("stuck_releases", "stuckrelease:", lambda: check_stuck_releases(db_path, now)),

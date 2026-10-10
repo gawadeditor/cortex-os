@@ -1,0 +1,67 @@
+{% extends 'portal/_layout.html' %}
+{% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
+{% from '_charts.html' import radial %}
+{% block content %}
+<div class="breadcrumb"><a href="/">Overview</a><span class="breadcrumb-sep">›</span><span>Usage</span></div>
+{% call hero(eyebrow='Usage', title='What Cortex spent for you',
+             lede='This is what Cortex spent from your own provider keys. You pay your providers directly, so this is a statement, not an invoice.',
+             meta=[{'label': label, 'value': '$' ~ ('%.2f'|format(u.total))}]) %}
+  {% if u.total %}<a href="/usage.csv?month={{ month }}" class="btn">{{ icon('download') }} Download CSV</a>{% endif %}
+{% endcall %}
+
+<div class="mtabs">
+  {% for m in months %}<a class="topbar-tab {{ 'active' if m.month == month }}" href="/usage?month={{ m.month }}">{{ m.label }} · ${{ '%.0f'|format(m.total) }}</a>{% endfor %}
+</div>
+
+<div class="stat-grid">
+  <div class="stat-card ws-ring">
+    {{ radial(pct, size=72, tone=('critical' if pct >= 90 else ('warn' if pct >= 70 else 'good'))) if u.ceiling else '' }}
+    <div><div class="stat-lbl">Spent in {{ label }}</div>
+    <div class="stat-val" style="font-size:19px;">${{ '%.2f'|format(u.total) }}{% if u.ceiling %}<span style="font-size:12px;color:var(--muted);font-weight:400;"> / ${{ '%.0f'|format(u.ceiling) }}</span>{% endif %}</div></div>
+  </div>
+  {% if u.projected is not none %}
+  <div class="stat-card"><div class="stat-lbl">{{ icon('analytics') }} On track for</div><div class="stat-val">${{ '%.0f'|format(u.projected) }}</div><div class="stat-note">by the end of the month</div></div>
+  {% endif %}
+  <div class="stat-card"><div class="stat-lbl">{{ icon('review') }} Episodes</div><div class="stat-val">{{ u.episodes|length }}</div>
+    <div class="stat-note">{% if u.avg_per_episode %}about ${{ '%.2f'|format(u.avg_per_episode) }} each{% else %}none paid yet{% endif %}</div></div>
+  <div class="stat-card"><div class="stat-lbl">{{ icon('runs') }} Calls</div><div class="stat-val">{{ u.calls }}</div><div class="stat-note">to your providers</div></div>
+</div>
+
+{% if not u.total %}
+<div class="dv-empty">{{ icon('dollar') }}<div class="dv-empty-title">No spending recorded</div><div class="dv-empty-sub">Nothing was spent in {{ label }}.</div></div>
+{% else %}
+<div class="sec-head"><h2>Day by day</h2></div>
+<div class="card"><div class="daily">
+  {% for d in u.daily %}<i class="{{ 'zero' if not d.total }}" style="height:{{ [2, (100 * d.total / peak)|round]|max }}%" title="{{ d.day }} · ${{ '%.2f'|format(d.total) }}"></i>{% endfor %}
+</div></div>
+
+<div class="sec-head"><h2>By provider</h2></div>
+<div class="card">
+  {% for p in u.by_provider %}
+  <div class="bar-row"><span>{{ labels.get(p.provider, p.provider|capitalize) }}</span><div class="bar-track"><i style="width:{{ (100 * p.total / ptop)|round }}%"></i></div><span class="t">${{ '%.2f'|format(p.total) }}</span></div>
+  {% endfor %}
+</div>
+
+{% if u.by_channel|length > 1 %}
+<div class="sec-head"><h2>By channel</h2></div>
+<div class="card">
+  {% for c in u.by_channel %}
+  <div class="bar-row"><span>{{ names.get(c.channel_id) or c.channel_id or '-' }}</span><div class="bar-track"><i style="width:{{ (100 * c.total / ctop)|round }}%"></i></div><span class="t">${{ '%.2f'|format(c.total) }}</span></div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<div class="sec-head"><h2>Episodes</h2><span class="sec-count">{{ u.episodes|length }}</span></div>
+<div class="card" style="padding:0;"><div class="table-wrap" style="border:none;"><table>
+  <thead><tr><th>Started</th><th>Episode</th><th>Channel</th><th style="text-align:right;">Cost</th></tr></thead>
+  <tbody>
+  {% for e in u.episodes %}
+  <tr><td class="muted" style="white-space:nowrap;">{{ e.first }}</td><td style="max-width:380px;"><span class="cell-title" style="font-weight:600;">{{ e.title }}</span></td>
+      <td class="muted">{{ names.get(e.channel_id) or e.channel_id or '' }}</td><td style="text-align:right;font-variant-numeric:tabular-nums;">${{ '%.2f'|format(e.total) }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div></div>
+<p class="muted" style="font-size:12px;margin-top:12px;">Costs are recorded as each call is made, so a month's numbers can still grow a little while an episode is in production.</p>
+{% endif %}
+{% endblock %}

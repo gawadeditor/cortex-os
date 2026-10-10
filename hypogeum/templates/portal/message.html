@@ -1,0 +1,6 @@
+{% extends 'portal/_bare.html' %}
+{% block content %}
+<h1>{{ heading }}</h1>
+<p>{{ text }}</p>
+{% if link_text %}<a class="btn btn-primary" href="{{ link_href }}">{{ link_text }}</a>{% endif %}
+{% endblock %}

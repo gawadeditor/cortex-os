@@ -1,0 +1,44 @@
+{% extends 'portal/_layout.html' %}
+{% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
+{% block content %}
+<div class="breadcrumb"><a href="/">Overview</a><span class="breadcrumb-sep">›</span><span>Setup</span></div>
+{% call hero(eyebrow='Setup', title="Let's get you set up",
+             lede='Your keys stay yours: they are stored encrypted and are never shown again.',
+             figure=(done ~ '/' ~ steps|length), figure_label='steps done') %}{% endcall %}
+<div class="progress"><i style="width:{{ (100 * done / steps|length)|round }}%"></i></div>
+
+{% if msg %}<div class="flash {{ 'flash-ok' if msg.ok else 'flash-err' }}">{{ msg.text }}</div>{% endif %}
+
+<div style="display:grid; gap:14px;">
+{% for x in steps %}
+<div class="card setup-step">
+  <div class="step-num {{ 'done' if x.done else ('now' if x.n == first_open else '') }}">{% if x.done %}{{ icon('check') }}{% else %}{{ x.n }}{% endif %}</div>
+  <div>
+    <h3>{{ x.title }}</h3><p>{{ x.detail }}</p>
+    {% if x.key == 'keys' and owner %}
+      {% for pk, meta in providers.items() %}
+      <div class="keyrow"><div><b>{{ meta.label }}</b><small>{{ meta.role }} · {{ meta.where }}</small></div>
+        {% if keys[pk] %}<span class="pill is-good">Connected</span>{% else %}<span class="pill is-warn">Not connected</span>{% endif %}
+        <form method="post" action="/welcome/keys/{{ pk }}" autocomplete="off">
+          <input class="field" type='password' name="key" placeholder="Paste your {{ meta.label }} key" required autocomplete="off">
+          <button class="btn btn-primary" type="submit">{{ 'Replace' if keys[pk] else 'Save & test' }}</button>
+        </form></div>
+      {% endfor %}
+    {% endif %}
+    {% if x.key == 'alerts' %}
+      {% if tg_link %}
+        <p style="margin-top:12px;"><a class="btn btn-primary" href="{{ tg_link }}" target="_blank" rel="noopener noreferrer">{{ icon('external') }} Open Telegram and press Start</a></p>
+        <p class="muted" style="font-size:12px;">The link works once and expires in 30 minutes.</p>
+      {% elif owner %}
+        <form method="post" action="/welcome/telegram" style="margin-top:12px;"><button class="btn" type="submit">Connect Telegram</button></form>
+        <p class="muted" style="font-size:12px;margin-top:8px;">Email alerts can be turned on or off from your <a href="/">overview</a>.</p>
+      {% endif %}
+    {% endif %}
+    {% if x.key == 'authorization' and not x.done %}<p class="muted" style="font-size:12px;margin-top:8px;">Nothing for you to do here. We will email you when it is done.</p>{% endif %}
+  </div>
+</div>
+{% endfor %}
+</div>
+<p style="margin-top:24px;"><a href="/">Go to my channels {{ icon('arrow-right') }}</a></p>
+{% endblock %}

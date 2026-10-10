@@ -1,0 +1,101 @@
+{% extends 'portal/_layout.html' %}
+{% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
+{% from '_charts.html' import radial %}
+{% block content %}
+<div class="breadcrumb"><span>Workspace</span><span class="breadcrumb-sep">›</span><span>Overview</span></div>
+
+{% call hero(eyebrow='Workspace', title=workspace_name,
+             lede='Everything Cortex is producing and publishing for you, in one place.',
+             pill=('Production paused' if paused else 'Active'), pill_class=('is-warn' if paused else 'is-good')) %}
+  <a href="/usage" class="btn btn-primary">Usage</a>
+  <a href="/welcome" class="btn">Setup</a>
+{% endcall %}
+
+{% if setup_left and user.role == 'owner' %}
+<div class="banner"><div><b>Finish setting up</b><span>{{ setup_total - setup_left }} of {{ setup_total }} steps done.</span></div>
+  <a class="btn btn-primary" href="/welcome">Continue setup</a></div>
+{% endif %}
+
+<div class="stat-grid">
+  <div class="stat-card ws-ring">
+    {{ radial(pct, size=72, tone=('critical' if pct >= 90 else ('warn' if pct >= 70 else 'good'))) if ceiling else '' }}
+    <div>
+      <div class="stat-lbl">This month's spending</div>
+      <div class="stat-val" style="font-size:19px;">${{ '%.2f'|format(spend) }}{% if ceiling %}<span style="font-size:12px;color:var(--muted);font-weight:400;"> / ${{ '%.0f'|format(ceiling) }}</span>{% endif %}</div>
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-lbl">{{ icon('channels') }} Channels</div>
+    <div class="stat-val">{{ channels|length }}</div>
+    <div class="stat-note">in your workspace</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-lbl">{{ icon('live') }} Published</div>
+    <div class="stat-val">{{ counts.published }}</div>
+    <div class="stat-note">posts live across your platforms</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-lbl">{{ icon('calendar') }} Scheduled</div>
+    <div class="stat-val">{{ counts.scheduled }}</div>
+    <div class="stat-note">posts waiting for their time</div>
+  </div>
+</div>
+
+<div class="sec-head"><h2>Channels</h2><span class="sec-count">{{ channels|length }}</span></div>
+<div class="stat-grid">
+  {% for c in channels %}
+  <a href="/channel/{{ c.channel_id }}" class="stat-card" style="text-decoration:none; color:inherit;">
+    <div class="stat-lbl">{{ icon('channels') }} Channel</div>
+    <div class="stat-val" style="font-size:17px;">{{ c.name }}</div>
+    <div class="stat-note" style="margin-top:8px;">
+      {% if c.auth.active %}<span class="pill is-good">Production authorized</span> · {{ c.auth.days_left }} days left{% if c.auth.weekly_ceiling_usd %} · up to ${{ c.auth.weekly_ceiling_usd }}/week{% endif %}
+      {% else %}<span class="pill is-warn">Waiting for spending authorization</span>{% endif %}
+    </div>
+  </a>
+  {% else %}
+  <div class="dv-empty" style="grid-column:1/-1">{{ icon('channels') }}<div class="dv-empty-title">No channels yet</div><div class="dv-empty-sub">Your channels will appear here once Cortex creates them.</div></div>
+  {% endfor %}
+</div>
+
+<div class="sec-head"><h2>Does anything need you?</h2><span class="sec-count">{% if alerts %}{{ alerts|length }} to look at{% else %}all good{% endif %}</span></div>
+<div class="card {{ 'is-critical' if alerts else 'is-good' }}">
+  {% if alerts %}
+    {% for a in alerts %}
+    <div class="rd-item"><span class="rd-mark rd-blocker">{{ icon('warning') }}</span><div><div class="rd-title">{{ a.title }}</div></div></div>
+    {% endfor %}
+  {% else %}
+    <div class="rd-item" style="align-items:center;"><span class="rd-mark rd-ok">{{ icon('check') }}</span>
+      <div style="flex:1;"><div class="rd-title">Nothing needs your attention</div>
+      <div class="rd-detail">Cortex produces and publishes for you on its own schedule. If something goes wrong, you will hear about it here and by email.</div></div></div>
+  {% endif %}
+</div>
+
+{% if posts %}
+<div class="sec-head"><h2>Latest posts</h2></div>
+<div class="card" style="padding:0;">
+  <div class="table-wrap" style="border:none;"><table>
+    <thead><tr><th>Post</th><th>Channel</th><th>Status</th><th>When</th></tr></thead>
+    <tbody>
+    {% for p in posts %}
+    <tr>
+      <td style="max-width:380px;"><span class="cell-title" style="font-weight:600;">{{ p.title }}</span></td>
+      <td class="muted">{{ p.channel }}</td>
+      <td><span class="badge badge-{{ 'complete' if p.status == 'published' else ('queued' if p.status == 'scheduled' else 'unknown') }}">{{ p.status }}</span></td>
+      <td class="muted" style="white-space:nowrap;">{{ p.when }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</div>
+{% endif %}
+
+<div class="sec-head"><h2>Notifications</h2></div>
+<div class="card">
+  <form method="post" action="/notify" class="inline-form" style="display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
+    <span>Email me about problems: <b>{{ 'on' if notify else 'off' }}</b></span>
+    <input type="hidden" name="on" value="{{ '0' if notify else '1' }}">
+    <button class="btn" type="submit">Turn {{ 'off' if notify else 'on' }}</button>
+  </form>
+</div>
+{% endblock %}

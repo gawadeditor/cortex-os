@@ -1,21 +1,25 @@
 """
-hypogeum/client_portal.py — the client-facing dashboard (multi-tenant plan, Phase 6).
+hypogeum/client_portal.py — the client-facing dashboard (multi-tenant plan, Phase 6/7).
 
 A SEPARATE small Flask app, not the 267-route operator dashboard: it has only the handful of pages a client
 needs, so "default deny" holds by construction -- there is no route for logs, runs, other workspaces or
-platform pages to forget to filter. It binds 127.0.0.1 (run_client_portal.py); exposing it to the internet
-(Phase 7) means pointing a tunnel at THIS port only.
+platform pages to forget to filter. It binds 127.0.0.1 (run_client_portal.py); a tunnel exposes THIS port only.
+
+It is rendered with the operator dashboard's OWN design system: the same `_base_style.html`, icon set, hero
+macro and stat/card/table classes (templates under hypogeum/templates/portal/), so the two look like one product.
 
 Pages (all behind a session; a wrong channel/episode is a 404, same as one that does not exist):
-    /login            email form (the answer never reveals whether the email is known)
-    /auth/<token>     one-time link -> session cookie
-    /                 the workspace's channels, month spend vs ceiling, open alerts
-    /channel/<id>     the channel's posts (title, status, schedule, cover)
-    /episode/<id>/thumbnail   the episode's designed cover, only for the workspace's own episodes
-    POST /logout
+    /login  /auth/<token>  POST /logout          sign in with an emailed one-time link
+    /                       overview: channels, month spend vs ceiling, posts, what needs attention
+    /channel/<id>           the channel's posts (cover, status, schedule, platforms) + its authorization
+    /usage  /usage.csv      the spending statement (hypogeum/portal_usage.py)
+    /welcome …              first-run setup (hypogeum/portal_setup.py)
+    /episode/<id>/thumbnail an episode's designed cover, only for the workspace's own episodes
+    POST /notify            email-alert opt out/in
 """
 from __future__ import annotations
 
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -23,120 +27,24 @@ from typing import Optional
 from hypogeum import portal_auth as pa
 
 _COOKIE = "cortex_portal"
+_TEMPLATES = str(Path(__file__).resolve().parent / "templates")
 _PROVIDER_LABELS = {"openrouter": "OpenRouter", "muapi": "MUAPI", "elevenlabs": "ElevenLabs", "perplexity": "Perplexity",
                     "voder": "Music (local)", "anthropic": "Anthropic"}
-
-_CSS = """
-:root{--bg:#090b11;--bg-2:#0c0f16;--surface:#14171d;--raised:#1b1f27;--border:#262b33;--border-strong:#363d47;
---text:#f4f6f9;--muted:#a4aebd;--faint:#6b7481;--accent:#f0a838;--accent-ink:#1a1206;--accent-bg:rgba(240,168,56,.13);
---accent-line:rgba(240,168,56,.45);--good:#4ec26f;--good-bg:rgba(78,194,111,.12);--warn:#e5a93a;--warn-bg:rgba(229,169,58,.13);
---critical:#f0574a;--critical-bg:rgba(240,87,74,.12);--radius:13px;--radius-sm:8px;--gap:20px;
---font:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;
---mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;--ease:cubic-bezier(.16,.84,.28,1)}
-*{box-sizing:border-box}html{color-scheme:dark}
-body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 var(--font);min-height:100vh;
-background-image:radial-gradient(1100px 520px at 72% -30%,rgba(240,168,56,.14),transparent 62%)}
-a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
-::selection{background:var(--accent-line);color:#fff}
-:focus-visible{outline:none;box-shadow:0 0 0 2px var(--bg),0 0 0 4px var(--accent);border-radius:6px}
-header{border-bottom:1px solid var(--border);background:rgba(9,11,17,.8);backdrop-filter:blur(8px);position:sticky;top:0;z-index:5}
-header .bar{max-width:1080px;margin:0 auto;padding:12px 20px;display:flex;gap:18px;align-items:center}
-.brand{font-weight:800;font-size:15px;letter-spacing:.07em;text-transform:uppercase;color:var(--text);display:inline-flex;gap:9px;align-items:center}header .who{margin-left:auto}
-.brand:hover{text-decoration:none}.brand:before{content:"";width:9px;height:9px;border-radius:2px;background:var(--accent);box-shadow:0 0 12px var(--accent-line)}
-.who{color:var(--muted);font-size:13px}
-main{max-width:1080px;margin:0 auto;padding:36px 20px 90px}
-h1{font-size:30px;letter-spacing:-.03em;margin:0 0 6px;line-height:1.15}h2{font-size:12px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin:34px 0 12px;font-weight:700}
-.sub{color:var(--muted);margin:0 0 4px}.crumb{font-size:13px;color:var(--muted);margin-bottom:14px;display:inline-block}
-.grid{display:grid;gap:var(--gap);grid-template-columns:repeat(auto-fill,minmax(260px,1fr))}
-.panel{background:linear-gradient(180deg,rgba(255,255,255,.03),transparent 40%),var(--raised);border:1px solid var(--border);border-radius:var(--radius);padding:20px;
-box-shadow:0 8px 24px -6px rgba(0,0,0,.55),0 2px 6px rgba(0,0,0,.4)}
-.chan{display:block;color:var(--text);transition:border-color .2s var(--ease),transform .2s var(--ease)}
-.chan:hover{text-decoration:none;border-color:var(--accent-line);transform:translateY(-2px)}
-.chan .name{font-size:17px;font-weight:700;letter-spacing:-.01em}.chan .go{font-size:12px;color:var(--accent);margin-top:10px;display:block;font-weight:600}
-.kpi{font-size:34px;font-weight:700;letter-spacing:-.03em;font-variant-numeric:tabular-nums}.kpi small{font-size:15px;color:var(--muted);font-weight:500;letter-spacing:0}
-.bar-track{height:8px;background:var(--border);border-radius:99px;overflow:hidden;margin-top:14px}
-.bar-track i{display:block;height:100%;background:linear-gradient(90deg,var(--accent-line),var(--accent));border-radius:99px}
-.alert{display:flex;gap:10px;align-items:flex-start;border:1px solid var(--critical);background:var(--critical-bg);color:#ffd7d3;border-radius:var(--radius-sm);padding:11px 14px;margin:8px 0;font-size:14px}
-.alert:before{content:"";flex:none;width:8px;height:8px;border-radius:99px;background:var(--critical);margin-top:7px;box-shadow:0 0 8px var(--critical)}
-.ok{border:1px solid var(--border);border-radius:var(--radius-sm);padding:11px 14px;color:var(--muted);font-size:14px}
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:var(--gap);margin-top:8px}
-.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;display:flex;flex-direction:column;transition:border-color .2s var(--ease)}
-.card:hover{border-color:var(--border-strong)}.card.attn{border-color:var(--critical);border-width:2px}
-.poster{aspect-ratio:9/16;background:var(--bg);display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:12px}
-.poster img{width:100%;height:100%;object-fit:contain;display:block}
-.cbody{padding:12px 13px 13px;display:flex;flex-direction:column;gap:8px;flex:1}
-.title{font-size:13px;font-weight:600;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.when{font-size:11px;color:var(--faint)}
-.pill{align-self:flex-start;font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;padding:2px 8px;border-radius:999px;background:var(--border);color:var(--muted)}
-.pill.published{background:var(--good-bg);color:var(--good)}.pill.scheduled{background:var(--accent-bg);color:var(--accent)}.pill.bad{background:var(--critical-bg);color:var(--critical)}
-.plats{display:flex;flex-wrap:wrap;gap:5px;margin-top:auto;padding-top:4px}
-.plat{font-size:10px;font-weight:600;padding:2px 7px;border-radius:5px;border:1px solid var(--border);color:var(--muted)}
-.plat.on{color:var(--good);border-color:var(--good)}
-form.inline{display:inline;margin:0}
-input[type=email]{font:inherit;padding:11px 14px;border-radius:var(--radius-sm);border:1px solid var(--border-strong);background:var(--surface);color:var(--text);min-width:260px}
-input[type=email]:focus{border-color:var(--accent)}
-.btn{font:inherit;font-weight:600;padding:10px 16px;border-radius:var(--radius-sm);border:1px solid var(--accent);background:var(--accent);color:var(--accent-ink);cursor:pointer;transition:transform .15s var(--ease),box-shadow .15s}
-.btn:hover{transform:translateY(-1px);box-shadow:0 8px 24px -8px rgba(240,168,56,.55)}
-.btn.ghost{background:transparent;color:var(--muted);border-color:var(--border-strong);font-size:13px;padding:6px 12px}.btn.ghost:hover{color:var(--text);box-shadow:none}
-.center{max-width:460px;margin:9vh auto 0}
-.steps{display:grid;gap:14px}.step{display:grid;grid-template-columns:44px 1fr;gap:16px;align-items:start}
-.num{width:36px;height:36px;border-radius:99px;border:1px solid var(--border-strong);display:flex;align-items:center;justify-content:center;font-weight:700;color:var(--muted);background:var(--surface)}
-.num.done{background:var(--good-bg);border-color:var(--good);color:var(--good)}.num.now{border-color:var(--accent);color:var(--accent);background:var(--accent-bg)}
-.step h3{margin:2px 0 4px;font-size:17px;letter-spacing:-.01em}.step p{margin:0;color:var(--muted);font-size:14px}
-.keyrow{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;margin-top:14px;padding-top:14px;border-top:1px solid var(--border)}
-.keyrow b{font-size:14px}.keyrow small{display:block;color:var(--muted);font-size:12.5px}
-.keyrow form{display:flex;gap:8px;grid-column:1/-1}.keyrow input[type=password]{flex:1;font:inherit;padding:9px 12px;border-radius:var(--radius-sm);border:1px solid var(--border-strong);background:var(--surface);color:var(--text)}
-.msg{border:1px solid var(--good);background:var(--good-bg);color:#c9f0d4;border-radius:var(--radius-sm);padding:10px 14px;margin:0 0 16px;font-size:14px}.msg.bad{border-color:var(--critical);background:var(--critical-bg);color:#ffd7d3}
-.banner{display:flex;gap:14px;align-items:center;justify-content:space-between;border:1px solid var(--accent-line);background:var(--accent-bg);border-radius:var(--radius);padding:14px 18px;margin-bottom:8px}
-.progress{height:6px;background:var(--border);border-radius:99px;overflow:hidden;margin:14px 0 26px}.progress i{display:block;height:100%;background:linear-gradient(90deg,var(--accent-line),var(--accent))}
-.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:var(--gap)}
-.kpi-l{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px}
-.mtabs{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 6px}.mtab{padding:6px 14px;border-radius:99px;border:1px solid var(--border-strong);color:var(--muted);font-size:13px;font-weight:600}
-.mtab:hover{text-decoration:none;color:var(--text)}.mtab.on{background:var(--accent-bg);border-color:var(--accent-line);color:var(--accent)}
-.row{display:grid;grid-template-columns:130px 1fr 80px;gap:12px;align-items:center;padding:7px 0;font-size:14px}.row .t{text-align:right;font-variant-numeric:tabular-nums}
-.row .bar-track{margin:0}.chart{display:flex;align-items:flex-end;gap:3px;height:120px;padding-top:8px}
-.chart i{flex:1;min-width:3px;background:linear-gradient(180deg,var(--accent),var(--accent-line));border-radius:3px 3px 0 0;min-height:2px}
-.chart i.zero{background:var(--border)}table.tbl{width:100%;border-collapse:collapse;font-size:14px}
-.tbl th{text-align:left;font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);padding:8px 10px;border-bottom:1px solid var(--border)}
-.tbl td{padding:9px 10px;border-bottom:1px solid var(--border)}.tbl td.n,.tbl th.n{text-align:right;font-variant-numeric:tabular-nums}
-.note{color:var(--faint);font-size:12.5px;margin-top:12px}
-header nav a{color:var(--muted);font-size:14px;font-weight:600}header nav a:hover{color:var(--text);text-decoration:none}
-@media(max-width:600px){main{padding:24px 16px 70px}h1{font-size:25px}input[type=email]{min-width:0;width:100%;margin-bottom:10px}.cards{grid-template-columns:repeat(2,1fr)}}
-@media(prefers-reduced-motion:reduce){*{transition:none!important}}
-"""
-
-_BASE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{{ title }} · Cortex</title><style>{{ css|safe }}</style></head><body>
-<header><div class="bar"><a class="brand" href="/">Cortex</a>{% if user %}<nav style="display:flex;gap:16px"><a href="/">Channels</a><a href="/usage">Usage</a><a href="/welcome">Setup</a></nav><span class="who">{{ user.email }}</span>
-<form class="inline" method="post" action="/logout"><button class="btn ghost" type="submit">Sign out</button></form>{% endif %}</div></header>
-<main>{{ body|safe }}</main></body></html>"""
-
-
-def _esc(s) -> str:
-    from markupsafe import escape  # noqa: PLC0415
-    return str(escape("" if s is None else s))
+_MSG = {"verified": "connected and verified.", "saved": "key saved. It will be checked the first time it is used."}
 
 
 def create_app(db_path=None, config=None):
-    from flask import Flask, abort, make_response, redirect, render_template_string, request  # noqa: PLC0415
+    from flask import (Flask, abort, g, make_response, redirect, render_template, request,  # noqa: PLC0415
+                       send_file)
 
-    app = Flask(__name__)
+    app = Flask(__name__, template_folder=_TEMPLATES)
     secure_cookie = bool(getattr(config, "PORTAL_COOKIE_SECURE", False))
+    dbp = Path(db_path) if db_path else None
 
-    def page(title, body, user=None, status=200):
-        return render_template_string(_BASE, title=title, body=body, css=_CSS, user=user), status
-
-    def current_user() -> Optional[dict]:
-        return pa.resolve_session(request.cookies.get(_COOKIE, ""), db_path)
-
-    def need_user():
-        u = current_user()
-        if u is None:
-            abort(redirect("/login"))
-        return u
-
+    # ---- plumbing ------------------------------------------------------------------------------------------
     @app.before_request
-    def _same_origin_posts():
+    def _guards():
+        g.nonce = secrets.token_urlsafe(16)
         if request.method == "POST":                       # the cookie is SameSite=Lax; this is the second lock
             origin = request.headers.get("Origin")
             if origin and origin.split("://", 1)[-1].split("/", 1)[0] != request.host:
@@ -148,107 +56,270 @@ def create_app(db_path=None, config=None):
         resp.headers["X-Frame-Options"] = "DENY"
         resp.headers["Referrer-Policy"] = "no-referrer"
         resp.headers["Cache-Control"] = "no-store"
-        resp.headers["Content-Security-Policy"] = ("default-src 'none'; img-src 'self' https://media.zernio.com data:; "
-                                                    "style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+        resp.headers["Content-Security-Policy"] = (
+            f"default-src 'none'; img-src 'self' https://media.zernio.com data:; style-src 'unsafe-inline'; "
+            f"script-src 'nonce-{getattr(g, 'nonce', '')}'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
         return resp
 
-    def auth_line(channel_id) -> str:
-        from hypogeum.client_grants import grant_state  # noqa: PLC0415
-        g = grant_state(channel_id, db_path)
-        if not g["active"]:
-            return "<span class='pill'>Waiting for spending authorization</span>"
-        lim = (" · up to $" + _esc(g["weekly_ceiling_usd"]) + "/week") if g.get("weekly_ceiling_usd") else ""
-        return "<span class='pill published'>Production authorized</span> <span class='when'>" + str(g["days_left"]) + " days left" + lim + "</span>"
+    @app.context_processor
+    def _nonce():
+        return {"nonce": getattr(g, "nonce", "")}
+
+    def current_user() -> Optional[dict]:
+        return pa.resolve_session(request.cookies.get(_COOKIE, ""), dbp)
+
+    def need_user():
+        u = current_user()
+        if u is None:
+            abort(redirect("/login"))
+        return u
+
+    def conn():
+        from hypogeum.db import get_connection  # noqa: PLC0415
+        return get_connection(dbp)
+
+    def channel_names() -> dict:
+        c = conn()
+        try:
+            return {r[0]: r[1] for r in c.execute("SELECT channel_id, name FROM channel_profiles")}
+        except Exception:  # noqa: BLE001
+            return {}
+        finally:
+            c.close()
+
+    def workspace_name(ws_id) -> str:
+        from hypogeum import workspaces as ws  # noqa: PLC0415
+        return next((w["name"] for w in ws.list_workspaces(dbp) if w["workspace_id"] == ws_id), ws_id)
+
+    def shell(user, active, title, crumb=None) -> dict:
+        """Everything the layout (rail + topbar) needs."""
+        from hypogeum import portal_setup as ps, workspaces as ws  # noqa: PLC0415
+        names = channel_names()
+        chans = ws.resources_of(user["workspace_id"], "channel", db_path=dbp)
+        try:
+            left = sum(1 for x in ps.steps(user["workspace_id"], dbp) if not x["done"])
+        except Exception:  # noqa: BLE001
+            left = 0
+        return {"user": user, "active": active, "title": title, "crumb": crumb, "workspace_name": workspace_name(user["workspace_id"]),
+                "nav_channels": [{"channel_id": c, "name": names.get(c) or c} for c in chans],
+                "setup_left": left if user["role"] == "owner" else 0}
 
     def own_channel(user, channel_id) -> str:
         from hypogeum import workspaces as ws  # noqa: PLC0415
-        if ws.workspace_of(channel_id, db_path) != user["workspace_id"]:
+        if ws.workspace_of(channel_id, dbp) != user["workspace_id"]:
             abort(404)                                  # not yours looks exactly like not existing
         return channel_id
 
-    def channel_of_episode(episode_id) -> Optional[str]:
-        from hypogeum.db import get_connection  # noqa: PLC0415
-        conn = get_connection(Path(db_path) if db_path else None)
+    def archived_dir(channel_id, episode_id) -> Optional[Path]:
         try:
-            r = conn.execute("SELECT channel_id FROM runs WHERE episode_id = ? AND channel_id IS NOT NULL "
-                             "ORDER BY started_at DESC LIMIT 1", (episode_id,)).fetchone()
+            from hypogeum.archive_storage import resolve_archive_root  # noqa: PLC0415
+            base = resolve_archive_root(dbp) / channel_id
+            for pattern in (f"{episode_id} - *", episode_id):
+                for d in sorted(base.glob(pattern)):
+                    if d.is_dir():
+                        return d
+        except Exception:  # noqa: BLE001
+            return None
+        return None
+
+    def channel_of_episode(episode_id) -> Optional[str]:
+        c = conn()
+        try:
+            r = c.execute("SELECT channel_id FROM runs WHERE episode_id = ? AND channel_id IS NOT NULL "
+                          "ORDER BY started_at DESC LIMIT 1", (episode_id,)).fetchone()
         finally:
-            conn.close()
+            c.close()
         return r["channel_id"] if r else None
 
+    # ---- sign in -------------------------------------------------------------------------------------------
     @app.get("/login")
     def login_form():
-        return page("Sign in", "<div class='center panel'><h1>Sign in</h1><p class='sub'>Enter your email and we will send you a one-time link.</p>"
-                               "<form method='post' action='/login' style='margin-top:18px'><input type='email' name='email' required autofocus "
-                               "placeholder='you@example.com'> <button class='btn' type='submit'>Send link</button></form></div>")
+        return render_template("portal/login.html", title="Sign in")
 
     @app.post("/login")
     def login_submit():
         email = request.form.get("email", "")
-        token = pa.request_login_link(email, db_path)
+        token = pa.request_login_link(email, dbp)
         if token:
             base = (getattr(config, "PORTAL_BASE_URL", None) or request.host_url).rstrip("/")
             pa.deliver_link(email.strip().lower(), f"{base}/auth/{token}", config)
-        return page("Check your email", "<div class='center panel'><h1>Check your email</h1><p class='sub'>If that address is registered, a sign-in link is on its way. "
-                                         "It works once and expires in 15 minutes.</p></div>")
+        return render_template("portal/message.html", title="Check your email", heading="Check your email",
+                               text="If that address is registered, a sign-in link is on its way. It works once and expires in 15 minutes.")
 
     @app.get("/auth/<token>")
     def auth(token):
-        session = pa.consume_login_link(token, db_path)
+        session = pa.consume_login_link(token, dbp)
         if session is None:
-            return page("Link expired", "<div class='center panel'><h1>This link has expired</h1><p class='sub'><a href='/login'>Get a new one</a></p></div>", status=400)
+            return render_template("portal/message.html", title="Link expired", heading="This link has expired",
+                                   text="Sign-in links work once and only for a short time.", link_text="Get a new link", link_href="/login"), 400
         resp = make_response(redirect("/"))
         resp.set_cookie(_COOKIE, session, max_age=int(pa.SESSION_TTL.total_seconds()), httponly=True,
                         secure=secure_cookie, samesite="Lax")
         return resp
 
-    _MSGS = {"verified": "connected and verified.", "saved": "saved. It will be checked the first time it is used."}
+    @app.post("/logout")
+    def logout():
+        pa.logout(request.cookies.get(_COOKIE, ""), dbp)
+        resp = make_response(redirect("/login"))
+        resp.delete_cookie(_COOKIE)
+        return resp
+
+    @app.post("/notify")
+    def notify():
+        user = need_user()
+        pa.set_notify(user["user_id"], request.form.get("on") == "1", dbp)
+        return redirect("/")
+
+    # ---- overview ------------------------------------------------------------------------------------------
+    @app.get("/")
+    def home():
+        user = need_user()
+        from hypogeum import client_grants as cg, portal_setup as ps, workspace_controls as wc, workspaces as ws  # noqa: PLC0415
+        wid = user["workspace_id"]
+        names = channel_names()
+        chans = ws.resources_of(wid, "channel", db_path=dbp)
+        b = wc.budget_status(wid, dbp)
+        c = conn()
+        try:
+            alerts = [dict(r) for r in c.execute("SELECT title FROM operator_alerts WHERE status = 'open' AND workspace_id = ? "
+                                                 "ORDER BY opened_at DESC LIMIT 20", (wid,))]
+        except Exception:  # noqa: BLE001
+            alerts = []
+        posts, counts = [], {"published": 0, "scheduled": 0}
+        if chans:
+            marks = ",".join("?" * len(chans))
+            try:
+                rows = c.execute(f"SELECT channel_id, title, status, scheduled_for, published_at FROM content_grid_cache "
+                                 f"WHERE channel_id IN ({marks}) ORDER BY COALESCE(published_at, scheduled_for) DESC", chans).fetchall()
+            except Exception:  # noqa: BLE001
+                rows = []
+            for r in rows:
+                if r["status"] in counts:
+                    counts[r["status"]] += 1
+            posts = [{"title": r["title"] or "(untitled)", "channel": names.get(r["channel_id"]) or r["channel_id"], "status": r["status"] or "",
+                      "when": ((r["published_at"] or r["scheduled_for"] or "")[:16].replace("T", " ") + " UTC") if (r["published_at"] or r["scheduled_for"]) else ""}
+                     for r in rows[:8]]
+        c.close()
+        sts = ps.steps(wid, dbp)
+        left = sum(1 for x in sts if not x["done"])
+        paused = wc.is_paused(wid, dbp)
+        try:
+            notify_on = bool(pa.workspace_emails(wid, dbp).count(user["email"]))
+        except Exception:  # noqa: BLE001
+            notify_on = True
+        pct = 0 if not b["ceiling_usd"] else min(100, round(100 * b["month_spend_usd"] / b["ceiling_usd"]))
+        return render_template("portal/home.html", **shell(user, "home", "Overview"), paused=paused, spend=b["month_spend_usd"],
+                               ceiling=b["ceiling_usd"], pct=pct, counts=counts, posts=posts, alerts=alerts, notify=notify_on,
+                               setup_total=len(sts),
+                               channels=[{"channel_id": ch, "name": names.get(ch) or ch, "auth": cg.grant_state(ch, dbp)} for ch in chans])
+
+    # ---- one channel ---------------------------------------------------------------------------------------
+    @app.get("/channel/<channel_id>")
+    def channel(channel_id):
+        user = need_user()
+        own_channel(user, channel_id)
+        from hypogeum import client_grants as cg, portal_usage as pu  # noqa: PLC0415
+        from hypogeum.dashboard_content_grid import get_content_grid  # noqa: PLC0415
+        try:
+            raw = get_content_grid(channel_id, dbp)
+        except Exception:  # noqa: BLE001
+            raw = []
+        items = []
+        for it in raw:
+            thumb = it.get("thumbnail_url") or ""
+            if thumb and not (thumb.startswith("/episode/") or thumb.startswith("https://media.zernio.com/")):
+                thumb = ""
+            when = (it.get("published_at") or it.get("scheduled_for") or "")[:16].replace("T", " ")
+            items.append({"title": it.get("display_title") or "(untitled)", "status": str(it.get("status") or ""), "when": when, "thumb": thumb,
+                          "needs_attention": bool(it.get("needs_attention")), "is_landscape": bool(it.get("is_landscape")),
+                          "platforms": [{"platform": p.get("platform"), "status": p.get("status")} for p in (it.get("platforms") or [])]})
+        c = conn()
+        try:
+            r = c.execute("SELECT name, description FROM channel_profiles WHERE channel_id = ?", (channel_id,)).fetchone()
+        except Exception:  # noqa: BLE001
+            r = None
+        finally:
+            c.close()
+        name = (r["name"] if r and r["name"] else channel_id)
+        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        spend = next((x["total"] for x in pu.usage(user["workspace_id"], month, dbp)["by_channel"] if x["channel_id"] == channel_id), 0.0)
+        return render_template("portal/channel.html", **shell(user, f"channel:{channel_id}", name, name), name=name,
+                               description=(r["description"] if r else None), items=items, spend=spend,
+                               published=sum(1 for i in items if i["status"] == "published"),
+                               scheduled=sum(1 for i in items if i["status"] == "scheduled"), auth=cg.grant_state(channel_id, dbp))
+
+    @app.get("/episode/<episode_id>/thumbnail")
+    def thumbnail(episode_id):
+        user = need_user()
+        cid = channel_of_episode(episode_id)
+        if not cid:
+            abort(404)
+        own_channel(user, cid)
+        from hypogeum.episode_artifacts import safe_episode_asset_path  # noqa: PLC0415
+        archived = archived_dir(cid, episode_id)
+        for stem in ("main_episode", "main"):
+            for ext in ("jpg", "jpeg", "png", "webp"):
+                p = safe_episode_asset_path(episode_id, "thumbnail", f"{stem}.{ext}")
+                if not p and archived is not None:               # the working copy moves to the archive after publishing
+                    cand = (archived / "thumbnails" / f"{stem}.{ext}")
+                    try:
+                        cand = cand.resolve()
+                        cand.relative_to(archived.resolve())
+                        if cand.is_file() and cand.stat().st_size > 0:
+                            p = cand
+                    except (OSError, ValueError):
+                        p = None
+                if p:
+                    return send_file(str(p), mimetype="image/jpeg" if ext in ("jpg", "jpeg") else f"image/{ext}")
+        abort(404)
+
+    # ---- usage ---------------------------------------------------------------------------------------------
+    @app.get("/usage")
+    def usage_page():
+        user = need_user()
+        from hypogeum import portal_usage as pu  # noqa: PLC0415
+        month = pu.valid_month(request.args.get("month")) or datetime.now(timezone.utc).strftime("%Y-%m")
+        u = pu.usage(user["workspace_id"], month, dbp)
+        ms = [{**m, "label": datetime.strptime(m["month"], "%Y-%m").strftime("%b %Y")} for m in pu.months(user["workspace_id"], dbp)]
+        top = lambda rows: max([r["total"] for r in rows] + [0.01])  # noqa: E731
+        return render_template("portal/usage.html", **shell(user, "usage", "Usage", "Usage"), u=u, month=month, months=ms,
+                               label=datetime.strptime(month, "%Y-%m").strftime("%B %Y"), names=channel_names(), labels=_PROVIDER_LABELS,
+                               pct=(0 if not u["ceiling"] else min(100, round(100 * u["total"] / u["ceiling"]))), peak=top(u["daily"]),
+                               ptop=top(u["by_provider"]), ctop=top(u["by_channel"]))
+
+    @app.get("/usage.csv")
+    def usage_csv():
+        user = need_user()
+        from hypogeum import portal_usage as pu  # noqa: PLC0415
+        month = pu.valid_month(request.args.get("month")) or datetime.now(timezone.utc).strftime("%Y-%m")
+        import csv, io  # noqa: PLC0415
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        for row in pu.csv_rows(user["workspace_id"], month, dbp):
+            w.writerow([("'" + c) if isinstance(c, str) and c[:1] in ("=", "+", "-", "@") else c for c in row])   # no spreadsheet formulas
+        resp = make_response(buf.getvalue())
+        resp.headers["Content-Type"] = "text/csv; charset=utf-8"
+        resp.headers["Content-Disposition"] = f"attachment; filename=cortex-usage-{month}.csv"
+        return resp
+
+    # ---- setup ---------------------------------------------------------------------------------------------
+    def render_welcome(user, k=None, r=None, tg_link=None):
+        from hypogeum import portal_setup as ps  # noqa: PLC0415
+        sts = ps.steps(user["workspace_id"], dbp)
+        msg = None
+        if k in ps.PROVIDERS and r in _MSG:
+            msg = {"ok": True, "text": f"{ps.PROVIDERS[k]['label']} {_MSG[r]}"}
+        elif k in ps.PROVIDERS and r == "invalid":
+            msg = {"ok": False, "text": f"{ps.PROVIDERS[k]['label']} rejected that key. Check it and try again."}
+        elif r == "limit":
+            msg = {"ok": False, "text": "Too many attempts. Please try again in an hour."}
+        return render_template("portal/welcome.html", **shell(user, "setup", "Setup", "Setup"), steps=sts, done=sum(1 for x in sts if x["done"]),
+                               first_open=next((x["n"] for x in sts if not x["done"]), None), owner=user["role"] == "owner",
+                               keys=ps.key_status(user["workspace_id"], dbp), providers=ps.PROVIDERS, msg=msg, tg_link=tg_link)
 
     @app.get("/welcome")
     def welcome():
-        return render_welcome(need_user(), request.args.get("k"), request.args.get("r"), None)
-
-    def render_welcome(user, k, r, tg_link):
-        from hypogeum import portal_setup as ps  # noqa: PLC0415
-        sts = ps.steps(user["workspace_id"], db_path)
-        keys = ps.key_status(user["workspace_id"], db_path)
-        done = sum(1 for x in sts if x["done"])
-        first_open = next((x["n"] for x in sts if not x["done"]), None)
-        owner = user["role"] == "owner"
-        body = "<h1>Let’s get you set up</h1><p class='sub'>Your keys stay yours: they are stored encrypted and are never shown again.</p>"
-        body += "<div class='progress'><i style='width:" + str(round(100 * done / len(sts))) + "%'></i></div>"
-        if k in ps.PROVIDERS and r in ("verified", "saved"):
-            body += "<div class='msg'>" + _esc(ps.PROVIDERS[k]["label"]) + " " + _MSGS[r] + "</div>"
-        elif k in ps.PROVIDERS and r == "invalid":
-            body += "<div class='msg bad'>" + _esc(ps.PROVIDERS[k]["label"]) + " rejected that key. Check it and try again.</div>"
-        elif r == "limit":
-            body += "<div class='msg bad'>Too many attempts. Please try again in an hour.</div>"
-        body += "<div class='steps'>"
-        for x in sts:
-            cls = "done" if x["done"] else ("now" if x["n"] == first_open else "")
-            inner = "<h3>" + _esc(x["title"]) + "</h3><p>" + _esc(x["detail"]) + "</p>"
-            if x["key"] == "keys" and owner:
-                for pk, meta in ps.PROVIDERS.items():
-                    state = ("<span class='pill published'>Connected</span>" if keys[pk] else "<span class='pill'>Not connected</span>")
-                    inner += ("<div class='keyrow'><div><b>" + _esc(meta["label"]) + "</b><small>" + _esc(meta["role"]) + " · " +
-                              _esc(meta["where"]) + "</small></div>" + state +
-                              "<form method='post' action='/welcome/keys/" + pk + "' autocomplete='off'>"
-                              "<input type='password' name='key' placeholder='Paste your " + _esc(meta["label"]) + " key' required autocomplete='off'>"
-                              "<button class='btn' type='submit'>" + ("Replace" if keys[pk] else "Save &amp; test") + "</button></form></div>")
-            if x["key"] == "alerts":
-                if tg_link:
-                    inner += ("<p style='margin-top:12px'><a class='btn' href='" + _esc(tg_link) + "' target='_blank' rel='noopener noreferrer'>"
-                              "Open Telegram and press Start</a></p><p class='when'>The link works once and expires in 30 minutes.</p>")
-                elif owner:
-                    inner += ("<form method='post' action='/welcome/telegram' style='margin-top:12px'><button class='btn ghost' type='submit'>"
-                              "Connect Telegram</button></form><p class='when' style='margin-top:8px'>Email alerts can be turned on or off from "
-                              "<a href='/'>your home page</a>.</p>")
-            if x["key"] == "authorization" and not x["done"]:
-                inner += "<p class='when' style='margin-top:8px'>Nothing for you to do here. We will email you when it is done.</p>"
-            body += ("<div class='panel step'><div class='num " + cls + "'>" + ("&#10003;" if x["done"] else str(x["n"])) + "</div><div>"
-                     + inner + "</div></div>")
-        body += "</div><p style='margin-top:28px'><a href='/'>Go to my channels →</a></p>"
-        return page("Set up", body, user)
+        return render_welcome(need_user(), request.args.get("k"), request.args.get("r"))
 
     @app.post("/welcome/keys/<provider>")
     def welcome_key(provider):
@@ -258,7 +329,7 @@ def create_app(db_path=None, config=None):
         from hypogeum import portal_setup as ps  # noqa: PLC0415
         if provider not in ps.PROVIDERS:
             abort(404)
-        res = ps.save_key(user["workspace_id"], provider, request.form.get("key", ""), db_path, actor=user["email"])
+        res = ps.save_key(user["workspace_id"], provider, request.form.get("key", ""), dbp, actor=user["email"])
         code = res["status"] if res["ok"] else ("limit" if "Too many" in res["message"] else "invalid")
         return redirect(f"/welcome?k={provider}&r={code}")
 
@@ -269,198 +340,9 @@ def create_app(db_path=None, config=None):
             abort(403)
         from hypogeum import alert_recipients as ar  # noqa: PLC0415
         try:
-            link = ar.create_link(user["workspace_id"], db_path=db_path).get("url")
+            link = ar.create_link(user["workspace_id"], db_path=dbp).get("url")
         except Exception:  # noqa: BLE001
             link = None
-        if not link:
-            return redirect("/welcome")
-        return render_welcome(user, None, None, link)
-
-    @app.get("/usage")
-    def usage_page():
-        user = need_user()
-        from hypogeum import portal_usage as pu  # noqa: PLC0415
-        month = pu.valid_month(request.args.get("month")) or datetime.now(timezone.utc).strftime("%Y-%m")
-        u = pu.usage(user["workspace_id"], month, db_path)
-        ms = pu.months(user["workspace_id"], db_path)
-        names = {}
-        try:
-            from hypogeum.db import get_connection  # noqa: PLC0415
-            for r in get_connection(Path(db_path) if db_path else None).execute("SELECT channel_id, name FROM channel_profiles"):
-                names[r[0]] = r[1]
-        except Exception:  # noqa: BLE001
-            pass
-        label = datetime.strptime(month, "%Y-%m").strftime("%B %Y")
-        body = "<h1>Usage</h1><p class='sub'>What Cortex spent from your own provider keys. You pay your providers directly; this is the statement.</p>"
-        body += "<div class='mtabs'>" + "".join(
-            "<a class='mtab" + (" on" if m["month"] == month else "") + "' href='/usage?month=" + m["month"] + "'>" +
-            datetime.strptime(m["month"], "%Y-%m").strftime("%b %Y") + " · $" + format(m["total"], ".0f") + "</a>" for m in ms) + "</div>"
-        pct = 0 if not u["ceiling"] else min(100, round(100 * u["total"] / u["ceiling"]))
-        k = "<div class='kpis'><div class='panel'><div class='kpi-l'>Spent in " + _esc(label) + "</div><div class='kpi'>$" + format(u["total"], ".2f")
-        k += (" <small>of $" + format(u["ceiling"], ".0f") + "</small></div><div class='bar-track'><i style='width:" + str(pct) + "%'></i></div></div>"
-              if u["ceiling"] else "</div></div>")
-        if u["projected"] is not None:
-            k += "<div class='panel'><div class='kpi-l'>On track for</div><div class='kpi'>$" + format(u["projected"], ".0f") + "</div><div class='when'>by the end of the month</div></div>"
-        k += ("<div class='panel'><div class='kpi-l'>Episodes</div><div class='kpi'>" + str(len(u["episodes"])) + "</div><div class='when'>" +
-              (("about $" + format(u["avg_per_episode"], ".2f") + " each") if u["avg_per_episode"] else "none paid yet") + "</div></div></div>")
-        body += k
-        if not u["total"]:
-            body += "<h2>Activity</h2><div class='ok'>No spending recorded for this month.</div>"
-        else:
-            peak = max([d["total"] for d in u["daily"]] + [0.01])
-            body += "<h2>Day by day</h2><div class='panel'><div class='chart'>" + "".join(
-                "<i class='" + ("zero" if not d["total"] else "") + "' style='height:" + str(max(2, round(100 * d["total"] / peak))) + "%' title='" +
-                _esc(d["day"]) + " · $" + format(d["total"], ".2f") + "'></i>" for d in u["daily"]) + "</div></div>"
-
-            def bars(items, key, labeller):
-                top = max([i["total"] for i in items] + [0.01])
-                return "".join("<div class='row'><span>" + _esc(labeller(i)) + "</span><div class='bar-track'><i style='width:" +
-                               str(round(100 * i["total"] / top)) + "%'></i></div><span class='t'>$" + format(i["total"], ".2f") + "</span></div>"
-                               for i in items)
-            body += "<h2>By provider</h2><div class='panel'>" + bars(u["by_provider"], "provider", lambda i: _PROVIDER_LABELS.get(i["provider"], i["provider"].capitalize())) + "</div>"
-            if len(u["by_channel"]) > 1 or any(c["channel_id"] for c in u["by_channel"]):
-                body += "<h2>By channel</h2><div class='panel'>" + bars(u["by_channel"], "channel_id",
-                                                                          lambda i: names.get(i["channel_id"]) or i["channel_id"] or "-") + "</div>"
-            rows = "".join("<tr><td>" + _esc(e["first"]) + "</td><td>" + _esc(e["title"]) + "</td><td>" + _esc(names.get(e["channel_id"]) or e["channel_id"] or "") +
-                           "</td><td class='n'>$" + format(e["total"], ".2f") + "</td></tr>" for e in u["episodes"])
-            body += ("<h2>Episodes</h2><div class='panel' style='padding:6px 10px'><table class='tbl'><thead><tr><th>Started</th><th>Episode</th><th>Channel</th>"
-                     "<th class='n'>Cost</th></tr></thead><tbody>" + rows + "</tbody></table></div>"
-                     "<p class='note'>Costs are recorded as each call is made, so the numbers can still grow a little while an episode is in production. "
-                     "<a href='/usage.csv?month=" + month + "'>Download this month as CSV</a>.</p>")
-        return page("Usage", body, user)
-
-    @app.get("/usage.csv")
-    def usage_csv():
-        user = need_user()
-        from hypogeum import portal_usage as pu  # noqa: PLC0415
-        month = pu.valid_month(request.args.get("month")) or datetime.now(timezone.utc).strftime("%Y-%m")
-        import csv, io  # noqa: PLC0415
-        buf = io.StringIO()
-        w = csv.writer(buf)
-        for row in pu.csv_rows(user["workspace_id"], month, db_path):
-            w.writerow([("'" + c) if isinstance(c, str) and c[:1] in ("=", "+", "-", "@") else c for c in row])   # no spreadsheet formulas
-        resp = make_response(buf.getvalue())
-        resp.headers["Content-Type"] = "text/csv; charset=utf-8"
-        resp.headers["Content-Disposition"] = f"attachment; filename=cortex-usage-{month}.csv"
-        return resp
-
-    @app.post("/notify")
-    def notify():
-        user = need_user()
-        pa.set_notify(user["user_id"], request.form.get("on") == "1", db_path)
-        return redirect("/")
-
-    @app.post("/logout")
-    def logout():
-        pa.logout(request.cookies.get(_COOKIE, ""), db_path)
-        resp = make_response(redirect("/login"))
-        resp.delete_cookie(_COOKIE)
-        return resp
-
-    @app.get("/")
-    def home():
-        user = need_user()
-        from hypogeum import workspace_controls as wc, workspaces as ws  # noqa: PLC0415
-        from hypogeum.db import get_connection  # noqa: PLC0415
-        channels = ws.resources_of(user["workspace_id"], "channel", db_path)
-        b = wc.budget_status(user["workspace_id"], db_path)
-        conn = get_connection(Path(db_path) if db_path else None)
-        try:
-            alerts = conn.execute("SELECT title FROM operator_alerts WHERE status = 'open' AND workspace_id = ? "
-                                  "ORDER BY opened_at DESC LIMIT 20", (user["workspace_id"],)).fetchall()
-        except Exception:  # noqa: BLE001
-            alerts = []
-        finally:
-            conn.close()
-        pct = 0 if not b["ceiling_usd"] else min(100, round(100 * b["month_spend_usd"] / b["ceiling_usd"]))
-        names = {}
-        try:
-            for r in get_connection(Path(db_path) if db_path else None).execute("SELECT channel_id, name FROM channel_profiles"):
-                names[r[0]] = r[1]
-        except Exception:  # noqa: BLE001
-            pass
-        body = ""
-        try:
-            from hypogeum import portal_setup as ps  # noqa: PLC0415
-            sts = ps.steps(user["workspace_id"], db_path)
-            left = sum(1 for x in sts if not x["done"])
-            if left and user["role"] == "owner":
-                body += ("<div class='banner'><div><b>Finish setting up</b><div class='sub'>" + str(len(sts) - left) + " of " + str(len(sts)) +
-                         " steps done.</div></div><a class='btn' href='/welcome'>Continue setup</a></div>")
-        except Exception:  # noqa: BLE001
-            pass
-        body += "<h1>Your channels</h1><p class='sub'>Everything we are producing and publishing for you.</p><h2>Channels</h2>"
-        chans = "".join("<a class='panel chan' href='/channel/" + _esc(c) + "'><span class='name'>" + _esc(names.get(c) or c) +
-                        "</span><div style='margin-top:8px'>" + auth_line(c) + "</div><span class='go'>View posts →</span></a>" for c in channels)
-        body += "<div class='grid'>" + (chans or "<div class='ok'>No channels yet.</div>") + "</div>"
-        body += "<h2>This month</h2><div class='panel'><div class='kpi'>$" + format(b["month_spend_usd"], ".2f")
-        if b["ceiling_usd"]:
-            body += " <small>of $" + format(b["ceiling_usd"], ".2f") + "</small></div><div class='bar-track'><i style='width:" + str(pct) + "%'></i></div>"
-        else:
-            body += " <small>spent</small></div>"
-        body += "</div><h2>Needs attention</h2>"
-        body += "".join("<div class='alert'>" + _esc(a["title"]) + "</div>" for a in alerts) or "<div class='ok'>Nothing needs your attention.</div>"
-        conn2 = get_connection(Path(db_path) if db_path else None)
-        try:
-            on = conn2.execute("SELECT notify_email FROM portal_users WHERE user_id = ?", (user["user_id"],)).fetchone()
-        finally:
-            conn2.close()
-        on = bool(on and on[0])
-        body += ("<h2>Notifications</h2><div class='panel'><form method='post' action='/notify' class='inline'>"
-                 "<span class='sub'>Email me about problems: <b>" + ("on" if on else "off") + "</b></span> "
-                 "<input type='hidden' name='on' value='" + ("0" if on else "1") + "'> "
-                 "<button class='btn ghost' type='submit'>Turn " + ("off" if on else "on") + "</button></form></div>")
-        return page("Home", body, user)
-
-    @app.get("/channel/<channel_id>")
-    def channel(channel_id):
-        user = need_user()
-        own_channel(user, channel_id)
-        from hypogeum.dashboard_content_grid import get_content_grid  # noqa: PLC0415
-        try:
-            items = get_content_grid(channel_id, db_path)
-        except Exception:  # noqa: BLE001
-            items = []
-        cards = ""
-        for it in items:
-            thumb = it.get("thumbnail_url") or ""
-            if thumb and not (thumb.startswith("/episode/") or thumb.startswith("https://media.zernio.com/")):
-                thumb = ""
-            when = (it.get("published_at") or it.get("scheduled_for") or "")[:16].replace("T", " ")
-            st = str(it.get("status") or "")
-            pill = "published" if st == "published" else ("scheduled" if st == "scheduled" else ("bad" if it.get("needs_attention") else ""))
-            img = '<img src="' + _esc(thumb) + '" alt="" loading="lazy">' if thumb else "no cover"
-            plats = "".join("<span class='plat" + (" on" if pl.get("status") == "published" else "") + "'>" + _esc(pl.get("platform")) + "</span>"
-                            for pl in (it.get("platforms") or []))
-            cards += ("<div class='card" + (" attn" if it.get("needs_attention") else "") + "'><div class='poster'>" + img + "</div>"
-                      "<div class='cbody'><div class='title'>" + _esc(it.get("display_title")) + "</div>"
-                      "<span class='pill " + pill + "'>" + _esc(st) + "</span><div class='when'>" + _esc(when) + " UTC</div>"
-                      "<div class='plats'>" + plats + "</div></div></div>")
-        cname = channel_id
-        try:
-            from hypogeum.db import get_connection  # noqa: PLC0415
-            r = get_connection(Path(db_path) if db_path else None).execute(
-                "SELECT name FROM channel_profiles WHERE channel_id = ?", (channel_id,)).fetchone()
-            cname = (r[0] if r and r[0] else channel_id)
-        except Exception:  # noqa: BLE001
-            pass
-        return page(cname, "<a class='crumb' href='/'>← All channels</a><h1>" + _esc(cname) + "</h1><p class='sub'>Your posts and where they stand.</p><p>" + auth_line(channel_id) + "</p>"
-                           "<div class='cards'>" + (cards or "<div class='ok'>No posts yet.</div>") + "</div>", user)
-
-    @app.get("/episode/<episode_id>/thumbnail")
-    def thumbnail(episode_id):
-        user = need_user()
-        cid = channel_of_episode(episode_id)
-        if not cid:
-            abort(404)
-        own_channel(user, cid)
-        from flask import send_file  # noqa: PLC0415
-        from hypogeum.episode_artifacts import safe_episode_asset_path  # noqa: PLC0415
-        for stem in ("main_episode", "main"):
-            for ext in ("jpg", "jpeg", "png", "webp"):
-                p = safe_episode_asset_path(episode_id, "thumbnail", f"{stem}.{ext}")
-                if p:
-                    return send_file(str(p), mimetype="image/jpeg" if ext in ("jpg", "jpeg") else f"image/{ext}")
-        abort(404)
+        return render_welcome(user, tg_link=link) if link else redirect("/welcome")
 
     return app

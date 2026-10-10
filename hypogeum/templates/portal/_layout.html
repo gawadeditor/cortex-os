@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex, nofollow">
+  <title>{{ title }} · Cortex</title>
+  {% include '_base_style.html' %}
+  {% include 'portal/_rail_style.html' %}
+  {% include 'portal/_cg_style.html' %}
+  <style>
+    .rail-me { font-size: 12px; color: var(--muted); padding: 2px 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .rail-me b { display: block; color: var(--text); font-size: 12.5px; font-weight: 600; }
+    .rail-foot form { margin: 0; } .rail-foot .btn { width: 100%; justify-content: center; }
+    .ws-ring { display: flex; align-items: center; gap: 14px; }
+    .kv { display: flex; justify-content: space-between; gap: 16px; padding: 9px 0; border-bottom: 1px solid var(--hairline); font-size: 13px; }
+    .kv:last-child { border-bottom: none; } .kv .k { color: var(--faint); } .kv .v { text-align: right; font-variant-numeric: tabular-nums; }
+    .bar-row { display: grid; grid-template-columns: 140px 1fr 84px; gap: 14px; align-items: center; padding: 8px 0; font-size: 13px; }
+    .bar-row .t { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+    .bar-track { height: 8px; background: var(--border); border-radius: 999px; overflow: hidden; }
+    .bar-track i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent-line), var(--accent)); border-radius: 999px; }
+    .daily { display: flex; align-items: flex-end; gap: 3px; height: 130px; padding-top: 8px; }
+    .daily i { flex: 1; min-width: 3px; min-height: 2px; background: linear-gradient(180deg, var(--accent), var(--accent-line)); border-radius: 3px 3px 0 0; }
+    .daily i.zero { background: var(--border); }
+    .mtabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 var(--gap); }
+    .setup-step { display: grid; grid-template-columns: 38px 1fr; gap: 16px; }
+    .step-num { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 13px;
+                border: 1px solid var(--border-strong); color: var(--muted); background: var(--surface); }
+    .step-num.done { background: var(--good-bg); border-color: var(--good); color: var(--good); }
+    .step-num.now { border-color: var(--accent); color: var(--accent); background: var(--accent-bg); }
+    .setup-step h3 { margin: 4px 0 3px; font-size: 15px; } .setup-step p { margin: 0; color: var(--muted); font-size: 13px; }
+    .keyrow { display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; align-items: center; padding: 14px 0 0; margin-top: 14px; border-top: 1px solid var(--hairline); }
+    .keyrow small { display: block; color: var(--muted); font-size: 12px; font-weight: 400; }
+    .keyrow form { grid-column: 1 / -1; display: flex; gap: 8px; }
+    .field { flex: 1; font: inherit; font-size: 13px; padding: 9px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: var(--bg); color: var(--text); }
+    .field:focus { outline: none; border-color: var(--accent); box-shadow: var(--focus-ring); }
+    .banner { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; padding: 14px 18px; margin-bottom: var(--gap);
+              border: 1px solid var(--accent-line); background: var(--accent-bg); border-radius: var(--radius); }
+    .banner b { display: block; } .banner span { color: var(--muted); font-size: 13px; }
+    .progress { height: 6px; background: var(--border); border-radius: 999px; overflow: hidden; margin: 6px 0 var(--gap); }
+    .progress i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent-line), var(--accent)); }
+    .inline-form { display: inline; margin: 0; }
+  </style>
+</head>
+<body>
+{% from '_icons.html' import icon %}
+<nav class="rail" id="cortex-rail" aria-label="Your workspace">
+  <a href="/" class="rail-brand">Cortex</a>
+  <a href="/" class="rail-item rail-factory {{ 'active' if active == 'home' }}">{{ icon('home') }}<span>Overview</span></a>
+
+  <div class="rail-group-label">Channels</div>
+  <div class="rail-channels">
+    {% for ch in nav_channels %}
+    <a href="/channel/{{ ch.channel_id }}" class="rail-item {{ 'active' if active == 'channel:' ~ ch.channel_id }}">{{ icon('channels') }}<span>{{ ch.name }}</span></a>
+    {% else %}
+    <span class="rail-item rail-new">{{ icon('channels') }}<span>No channels yet</span></span>
+    {% endfor %}
+  </div>
+
+  <div class="rail-group-label">Account</div>
+  <div class="rail-channels">
+    <a href="/usage" class="rail-item {{ 'active' if active == 'usage' }}">{{ icon('dollar') }}<span>Usage</span></a>
+    <a href="/welcome" class="rail-item {{ 'active' if active == 'setup' }}">{{ icon('settings') }}<span>Setup</span>
+      {% if setup_left %}<span class="rail-tag">{{ setup_left }} left</span>{% endif %}</a>
+  </div>
+
+  <div class="rail-foot">
+    <div class="rail-me"><b>{{ workspace_name }}</b>{{ user.email }}</div>
+    <form method="post" action="/logout"><button class="btn" type="submit">{{ icon('x') }} Sign out</button></form>
+  </div>
+</nav>
+<button id="rail-toggle" type="button" aria-label="Toggle navigation">☰</button>
+
+<header class="topbar">
+  <div class="topbar-crumb">
+    <a href="/">{{ workspace_name }}</a>{% if crumb %}<span class="breadcrumb-sep"> › </span><span>{{ crumb }}</span>{% endif %}
+  </div>
+  <nav class="topbar-tabs" aria-label="section">
+    <a href="/" class="topbar-tab {{ 'active' if active == 'home' or (active or '').startswith('channel:') }}">Overview</a>
+    <a href="/usage" class="topbar-tab {{ 'active' if active == 'usage' }}">Usage</a>
+    <a href="/welcome" class="topbar-tab {{ 'active' if active == 'setup' }}">Setup</a>
+  </nav>
+</header>
+
+<div class="container">
+{% block content %}{% endblock %}
+</div>
+<script nonce="{{ nonce }}">
+  (function(){ var b=document.getElementById('rail-toggle'); if(b) b.addEventListener('click', function(){ document.getElementById('cortex-rail').classList.toggle('open'); }); })();
+</script>
+</body>
+</html>

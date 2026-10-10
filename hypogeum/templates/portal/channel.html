@@ -1,0 +1,45 @@
+{% extends 'portal/_layout.html' %}
+{% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
+{% block content %}
+<div class="breadcrumb"><a href="/">Overview</a><span class="breadcrumb-sep">›</span><span>{{ name }}</span></div>
+
+{% call hero(eyebrow='Channel', title=name, lede=(description or 'Your channel, produced and published by Cortex.'),
+             pill=('Production authorized' if auth.active else 'Waiting for authorization'), pill_class=('is-good' if auth.active else 'is-warn'),
+             meta=[{'label': 'posts', 'value': items|length}, {'label': 'published', 'value': published}, {'label': 'scheduled', 'value': scheduled},
+                   {'label': 'spent this month', 'value': '$' ~ ('%.2f'|format(spend))}]) %}
+  <a href="/usage" class="btn">{{ icon('dollar') }} Usage</a>
+{% endcall %}
+
+{% if auth.active %}
+<div class="card is-good"><div class="rd-item" style="align-items:center;"><span class="rd-mark rd-ok">{{ icon('check') }}</span><div>
+  <div class="rd-title">Production is authorized</div>
+  <div class="rd-detail">{{ auth.days_left }} days left{% if auth.weekly_ceiling_usd %}, up to ${{ auth.weekly_ceiling_usd }} a week{% endif %}. Cortex renews it with you before it ends.</div></div></div></div>
+{% else %}
+<div class="card is-warn"><div class="rd-item" style="align-items:center;"><span class="rd-mark rd-warn">{{ icon('warning') }}</span><div>
+  <div class="rd-title">Waiting for spending authorization</div>
+  <div class="rd-detail">Cortex signs this once your keys and publishing account are in place. Nothing for you to do here.</div></div></div></div>
+{% endif %}
+
+<div class="sec-head"><h2>Posts</h2><span class="sec-count">{{ items|length }}</span></div>
+{% if not items %}
+<div class="dv-empty">{{ icon('grid') }}<div class="dv-empty-title">No posts yet</div><div class="dv-empty-sub">Nothing has been staged or published for this channel yet.</div></div>
+{% else %}
+<div class="cg-grid">
+  {% for it in items %}
+  <div class="cg-card {{ 'needs-attention' if it.needs_attention else '' }}">
+    <div class="cg-poster {{ 'is-landscape' if it.is_landscape }}">
+      {% if it.thumb %}<img src="{{ it.thumb }}" alt="" loading="lazy">{% else %}<div class="cg-poster-empty">{{ icon('warning') }}</div>{% endif %}
+      {% if it.needs_attention %}<span class="cg-attention-badge">{{ icon('warning') }} Needs attention</span>{% endif %}
+    </div>
+    <div class="cg-body">
+      <div class="cg-title" title="{{ it.title }}">{{ it.title }}</div>
+      {% if it.when %}<div class="cg-when">{{ it.when }} UTC</div>{% endif %}
+      <span class="cg-status-pill {{ 'published' if it.status == 'published' else ('scheduled' if it.status == 'scheduled' else 'other') }}">{{ it.status }}</span>
+      <div class="cg-platforms">{% for pl in it.platforms %}<span class="cg-plat {{ 'is-published' if pl.status == 'published' }}">{{ pl.platform }}</span>{% endfor %}</div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

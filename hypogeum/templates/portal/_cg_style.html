@@ -1,0 +1,57 @@
+  <style>
+    .cg-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+               gap: var(--gap); margin-top: var(--gap); }
+    .cg-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+               overflow: hidden; display: flex; flex-direction: column; }
+    .cg-card.no-cover { border-color: var(--warn); }
+    .cg-card.has-manual-cover { border-color: var(--accent-line); }
+    .cg-card.needs-attention { border-color: var(--critical); border-width: 2px; }
+    .cg-attention-badge { position: absolute; top: 8px; left: 8px; background: var(--critical-bg, var(--warn-bg));
+                            color: var(--critical); border: 1px solid var(--critical); font-size: 10px; font-weight: 700;
+                            letter-spacing: .04em; text-transform: uppercase; padding: 3px 7px; border-radius: 999px;
+                            display: flex; align-items: center; gap: 4px; }
+    .cg-attention-badge svg { width: 11px; height: 11px; }
+    .cg-attention-note { font-size: 10.5px; color: var(--critical); line-height: 1.4; }
+    .cg-attention-note a { color: var(--critical); text-decoration: underline; }
+    .cg-done-form .btn { width: 100%; min-height: 44px; justify-content: center; font-size: 12px; }
+    .cg-poster { aspect-ratio: 9/16; background: var(--bg); position: relative; overflow: hidden;
+                 display: flex; align-items: center; }
+    .cg-poster img { width: 100%; height: 100%; object-fit: contain; display: block; }
+    .cg-poster.is-landscape { aspect-ratio: 16/9; }
+    .cg-poster.is-landscape img { object-fit: cover; }
+    .cg-format-badge { position: absolute; bottom: 8px; left: 8px; background: rgba(0,0,0,.55);
+                        color: var(--muted); font-size: 9.5px; font-weight: 600; letter-spacing: .04em;
+                        padding: 2px 6px; border-radius: 5px; }
+    .cg-poster-empty { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
+                        color: var(--faint); }
+    .cg-poster-empty svg { width: 28px; height: 28px; }
+    .cg-warn-badge { position: absolute; top: 8px; right: 8px; background: var(--warn-bg); color: var(--warn);
+                      border: 1px solid var(--warn); font-size: 10px; font-weight: 700; letter-spacing: .04em;
+                      text-transform: uppercase; padding: 3px 7px; border-radius: 999px; display: flex;
+                      align-items: center; gap: 4px; }
+    .cg-warn-badge svg { width: 11px; height: 11px; }
+    .cg-manual-badge { position: absolute; top: 8px; right: 8px; background: var(--accent-bg); color: var(--accent);
+                        border: 1px solid var(--accent-line); font-size: 10px; font-weight: 700; letter-spacing: .04em;
+                        text-transform: uppercase; padding: 3px 7px; border-radius: 999px; display: flex;
+                        align-items: center; gap: 4px; }
+    .cg-manual-badge svg { width: 11px; height: 11px; }
+    .cg-manual-note { font-size: 10.5px; color: var(--faint); line-height: 1.4; }
+    .cg-manual-note a { color: var(--accent); }
+    .cg-body { padding: 12px 13px 13px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
+    .cg-title { font-size: 12.5px; font-weight: 600; line-height: 1.4;
+                display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .cg-when { font-size: 11px; color: var(--faint); }
+    .cg-status-pill { align-self: flex-start; font-size: 10px; font-weight: 700; letter-spacing: .05em;
+                       text-transform: uppercase; padding: 2px 8px; border-radius: 999px; }
+    .cg-status-pill.published { background: var(--good-bg); color: var(--good); }
+    .cg-status-pill.scheduled { background: var(--accent-bg); color: var(--accent); }
+    .cg-status-pill.other { background: var(--border); color: var(--muted); }
+    .cg-platforms { display: flex; flex-wrap: wrap; gap: 5px; margin-top: auto; padding-top: 6px; }
+    .cg-plat { font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 5px;
+               border: 1px solid var(--border); color: var(--muted); text-decoration: none; }
+    .cg-plat:hover { border-color: var(--accent-line); color: var(--text); text-decoration: none; }
+    .cg-plat.is-published { color: var(--good); border-color: var(--good); }
+    .cg-error-note { font-size: 10.5px; color: var(--critical); }
+    .cg-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 4px; }
+    .cg-count { font-size: 12.5px; color: var(--muted); }
+  </style>

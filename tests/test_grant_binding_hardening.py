@@ -20,6 +20,7 @@ reads or mutates the real .hypogeum-assets/hypogeum.db.
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 from decimal import Decimal
 
@@ -305,6 +306,40 @@ class TestGateRevalidationBlocksStaleGrantForProposalActivatedRecord:
         reservation = store.get_ledger_reservation(harness.conn, reservation_id)
         assert reservation.state == "committed"
         assert reservation.charged_amount == env.max_cost_per_call
+
+
+    def test_no_write_transaction_is_open_during_the_provider_call(self, tmp_path):
+        """Regression (2026-10-11): the 'reserved -> boundary_entered' UPDATE was left uncommitted
+        on the lease connection, so every provider call (video generation, upscale, research) held
+        the database-wide SQLite write lock for its whole duration and every other writer in the
+        factory got 'database is locked'. The state must be durable BEFORE provider I/O."""
+        from tests.test_submission_gate import GateHarness, _make_env as _sg_make_env
+
+        harness = GateHarness(tmp_path)
+        env = _sg_make_env(idempotency_key="idem_proposal_3", authorization_id="auth_proposal_3", workflow_version="1.0.0")
+        harness.acquire_lease(env)
+        record, _grant = self._activate_via_proposal(harness, env)
+
+        seen = {}
+        real_invoke = harness.adapter.invoke
+
+        def spying_invoke(*args, **kwargs):
+            seen["in_transaction"] = harness.conn.in_transaction
+            reservation_id = record.history[-1].evidence["grant_reservation_id"]
+            other = sqlite3.connect(str(harness.tmp_path / "test.db"))
+            try:
+                seen["durable_state"] = other.execute(
+                    "SELECT state FROM run_authorization_grant_consumption WHERE reservation_id = ?", (reservation_id,),
+                ).fetchone()[0]
+            finally:
+                other.close()
+            return real_invoke(*args, **kwargs)
+
+        harness.adapter.invoke = spying_invoke
+        result = harness.submit(env, authorization=record)
+        assert result.approved is True
+        assert seen["in_transaction"] is False
+        assert seen["durable_state"] == "boundary_entered"
 
 
 class TestExistingGrantBoundChildAuthorizationBehaviorRemainsCompatible:

@@ -831,6 +831,18 @@ def submit(
         boundary_entry, execution_id=execution_id,
         lease_conn=lease_conn, lease_owner_id=lease_owner_id, lease_fencing_token=lease_fencing_token,
     )
+    # Make the boundary-entry state durable AND release the SQLite write lock
+    # before the (slow) provider call. revalidate_grant_reservation() above
+    # leaves an uncommitted UPDATE (reserved -> boundary_entered) on
+    # lease_conn; without this commit the connection holds the database-wide
+    # write lock for the whole provider call (video generation + polling,
+    # upscaling: minutes at a time, back to back for a whole run), so every
+    # other writer (portal sign-in, dashboard syncs, operator alerts,
+    # self-heal) gets "database is locked" for the entire production run.
+    # It is also the correct durability order: a crash during provider I/O
+    # must find the reservation already at boundary_entered, not rolled back
+    # to reserved.
+    lease_conn.commit()
     # Count this as an attempted provider-boundary entry *now*, before the
     # outcome is known -- Part 3 requirement 7: "Maximum-call limits must
     # count attempted provider-boundary entries, not only successful

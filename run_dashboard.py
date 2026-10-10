@@ -8722,6 +8722,18 @@ def client_plan_post_update(client_id):
     return redirect(f"/client/{client_id}/plan?scope=client:{client_id}&flash={msg}", 302)
 
 
+@app.route("/client/<client_id>/plan/review", methods=["POST"])
+def client_plan_review(client_id):
+    """Apply or discard the pending monthly strategy proposal (hypogeum.client_review)."""
+    from hypogeum import client_manager as cm, client_review as cr
+    db = _db_path()
+    if not cm.get_client(client_id, db_path=db):
+        return render_template("not_found.html", kind="Client", id=client_id), 404
+    ok = cr.apply_proposal(client_id, db_path=db) if request.form.get("action") == "apply" else cr.discard_proposal(client_id, db_path=db)
+    msg = ("Strategy updated" if request.form.get("action") == "apply" else "Proposal discarded") if ok else "Nothing to decide (it changed or was already decided)"
+    return redirect(f"/client/{client_id}/plan?scope=client:{client_id}&flash={msg}", 302)
+
+
 @app.route("/client/<client_id>/plan/media", methods=["POST"])
 def client_plan_media(client_id):
     """Attach the operator's material (image / video) to a drafted post, or clear a blocked/failed Instagram state."""
@@ -11459,6 +11471,10 @@ def main():
     # and calls nobody, while every client is still in 'observe'.
     from hypogeum.client_publishing import start_client_publishing_loop
     start_client_publishing_loop(_db_path())
+
+    # Once a month: measure last month's posts and PROPOSE a revised strategy (never applied without the operator).
+    from hypogeum.client_review import start_client_review_loop
+    start_client_review_loop(_db_path())
 
     app.run(host=args.host, port=args.port, debug=False)
 

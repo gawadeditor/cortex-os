@@ -298,6 +298,7 @@ def get_client_plan(client_id: str, db_path: Optional[Path] = None, month: Optio
             "strategy": brief.get("brand_strategy") or {}, "calendar": cal, "posts": posts,
             "counts": counts, "months": sorted(cals), "month": month,
             "generation": brief.get("generation_status") or {},
+            "proposal": (brief.get("strategy_proposal") if (brief.get("strategy_proposal") or {}).get("status") == "pending" else None),
             "drafts_ahead": int((brief.get("brand_profile") or {}).get("drafts_ahead") or 2),
             "drafts_paused": bool((brief.get("brand_profile") or {}).get("drafts_paused")),
             "pending_ahead": _pending_ahead(cals),

@@ -159,6 +159,22 @@
 </div>
 {% endif %}
 
+{% if d.proposal %}
+<div class="card" style="margin-top: var(--space-md); border-color: var(--accent-line);">
+  <div class="card-title">{{ icon('sparkle') }} Monthly review — {{ d.proposal.month }}: a proposal waits for your decision</div>
+  <p>{{ d.proposal.summary }}</p>
+  {% if d.proposal.thin_data %}<div class="needs">{{ icon('warning') }} Thin data ({{ d.proposal.measured_posts }} measured posts): changes are limited to what the numbers support.</div>{% endif %}
+  {% for ch in d.proposal.changes %}
+  <div class="needs"><b>{{ ch.what }}</b><br>Because: {{ ch.why }}<br>Evidence: {{ ch.evidence }}</div>
+  {% else %}<p class="empty">No change proposed: keep the course.</p>{% endfor %}
+  {% for k in d.proposal['keep'] %}<div class="post-meta">{{ icon('check') }} Keeps: {{ k }}</div>{% endfor %}
+  <form method="post" action="/client/{{ d.client.client_id }}/plan/review" class="post-actions">
+    <button class="btn btn-primary btn-sm" type="submit" name="action" value="apply">{{ icon('check') }} Apply the new strategy</button>
+    <button class="btn btn-sm" type="submit" name="action" value="discard">{{ icon('x') }} Discard</button>
+  </form>
+</div>
+{% endif %}
+
 <div class="card" style="margin-top: var(--space-md);">
   <div class="card-title">{{ icon('calendar') }} Monthly calendar{% if d.month %} — {{ d.month }}{% endif %}</div>
   {% if d.months | length > 1 %}

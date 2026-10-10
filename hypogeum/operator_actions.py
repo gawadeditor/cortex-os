@@ -101,6 +101,9 @@ def buttons_for(alert_key: str, db_path=None) -> Optional[dict]:
         rows = rows + [[_btn("📋 حالة المصنع", "status")]]
     elif alert_key.startswith(("openrouter:", "openrouter_ws:")):
         rows = [[_url("💳 اشحن OpenRouter", "https://openrouter.ai/settings/credits")]]
+    elif alert_key.startswith("clientreview:"):
+        cid = alert_key.split(":", 2)[1]
+        rows = [[_btn("✅ فعّل الاستراتيجية الجديدة", "review_apply", cid), _btn("🗑 تجاهل", "review_discard", cid)]]
     elif alert_key.startswith("clientdraft:"):
         _, cid, pdate = alert_key.split(":", 2)
         rows = [[_btn("✅ وافق", "post_approve", f"{cid}|{pdate}"), _btn("⏭ تخطّى", "post_skip", f"{cid}|{pdate}")]]
@@ -224,9 +227,26 @@ def _post_decision(status: str):
     return run
 
 
+def _review_decision(apply: bool):
+    def run(arg, db_path):
+        from hypogeum import client_review as cr
+        ok = cr.apply_proposal(arg, db_path=db_path) if apply else cr.discard_proposal(arg, db_path=db_path)
+        if not ok:
+            return "⚠️ الاقتراح ده مش موجود أو اتحسم، أو الاستراتيجية اتغيّرت بعده."
+        try:
+            from hypogeum import operator_alerts as oa
+            from hypogeum.client_review import month_of_last_decision
+            oa.resolve(f"clientreview:{arg}:{month_of_last_decision(arg, db_path)}", "اتحسم", db_path=db_path, send=lambda t: True)
+        except Exception:  # noqa: BLE001
+            pass
+        return "✅ الاستراتيجية الجديدة اتفعّلت (النسخة الجاية من الجدول هتبني عليها)." if apply else "تمام، الاقتراح اتلغى والاستراتيجية زي ما هي."
+    return run
+
+
 ACTIONS = {"cancel": lambda arg, db_path: "تمام، ما عملتش حاجة.", "resume": _resume, "restart_worker": _restart_worker, "mount_archive": _mount_archive,
            "disk": _disk, "cover_done": _cover_done, "adapters": _adapters,
-           "post_approve": _post_decision("approved"), "post_skip": _post_decision("skipped")}
+           "post_approve": _post_decision("approved"), "post_skip": _post_decision("skipped"),
+           "review_apply": _review_decision(True), "review_discard": _review_decision(False)}
 
 
 def _operator_chats(db_path) -> set:

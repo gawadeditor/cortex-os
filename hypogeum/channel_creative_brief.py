@@ -110,7 +110,16 @@ def _virality_directive(tone: str, audience: str, short_native: bool) -> str:
             f"the script so that sentence is impossible to miss.\n"
             f"- VOICE: tense, vivid, concrete, present tense where it can be, second "
             f"person allowed. No hedging, no throat-clearing; every sentence earns the "
-            f"next."
+            f"next.\n"
+            f"- RE-HOOK AT THE QUARTER MARK: measured retention on this kind of short "
+            f"(2026-10, 13 videos) holds through the first seconds, then loses 30-40% of "
+            f"viewers by the 25% point and stays flat after — the early viewer who survives "
+            f"the first quarter mostly finishes. So at roughly one quarter of the way in "
+            f"(beat 3 or 4) deliver a SECOND hook: a new, sharper turn or a surprising "
+            f"detail that re-raises the spine's question, not a recap.\n"
+            f"- LOOP THE END: the strongest videos show replays (the opening segment is "
+            f"watched more than once). Make the final line connect back to the opening "
+            f"image or claim so a viewer who lets it roll starts again without noticing."
             + _hook_library("investigative")
         )
     if _gentle(tone):

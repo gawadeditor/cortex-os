@@ -141,6 +141,7 @@ def test_youtube_video_retention_backfills_avg_view_pct(db_path):
     assert rec["retention_curve_json"]
     # mean watchRatio (1.0 + 0.6 + 0.3)/3 = 0.633
     assert abs(rec["avg_view_pct"] - 0.6333) < 1e-3
+    assert abs(rec["avg_watch_time_s"] - 0.6333 * 42) < 0.1
 
 
 def test_empty_retention_curve_is_skipped(db_path):
@@ -215,3 +216,27 @@ def test_partial_platform_failure_isolated(db_path):
     assert out["ok"] is True
     assert zns.get_channel_platform_insights("hypogeum", "youtube", db_path=db_path) is not None
     assert zns.get_channel_platform_insights("hypogeum", "instagram", db_path=db_path) is None
+
+
+def test_empty_curve_videos_do_not_starve_videos_with_data(db_path, monkeypatch):
+    """Regression (2026-10-11): tiny videos return an empty curve forever; they used to fill the
+    per-sync call cap so the videos that have a curve were never fetched."""
+    from hypogeum.analytics_store import store_platform_metrics
+    conn = get_connection(db_path)
+    try:
+        for i in range(5):
+            conn.execute("INSERT INTO episode_topics (topic_id, channel_id, episode_id, topic_text, status, "
+                         "created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+                         (f"t{i}", "hypogeum", f"ep_{i}", "x", "consumed", "x", "x"))
+        conn.commit()
+    finally:
+        conn.close()
+    for i in range(4):   # tiny videos first in insertion order
+        store_platform_metrics(f"ep_{i}", "youtube", {"views": 1, "platform_video_id": f"TINY{i}"},
+                               source="api", db_path=db_path)
+    store_platform_metrics("ep_4", "youtube", {"views": 300, "platform_video_id": "BIG"}, source="api", db_path=db_path)
+    monkeypatch.setattr(zns, "_MAX_RETENTION_CALLS_PER_SYNC", 1)
+    curve = [{"elapsedRatio": 0.0, "watchRatio": 1.0}, {"elapsedRatio": 1.0, "watchRatio": 0.5}]
+    prov = _FakeProvider(retention_BIG={"retentionCurve": curve, "durationSeconds": 30})
+    out = zns.sync_zernio_native_analytics(provider=prov, db_path=db_path)
+    assert out["retention_videos"] == 1

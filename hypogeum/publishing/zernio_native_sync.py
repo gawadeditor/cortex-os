@@ -284,13 +284,14 @@ def sync_zernio_native_analytics(*, provider=None, db_path: Optional[Path] = Non
         for cid, plat, demo in aud_specs:
             out["audience_rows"] += _store_audience(
                 conn, channel_id=cid, platform=plat, demographics=demo)
-        for record_id, curve, avp in retention_updates:
+        for record_id, curve, avp, avg_watch in retention_updates:
             conn.execute(
                 "UPDATE platform_analytics SET retention_curve_json = ?, "
-                "avg_view_pct = COALESCE(avg_view_pct, ?) WHERE record_id = ?",
-                (_json.dumps(curve), avp, record_id),
+                "avg_view_pct = COALESCE(avg_view_pct, ?), "
+                "avg_watch_time_s = COALESCE(avg_watch_time_s, ?) WHERE record_id = ?",
+                (_json.dumps(curve), avp, avg_watch, record_id),
             )
-        out["retention_videos"] = len({rid for rid, _, _ in retention_updates})
+        out["retention_videos"] = len({rid for rid, _, _, _ in retention_updates})
         for c in comment_rows:
             conn.execute(
                 "INSERT OR REPLACE INTO post_comments (comment_id, episode_id, "
@@ -419,11 +420,12 @@ def get_recent_audience_comments(channel_id: str, *, limit: int = 20,
 
 
 _MAX_RETENTION_CALLS_PER_SYNC = 12   # incremental — the rest catch up next run
+_MIN_VIEWS_FOR_RETENTION = 20        # below this YouTube has no curve to give yet
 
 
 def _fetch_youtube_retention(provider, acct_map: dict, out: dict, db_path) -> list:
     """Pull retention curves for YouTube videos still missing one. Returns
-    [(record_id, curve, avg_view_pct)] to apply in the write phase.
+    [(record_id, curve, avg_view_pct, avg_watch_time_s)] to apply in the write phase.
 
     ONE call per (channel, video) — platform_analytics has many rows per
     video (snapshots); they all get the same curve. Only the video's OWN
@@ -444,7 +446,16 @@ def _fetch_youtube_retention(provider, acct_map: dict, out: dict, db_path) -> li
             "FROM platform_analytics pa "
             "WHERE pa.platform='youtube' AND pa.source='api' "
             "AND pa.platform_video_id IS NOT NULL "
-            "AND pa.retention_curve_json IS NULL"
+            "AND pa.retention_curve_json IS NULL "
+            # Most-viewed first, and skip videos too small to have a curve yet:
+            # YouTube returns an empty curve for them, and (2026-10-11) a dozen
+            # such videos filled the per-sync cap every run, so the videos that
+            # DO have a curve (e.g. 283-2359 views) were never even asked for.
+            "AND (SELECT MAX(q.views) FROM platform_analytics q "
+            "     WHERE q.platform='youtube' AND q.platform_video_id = pa.platform_video_id) >= ? "
+            "ORDER BY (SELECT MAX(q.views) FROM platform_analytics q "
+            "          WHERE q.platform='youtube' AND q.platform_video_id = pa.platform_video_id) DESC",
+            (_MIN_VIEWS_FOR_RETENTION,),
         ).fetchall()
     finally:
         conn.close()
@@ -472,8 +483,10 @@ def _fetch_youtube_retention(provider, acct_map: dict, out: dict, db_path) -> li
         if not curve:
             continue
         avp = _retention_avg_view_pct(curve)
+        dur = (res.get("data") or {}).get("durationSeconds")
+        avg_watch = round(avp * float(dur), 1) if (avp is not None and isinstance(dur, (int, float)) and dur > 0) else None
         for rid in record_ids:
-            updates.append((rid, curve, avp))
+            updates.append((rid, curve, avp, avg_watch))
     return updates
 
 

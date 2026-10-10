@@ -231,26 +231,6 @@ class TestLeavesUnresolvedWhenUnsafe:
         assert result == "still_unresolved"
         assert _reservation_status(isolated_db) == "reserved"
 
-    def test_job_actually_completed_is_not_auto_recovered(self, tmp_path, isolated_db, monkeypatch):
-        """A job that turns out to have secretly completed is deliberately
-        NOT auto-recovered (would need a proper budget commit + asset
-        manifest write this narrow fix doesn't attempt) -- left alone and
-        reported, never silently discarded or incorrectly charged twice."""
-        _make_stuck_trail(tmp_path, provider_job_id="req_done")
-        _seed_reservation(isolated_db)
-        monkeypatch.setattr(
-            muapi_mod, "_poll_until_complete",
-            lambda *a, **k: ({"outputs": ["https://cdn/x.mp4"]}, "ok"),
-        )
-
-        result = muapi_mod.reconcile_stuck_scene_authorization(
-            episode_id=EPISODE_ID, scene_id=SCENE_ID, short_id=None, is_fallback=False,
-            output_dir=tmp_path, config=object(), log=log,
-        )
-
-        assert result == "still_unresolved"
-        assert _reservation_status(isolated_db) == "reserved"
-
     def test_unexpected_http_400_leaves_alone(self, tmp_path, isolated_db, monkeypatch):
         _make_stuck_trail(tmp_path, provider_job_id="req_400")
         _seed_reservation(isolated_db)
@@ -284,3 +264,50 @@ class TestNeverRaises:
             output_dir=tmp_path, config=object(), log=log,
         )
         assert result == "still_unresolved"
+
+
+class TestRecoversAJobThatCompletedAfterTheTimeout:
+    """2026-10-10 (ep_014876fc): 4 MUAPI jobs finished after our poll gave up; the clips were paid for but
+    the episode was lost. The clip is now pulled down and reused; money state is left alone."""
+
+    def _patch(self, monkeypatch, costs):
+        monkeypatch.setattr(
+            muapi_mod, "_poll_until_complete",
+            lambda *a, **k: ({"outputs": ["https://cdn/x.mp4"]}, "ok"),
+        )
+
+        def _dl(url, dest, log):
+            dest.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"v" * (muapi_mod._MIN_VIDEO_BYTES + 10))
+            return True, ""
+
+        monkeypatch.setattr(muapi_mod, "_download_file", _dl)
+        monkeypatch.setattr(muapi_mod._finance, "record_cost", lambda **k: costs.append(k))
+
+    def test_clip_is_downloaded_cost_recorded_once_and_reservation_untouched(self, tmp_path, isolated_db, monkeypatch):
+        costs = []
+        self._patch(monkeypatch, costs)
+        _make_stuck_trail(tmp_path, provider_job_id="req_done")
+        _seed_reservation(isolated_db)
+        kw = dict(episode_id=EPISODE_ID, scene_id=SCENE_ID, short_id=None, is_fallback=False,
+                  output_dir=tmp_path, config=object(), log=log)
+
+        assert muapi_mod.reconcile_stuck_scene_authorization(**kw) == "recovered_clip"
+        assert muapi_mod.scene_file_path(tmp_path, SCENE_ID, None).exists()
+        assert _reservation_status(isolated_db) == "reserved"      # never released or committed here
+        # the repair loop reconciles on every attempt: a second call must not charge or download again
+        assert muapi_mod.reconcile_stuck_scene_authorization(**kw) == "recovered_clip"
+        assert len(costs) == 1 and costs[0]["call_type"] == "scene_generation"
+
+    def test_a_failed_download_leaves_it_unresolved_and_charges_nothing(self, tmp_path, isolated_db, monkeypatch):
+        costs = []
+        self._patch(monkeypatch, costs)
+        monkeypatch.setattr(muapi_mod, "_download_file", lambda *a, **k: (False, "net down"))
+        _make_stuck_trail(tmp_path, provider_job_id="req_done")
+        _seed_reservation(isolated_db)
+
+        result = muapi_mod.reconcile_stuck_scene_authorization(
+            episode_id=EPISODE_ID, scene_id=SCENE_ID, short_id=None, is_fallback=False,
+            output_dir=tmp_path, config=object(), log=log,
+        )
+        assert result == "still_unresolved" and costs == []
+        assert not muapi_mod.scene_file_path(tmp_path, SCENE_ID, None).exists()

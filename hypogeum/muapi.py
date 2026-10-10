@@ -1393,6 +1393,52 @@ def _submit_scene_via_gate(
 # Stuck-authorization reconciliation (2026-09-05)
 # ---------------------------------------------------------------------------
 
+def _recover_completed_scene_clip(
+    *, result: dict, episode_id: str, scene_id: str, short_id: Optional[str],
+    output_dir: Path, model: str, request_id: str, log,
+) -> str:
+    """Download the clip of a MUAPI job that completed after our poll timed out.
+    Returns "recovered_clip" or "still_unresolved". Never raises."""
+    try:
+        dest = scene_file_path(output_dir, scene_id, short_id)
+        if dest.exists():
+            return "recovered_clip"      # already recovered: never download or charge twice
+        outputs = result.get("outputs") or []
+        url = (outputs[0] if outputs and isinstance(outputs[0], str)
+               else (outputs[0].get("url", "") if outputs else ""))
+        if not url:
+            log.warn("reconcile_recovery_no_output_url", episode_id=episode_id, scene_id=scene_id)
+            return "still_unresolved"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        ok, _why = _download_file(url, dest, log)
+        if not ok:
+            ok, _why = _download_file(url, dest, log)
+        if not ok:
+            dest.unlink(missing_ok=True)
+            return "still_unresolved"
+        valid, _val = _validate_video_file(dest, 0.0)
+        if not valid:
+            dest.unlink(missing_ok=True)
+            return "still_unresolved"
+        try:   # the original call never got to record its cost (that happens after the download)
+            _finance.record_cost(
+                provider="muapi", model=model, call_type="scene_generation",
+                cost_usd=MODEL_CREDIT_COSTS.get(model, _DEFAULT_UNKNOWN_MODEL_COST),
+                tokens_or_credits=None,
+                asset_id=_compute_asset_id(episode_id, scene_id, short_id),
+            )
+        except Exception as exc:  # noqa: BLE001 -- the clip is safe on disk; a cost-record hiccup must not undo that
+            log.warn("reconcile_recovery_cost_record_failed", episode_id=episode_id, scene_id=scene_id, error=str(exc)[:200])
+        log.warn(
+            "reconcile_scene_authorization_recovered_clip",
+            episode_id=episode_id, scene_id=scene_id, provider_job_id=request_id,
+        )
+        return "recovered_clip"
+    except Exception as exc:  # noqa: BLE001
+        log.warn("reconcile_recovery_failed", episode_id=episode_id, scene_id=scene_id, error=str(exc)[:200])
+        return "still_unresolved"
+
+
 def reconcile_stuck_scene_authorization(
     *,
     episode_id: str,
@@ -1435,16 +1481,15 @@ def reconcile_stuck_scene_authorization(
       - The provider now reports job_status_failed/cancelled for that
         exact job_id -> definitively no output was ever produced ->
         safe to release.
+      - The job actually COMPLETED on this re-poll (2026-10-10) -> its clip
+        file is downloaded to the scene's canonical path and its cost is
+        recorded once; the authorization/budget reservation is left exactly
+        as it is (never released, never committed here -- conservative), and
+        the caller's resume-safety path then reuses the file. Idempotent: if
+        the file is already there nothing is downloaded or charged again.
+        Reported "recovered_clip".
       - Any other outcome (still pending, timeout again, an unexpected
-        HTTP status, or -- notably -- the job actually completing on
-        this re-poll) -> left untouched and reported "still_unresolved".
-        A job that turns out to have actually completed is NOT
-        auto-recovered here: that would require committing real spend
-        and reconstructing the asset manifest entry correctly, which
-        this narrow fix deliberately does not attempt -- it is logged
-        loudly instead so an operator can recover it by hand, rather
-        than either silently discarding a paid-for result or risking an
-        incorrect financial write.
+        HTTP status) -> left untouched and reported "still_unresolved".
 
     Returns:
         "not_applicable"  — no attempt was ever recorded, or the
@@ -1453,8 +1498,9 @@ def reconcile_stuck_scene_authorization(
         "released"        — the stuck authorization was released;
                              a fresh submission for this scene can now
                              proceed normally.
-        "still_unresolved" — genuinely still ambiguous (or a completed
-                             job needing manual recovery); left alone.
+        "recovered_clip"  — the job had completed at the provider; its clip is
+                             now on disk (see above).
+        "still_unresolved" — genuinely still ambiguous; left alone.
 
     Never raises -- a caller (clip_repair_agent) should treat any
     outcome other than "released" exactly as it already does today
@@ -1497,11 +1543,14 @@ def reconcile_stuck_scene_authorization(
         else:
             result, poll_reason = _poll_until_complete(provider_job_id, config, scene_id, log)
             if result is not None:
-                log.warn(
-                    "reconcile_scene_authorization_recoverable_but_unhandled",
-                    episode_id=episode_id, scene_id=scene_id, provider_job_id=provider_job_id,
+                # The job finished AFTER our poll gave up: the clip exists and is
+                # already paid for. Pull it down so the normal resume-safety path
+                # (submit_scene -> "reused") picks it up -- losing it burned a whole
+                # episode (2026-10-10: ep_014876fc, 4 clips done at MUAPI, QA rejected).
+                return _recover_completed_scene_clip(
+                    result=result, episode_id=episode_id, scene_id=scene_id, short_id=short_id,
+                    output_dir=output_dir, model=last.model, request_id=provider_job_id, log=log,
                 )
-                return "still_unresolved"
             if not str(poll_reason).startswith(("job_status_failed", "job_status_cancelled")):
                 return "still_unresolved"
             proof = (

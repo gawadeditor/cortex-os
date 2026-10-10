@@ -690,6 +690,10 @@ class Config:
         # of episodes -- must be switched on explicitly.
         self.SELF_HEAL_ENABLED = _get_bool("SELF_HEAL_ENABLED", default=True)
         self.SELF_HEAL_AUTO_PRODUCTION = _get_bool("SELF_HEAL_AUTO_PRODUCTION", default=False)
+        # POSTIZ_WEBHOOK_SECRET: the secret path segment of the Postiz webhook receiver
+        # (hypogeum/postiz_webhook.py -- Postiz signs nothing, so the URL itself is the credential). Unset = the
+        # receiver refuses every request.
+        self.POSTIZ_WEBHOOK_SECRET = _get_optional("POSTIZ_WEBHOOK_SECRET", "")
         # COVERAGE_AUTO_STRETCH_MAX_DEFICIT_SECONDS (operator decision 2026-10-10): a beat that is still short
         # after the 1.10x editorial speed-up AND after extra-clip generation, by LESS than this many seconds,
         # has its longest clip slowed down (never looped / reversed) instead of sinking the whole episode at QA.

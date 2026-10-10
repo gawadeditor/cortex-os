@@ -41,7 +41,7 @@ def fake(monkeypatch):
                       max_attempts=2, min_interval_s=300)
     monkeypatch.setattr(sh, "_REGISTRY", [rem])
     monkeypatch.setattr(sh, "_LOADED", True)
-    return SimpleNamespace(calls=calls, state=state)
+    return SimpleNamespace(calls=calls, state=state, rem=rem)
 
 
 def test_a_problem_without_a_remediation_alerts_at_once(dbp, fake):
@@ -99,12 +99,10 @@ def test_the_alert_pipeline_defers_then_reports_the_fix_or_escalates(dbp, fake):
     oa._sync("zz:", {}, dbp, CFG, out)                             # next tick: it is gone
     assert len(out) == 1 and out[0].startswith("🛠") and "عملت حاجة" in out[0]
 
+    fake.rem.min_interval_s = 0                                    # attempts back to back, in real time
     out2 = _Out()
-    oa._sync("zz:", {"zz:5": ("تانية", "x")}, dbp, CFG, out2)
-    for minutes in (10, 20):                                       # attempts run out while it persists
-        oa._sync("zz:", {"zz:5": ("تانية", "x")}, dbp, CFG, out2) if False else None
-    sh.handle_detected("zz:5", dbp, NOW + timedelta(seconds=400), CFG)
-    oa._sync("zz:", {"zz:5": ("تانية", "x")}, dbp, CFG, out2)
+    for _ in range(3):                                             # 2 attempts (deferred), then escalated
+        oa._sync("zz:", {"zz:5": ("تانية", "x")}, dbp, CFG, out2)
     assert any("🔴 تانية" in m and "المصنع حاول يحلها بنفسه" in m for m in out2)
 
 

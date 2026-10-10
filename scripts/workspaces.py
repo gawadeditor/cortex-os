@@ -93,6 +93,7 @@ def main() -> int:
     iv.add_argument("workspace_id")
     iv.add_argument("email")
     iv.add_argument("--role", default="owner", choices=["owner", "viewer"])
+    iv.add_argument("--send", action="store_true", help="also email the welcome + sign-in link (PORTAL_SMTP_* must be set)")
     ll = sub.add_parser("login-link", help="print a one-time portal sign-in link (valid 15 minutes) to hand over")
     ll.add_argument("email")
     ll.add_argument("--base-url", default="http://127.0.0.1:5003")
@@ -131,7 +132,14 @@ def main() -> int:
         return 0
     if args.cmd in ("invite", "login-link", "disable-user"):
         from hypogeum import portal_auth as pa
-        if args.cmd == "invite":
+        if args.cmd == "invite" and args.send:
+            from hypogeum.config import Config
+            name = next((w["name"] for w in ws.list_workspaces(DB) if w["workspace_id"] == args.workspace_id), None)
+            res = pa.invite_and_send(args.email, args.workspace_id, args.role, DB, Config(), name)
+            print(res["user"], "| emailed:", res["emailed"])
+            if not res["emailed"]:
+                print("not emailed; hand this link over (valid 7 days):", res["link"])
+        elif args.cmd == "invite":
             print(pa.invite(args.email, args.workspace_id, args.role, DB))
         elif args.cmd == "disable-user":
             pa.disable(args.email, DB)

@@ -141,6 +141,24 @@
         </label>
         <button class="btn btn-sm" type="submit">{{ icon('arrow-right') }} Move</button>
       </form>
+      {% if w.kind == 'client' %}
+      <div class="when" style="margin-top:12px;">Portal users:
+        {% for u in w.portal_users if u.status == 'active' %}
+          <span class="badge">{{ u.email }}{% if not u.notify_email %} · email off{% endif %}</span>
+          <form method="post" action="/workspaces/{{ w.workspace_id }}/users/disable" style="display:inline">
+            <input type="hidden" name="email" value="{{ u.email }}"><button class="btn btn-sm" type="submit" title="Remove access">{{ icon('x') }}</button>
+          </form>
+        {% else %}none yet{% endfor %}
+      </div>
+      <form method="post" action="/workspaces/{{ w.workspace_id }}/invite" class="appr-form">
+        <label class="appr-field">Invite a user (we email them a sign-in link)
+          <input type="email" name="email" placeholder="client@example.com" required>
+        </label>
+        <button class="btn btn-sm" type="submit">{{ icon('arrow-right') }} Invite</button>
+      </form>
+      {% if request.args.get('invite') == 'sent' %}<p class="note">{{ icon('check') }} Invitation emailed.</p>
+      {% elif request.args.get('invite') == 'failed' %}<p class="note">{{ icon('warning') }} Added, but the email could not be sent. Check PORTAL_SMTP_* or hand over a link: <code>scripts/workspaces.py login-link EMAIL</code></p>{% endif %}
+      {% endif %}
       <div class="when" style="margin-top:8px;">Provider keys:
         {% for k in w.provider_keys %}<span class="badge">{{ k.provider }}</span> {% else %}none yet{% endfor %}
         {% if w.kind == 'platform_owner' %}— your .env keys are used first for this workspace.{% endif %}

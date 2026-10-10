@@ -105,7 +105,7 @@ def test_the_portal_has_no_operator_routes():
     app = create_app(None)
     rules = {r.rule for r in app.url_map.iter_rules()}
     assert rules <= {"/login", "/auth/<token>", "/logout", "/", "/channel/<channel_id>", "/episode/<episode_id>/thumbnail",
-                     "/static/<path:filename>"}
+                     "/static/<path:filename>", "/notify"}
 
 
 def test_deliver_link_uses_smtp_only_when_configured_and_never_raises(monkeypatch):
@@ -173,3 +173,60 @@ def test_only_client_channels_without_a_grant_need_one_and_it_reaches_the_operat
     assert {r["reason"] for r in cg.channels_needing_grant(env)} == {"grant expires in 10 days"}
     monkeypatch.setattr(cg, "grant_state", lambda ch, db=None, now=None: _fake_state(True, days=60))
     assert cg.channels_needing_grant(env) == [] and oa.check_client_grants(env, datetime.now(timezone.utc)) == {}
+
+
+# --- emails: invitation + client alerts ---------------------------------------------------------------
+
+class _Mail:
+    def __init__(self, monkeypatch):
+        self.sent = []
+        outer = self
+
+        class SMTP:
+            def __init__(self, *a, **k): pass
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def starttls(self): pass
+            def login(self, *a): pass
+            def send_message(self, m): outer.sent.append((m["To"], m["Subject"], m.get_content()))
+        monkeypatch.setattr(pa.smtplib, "SMTP", SMTP)
+
+
+CFG_MAIL = type("C", (), {"PORTAL_SMTP_HOST": "smtp.x", "PORTAL_SMTP_PORT": 587, "PORTAL_SMTP_USER": "u",
+                          "PORTAL_SMTP_PASSWORD": "p", "PORTAL_SMTP_FROM": "Cortex <l@mail.x>",
+                          "PORTAL_BASE_URL": "https://app.example.com"})()
+
+
+def test_invite_emails_a_week_long_single_use_link(env, monkeypatch):
+    mail = _Mail(monkeypatch)
+    res = pa.invite_and_send("new@acme.com", "acme", "owner", env, CFG_MAIL, "Acme")
+    assert res["emailed"] and res["link"].startswith("https://app.example.com/auth/")
+    to, subject, body = mail.sent[0]
+    assert to == "new@acme.com" and "Acme" in subject and res["link"] in body
+    token = res["link"].rsplit("/", 1)[1]
+    assert pa.consume_login_link(token, env, now=datetime.now(timezone.utc) + timedelta(days=6)) is not None   # still valid on day 6
+    assert pa.consume_login_link(token, env) is None                                                          # single use
+    off = pa.invite_and_send("other@acme.com", "acme", "owner", env, type("C", (), {"PORTAL_SMTP_HOST": None})(), "Acme")
+    assert off["emailed"] is False and off["link"]                                                            # link still handed back
+
+
+def test_client_alerts_are_emailed_to_the_workspace_only_unless_opted_out(env, monkeypatch):
+    mail = _Mail(monkeypatch)
+    assert pa.send_workspace_alert_email("acme", "🔴 Production stopped\nbecause X", env, CFG_MAIL) is True
+    assert [m[0] for m in mail.sent] == ["a@acme.com"] and mail.sent[0][1] == "Production stopped"     # never beta's user
+    uid = pa.resolve_session(pa.consume_login_link(pa.request_login_link("a@acme.com", env), env), env)["user_id"]
+    pa.set_notify(uid, False, env)
+    mail.sent.clear()
+    assert pa.send_workspace_alert_email("acme", "🔴 again", env, CFG_MAIL) is False and mail.sent == []
+    assert pa.send_workspace_alert_email("plat", "🔴 operator thing", env, CFG_MAIL) is False               # platform owner: Telegram only
+
+
+def test_the_portal_lets_a_user_turn_alert_emails_off_and_on(env):
+    app = create_app(env)
+    c = _login(app, env, "a@acme.com")
+    assert "Email me about problems: <b>on</b>" in c.get("/").get_data(as_text=True)
+    c.post("/notify", data={"on": "0"})
+    assert "Email me about problems: <b>off</b>" in c.get("/").get_data(as_text=True)
+    assert pa.workspace_emails("acme", env) == []
+    c.post("/notify", data={"on": "1"})
+    assert pa.workspace_emails("acme", env) == ["a@acme.com"]

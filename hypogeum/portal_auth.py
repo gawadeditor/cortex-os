@@ -29,6 +29,7 @@ from typing import Optional
 
 LOGIN_TTL = timedelta(minutes=15)
 SESSION_TTL = timedelta(days=7)
+INVITE_TTL = timedelta(days=7)
 MAX_LINKS_PER_HOUR = 5
 ROLES = ("owner", "viewer")
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -40,7 +41,8 @@ CREATE TABLE IF NOT EXISTS portal_users (
     workspace_id  TEXT NOT NULL,
     role          TEXT NOT NULL CHECK(role IN ('owner','viewer')),
     status        TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','disabled')),
-    created_at    TEXT NOT NULL
+    created_at    TEXT NOT NULL,
+    notify_email  INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS portal_login_tokens (
     token_hash  TEXT NOT NULL PRIMARY KEY,
@@ -70,6 +72,8 @@ def _conn(db_path):
     from hypogeum.db import get_connection  # noqa: PLC0415
     c = get_connection(Path(db_path) if db_path else None)
     c.executescript(_DDL)
+    if "notify_email" not in {r[1] for r in c.execute("PRAGMA table_info(portal_users)")}:   # tables from Phase 6
+        c.execute("ALTER TABLE portal_users ADD COLUMN notify_email INTEGER NOT NULL DEFAULT 1")
     return c
 
 
@@ -113,7 +117,8 @@ def disable(email: str, db_path=None) -> None:
         conn.close()
 
 
-def request_login_link(email: str, db_path=None, now: Optional[datetime] = None) -> Optional[str]:
+def request_login_link(email: str, db_path=None, now: Optional[datetime] = None,
+                       ttl: Optional[timedelta] = None) -> Optional[str]:
     """A fresh one-time token for an active user, else None (unknown, disabled, bad email, or rate limited)."""
     now = now or _now()
     try:
@@ -131,7 +136,7 @@ def request_login_link(email: str, db_path=None, now: Optional[datetime] = None)
             return None
         token = secrets.token_urlsafe(32)
         conn.execute("INSERT INTO portal_login_tokens (token_hash, user_id, created_at, expires_at) VALUES (?,?,?,?)",
-                     (_h(token), u["user_id"], now.isoformat(), (now + LOGIN_TTL).isoformat()))
+                     (_h(token), u["user_id"], now.isoformat(), (now + (ttl or LOGIN_TTL)).isoformat()))
         conn.commit()
         return token
     finally:
@@ -188,19 +193,17 @@ def logout(session_token: str, db_path=None) -> None:
         conn.close()
 
 
-def deliver_link(email: str, link: str, config) -> bool:
-    """Send the login link by SMTP when PORTAL_SMTP_HOST is configured. False = not sent (the platform
-    operator can still hand the link over: `scripts/workspaces.py login-link`)."""
+def send_email(to: str, subject: str, text: str, config) -> bool:
+    """Plain-text email over SMTP (PORTAL_SMTP_*). False = not configured or failed; never raises."""
     host = getattr(config, "PORTAL_SMTP_HOST", None)
     if not host:
         return False
     try:
         msg = EmailMessage()
-        msg["Subject"] = "Your Cortex sign-in link"
+        msg["Subject"] = subject
         msg["From"] = getattr(config, "PORTAL_SMTP_FROM", None) or "no-reply@cortexchannels.com"
-        msg["To"] = email
-        msg.set_content(f"Open this link to sign in (valid 15 minutes, single use):\n\n{link}\n\n"
-                        "If you did not ask for it, ignore this email.")
+        msg["To"] = to
+        msg.set_content(text)
         with smtplib.SMTP(host, int(getattr(config, "PORTAL_SMTP_PORT", 587) or 587), timeout=15) as s:
             s.starttls()
             user = getattr(config, "PORTAL_SMTP_USER", None)
@@ -211,4 +214,71 @@ def deliver_link(email: str, link: str, config) -> bool:
     except Exception as exc:  # noqa: BLE001
         from hypogeum.logger import get_logger  # noqa: PLC0415
         get_logger(agent="portal_auth").warn("portal_email_failed", error=type(exc).__name__, detail=str(exc)[:120])
+        return False
+
+
+def deliver_link(email: str, link: str, config) -> bool:
+    """The sign-in link email. False = not sent (the operator can still hand the link over:
+    `scripts/workspaces.py login-link`)."""
+    return send_email(email, "Your Cortex sign-in link",
+                      f"Open this link to sign in (valid 15 minutes, single use):\n\n{link}\n\n"
+                      "If you did not ask for it, ignore this email.", config)
+
+
+def _base_url(config) -> str:
+    return (getattr(config, "PORTAL_BASE_URL", None) or "https://app.cortexchannels.com").rstrip("/")
+
+
+def invite_and_send(email: str, workspace_id: str, role: str = "owner", db_path=None, config=None,
+                    workspace_name: Optional[str] = None) -> dict:
+    """Allow `email` into the workspace's portal and email a welcome with a sign-in link that stays valid for
+    INVITE_TTL (a first-time invitee may not open it at once). Returns {user, emailed, link} -- `link` is
+    returned so the operator can hand it over when email is not configured or failed."""
+    user = invite(email, workspace_id, role, db_path)
+    token = request_login_link(user["email"], db_path, ttl=INVITE_TTL)
+    link = f"{_base_url(config)}/auth/{token}" if token else None
+    emailed = False
+    if link:
+        name = workspace_name or workspace_id
+        emailed = send_email(
+            user["email"], f"You have been invited to Cortex ({name})",
+            f"You now have access to the Cortex portal for {name}: your channels, what we have published for you, "
+            f"this month's spending and anything that needs your attention.\n\nSign in with this link "
+            f"(valid 7 days, single use):\n\n{link}\n\nAfter that, you can request a new sign-in link any time from "
+            f"{_base_url(config)}/login using this email address.", config)
+    return {"user": user, "emailed": emailed, "link": link}
+
+
+def workspace_emails(workspace_id: str, db_path=None) -> list:
+    conn = _conn(db_path)
+    try:
+        return [r[0] for r in conn.execute(
+            "SELECT email FROM portal_users WHERE workspace_id = ? AND status = 'active' AND notify_email = 1",
+            (workspace_id,))]
+    finally:
+        conn.close()
+
+
+def set_notify(user_id: str, on: bool, db_path=None) -> None:
+    conn = _conn(db_path)
+    try:
+        conn.execute("UPDATE portal_users SET notify_email = ? WHERE user_id = ?", (1 if on else 0, user_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def send_workspace_alert_email(workspace_id: str, text: str, db_path=None, config=None) -> bool:
+    """Email an alert (the same text the workspace's Telegram chats get) to the workspace's portal users who
+    have not turned email off. Only CLIENT workspaces are emailed -- the operator has Telegram. True if any sent."""
+    try:
+        from hypogeum import workspaces as ws  # noqa: PLC0415
+        kind = {w["workspace_id"]: w["kind"] for w in ws.list_workspaces(Path(db_path) if db_path else None)}.get(workspace_id)
+        if kind != "client":
+            return False
+        lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+        subject = (lines[0] if lines else "Cortex notification").lstrip("🔴✅🛠 ")[:120]
+        body = text.strip() + f"\n\n—\nOpen your portal: {_base_url(config)}\nTo stop these emails, turn off 'Email me about problems' there."
+        return any([send_email(e, subject, body, config) for e in workspace_emails(workspace_id, db_path)])
+    except Exception:  # noqa: BLE001
         return False

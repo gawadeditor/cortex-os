@@ -62,6 +62,20 @@ def _all_channels(db) -> list[str]:
         return []
 
 
+def _portal_users(workspace_id: str, db) -> list[dict]:
+    try:
+        from hypogeum import portal_auth as pa
+        conn = pa._conn(db)
+        try:
+            return [dict(r) for r in conn.execute(
+                "SELECT email, role, status, notify_email FROM portal_users WHERE workspace_id = ? ORDER BY created_at",
+                (workspace_id,))]
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _workspace_rows(db) -> list[dict]:
     from hypogeum import alert_recipients as ar
     from hypogeum import publish_approvals as pa
@@ -83,6 +97,7 @@ def _workspace_rows(db) -> list[dict]:
             "approvals": pa.list_for(wid, statuses=("pending",), db_path=db),
             "production_start": wsc.production_start(wid, db),
             "provider_keys": _keys_of(wid, db),
+            "portal_users": _portal_users(wid, db),
         })
     out.sort(key=lambda r: (r["kind"] != "platform_owner", r["name"].lower()))
     return out
@@ -241,6 +256,38 @@ def workspace_set_key(workspace_id):
     create_secret_profile(provider, f"{workspace_id} {provider}", "api_key", key,
                           scope="factory", workspace_id=workspace_id, db_path=db)
     del key
+    return redirect(f"/workspaces?scope=factory#ws-{workspace_id}-title")
+
+
+@bp.route("/workspaces/<workspace_id>/invite", methods=["POST"])
+def workspace_invite(workspace_id):
+    """Let someone into this workspace's client portal and email them a welcome + sign-in link (valid 7 days)."""
+    from flask import request
+    from hypogeum import portal_auth as pa
+    from hypogeum.config import Config
+    from hypogeum.workspaces import list_workspaces
+    db = _db()
+    names = {w["workspace_id"]: w["name"] for w in list_workspaces(db)}
+    if workspace_id not in names:
+        return jsonify({"ok": False, "error": "unknown workspace"}), 404
+    try:
+        res = pa.invite_and_send(request.form.get("email", ""), workspace_id, request.form.get("role") or "owner",
+                                 db, Config(), names[workspace_id])
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    flag = "sent" if res["emailed"] else "failed"
+    return redirect(f"/workspaces?scope=factory&invite={flag}#ws-{workspace_id}-title")
+
+
+@bp.route("/workspaces/<workspace_id>/users/disable", methods=["POST"])
+def workspace_user_disable(workspace_id):
+    from flask import request
+    from hypogeum import portal_auth as pa
+    email = request.form.get("email", "")
+    users = {u["email"] for u in _portal_users(workspace_id, _db())}
+    if email.strip().lower() not in users:
+        return jsonify({"ok": False, "error": "unknown user"}), 404
+    pa.disable(email, _db())
     return redirect(f"/workspaces?scope=factory#ws-{workspace_id}-title")
 
 

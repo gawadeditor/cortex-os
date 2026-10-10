@@ -170,6 +170,12 @@ def create_app(db_path=None, config=None):
                         secure=secure_cookie, samesite="Lax")
         return resp
 
+    @app.post("/notify")
+    def notify():
+        user = need_user()
+        pa.set_notify(user["user_id"], request.form.get("on") == "1", db_path)
+        return redirect("/")
+
     @app.post("/logout")
     def logout():
         pa.logout(request.cookies.get(_COOKIE, ""), db_path)
@@ -210,6 +216,16 @@ def create_app(db_path=None, config=None):
             body += " <small>spent</small></div>"
         body += "</div><h2>Needs attention</h2>"
         body += "".join("<div class='alert'>" + _esc(a["title"]) + "</div>" for a in alerts) or "<div class='ok'>Nothing needs your attention.</div>"
+        conn2 = get_connection(Path(db_path) if db_path else None)
+        try:
+            on = conn2.execute("SELECT notify_email FROM portal_users WHERE user_id = ?", (user["user_id"],)).fetchone()
+        finally:
+            conn2.close()
+        on = bool(on and on[0])
+        body += ("<h2>Notifications</h2><div class='panel'><form method='post' action='/notify' class='inline'>"
+                 "<span class='sub'>Email me about problems: <b>" + ("on" if on else "off") + "</b></span> "
+                 "<input type='hidden' name='on' value='" + ("0" if on else "1") + "'> "
+                 "<button class='btn ghost' type='submit'>Turn " + ("off" if on else "on") + "</button></form></div>")
         return page("Home", body, user)
 
     @app.get("/channel/<channel_id>")

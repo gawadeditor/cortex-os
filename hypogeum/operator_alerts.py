@@ -101,6 +101,13 @@ def _deliver(key: str, workspace_id: Optional[str], ar_text: str, en_text: Optio
         is_op = chat in operator_chats
         text = ar_text if (is_op or lang != "en" or not en_text) else en_text
         ok_any = ar.send_to_chat(chat, text, config=cfg, reply_markup=op_buttons if is_op else None) or ok_any
+    if workspace_id:                      # a client workspace's portal users also get it by email (unless they opted out)
+        try:
+            from hypogeum import portal_auth as pa
+            body = en_text if (lang == "en" and en_text) else ar_text
+            ok_any = pa.send_workspace_alert_email(workspace_id, body, db_path=db_path, config=cfg) or ok_any
+        except Exception:  # noqa: BLE001
+            pass
     return ok_any
 
 

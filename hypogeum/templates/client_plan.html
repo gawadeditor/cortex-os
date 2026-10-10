@@ -184,6 +184,14 @@
     <div class="post-meta">{{ p.pillar }} · {{ p.format }}</div>
     {% if p.needs %}<div class="needs">{{ icon('info') }} Needs: {{ p.needs }}</div>{% endif %}
     {% if p.review_note %}<div class="needs">{{ p.review_note }}</div>{% endif %}
+    {% set ig = (p.auto or {}).get('instagram') or {} %}
+    {% if 'instagram' in p.platforms %}
+    <div class="needs" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+      {{ icon('upload') }}
+      {% if p.media %}Material: <b>{{ p.media.name }}</b> ({{ p.media.kind }}, {{ (p.media.size / 1048576) | round(1) }} MB){% else %}No material attached{% endif %}
+      {% if ig.state %}<span class="chip {{ 'is-on' if ig.state in ('scheduled','published') }}">Instagram: {{ ig.state }}{% if ig.state == 'blocked' %} — {{ ig.issues | join('; ') }}{% endif %}</span>{% endif %}
+    </div>
+    {% endif %}
     <textarea class="draft" name="draft" dir="{{ 'rtl' if p.lang == 'ar' else 'ltr' }}"
               aria-label="Draft for post {{ loop.index }}">{{ p.draft }}</textarea>
     <div class="post-actions">
@@ -200,6 +208,14 @@
       {% endif %}
     </div>
   </form>
+  {% if 'instagram' in p.platforms and st in ('draft', 'approved') %}
+  <form method="post" enctype="multipart/form-data" action="/client/{{ d.client.client_id }}/plan/media" class="post-actions" style="margin:-4px 0 14px;">
+    <input type="hidden" name="date" value="{{ p.date }}">
+    <input type="file" name="file" accept=".jpg,.jpeg,.png,.mp4,.mov" aria-label="Material for post {{ loop.index }}">
+    <button class="btn btn-sm" type="submit">{{ icon('upload') }} Attach material</button>
+    {% if ig.state in ('blocked','failed') %}<button class="btn btn-sm" type="submit" name="action" value="reset">{{ icon('refresh') }} Try again</button>{% endif %}
+  </form>
+  {% endif %}
   {% endfor %}
 </div>
 </div>

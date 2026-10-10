@@ -134,6 +134,11 @@ class PostizPublishRejectedError(PostizAdapterError):
     """Postiz definitively refused the post (4xx validation/auth)."""
 
 
+class PostizAmbiguousClientPostError(PostizAdapterError):
+    """The create-post call may or may not have reached Postiz (timeout, 5xx, 429, malformed reply). The caller
+    must NOT send it again: a second send could double-post on a real account."""
+
+
 class PostizTransportError(Exception):
     """Network-level failure. Always an ambiguous outcome, never a rejection."""
 
@@ -788,6 +793,53 @@ class PostizProvider:
         resp = self._transport.put(url=f"{self._base_url}/posts/{provider_post_id}/settings", headers=headers,
                                    json_body={"settings": dict(settings)}, timeout=_DEFAULT_TIMEOUT_SECONDS)
         return resp.status_code == 200
+
+    def upload_local_media(self, path: Path, *, mime_type: str, db_path: Optional[Path] = None,
+                           upload_transport=None) -> dict:
+        """POST /upload (multipart) -> {id, path}. Nothing is posted yet, so a failure here is always safe to retry."""
+        from hypogeum.publishing.postiz_media_staging import PostizUploadTransport  # noqa: PLC0415
+        headers = {"Authorization": self._headers(db_path)["Authorization"]}      # multipart: requests sets the type
+        transport = upload_transport or PostizUploadTransport()
+        try:
+            status, body = transport.upload(url=f"{self._base_url}/upload", headers=headers, path=Path(path),
+                                            filename=Path(path).name, mime_type=mime_type, timeout=600.0)
+        except PostizTransportError as exc:
+            raise PostizMediaError(f"Postiz upload transport error: {exc}") from exc
+        if status not in (200, 201) or not isinstance(body, dict) or not body.get("id") or not body.get("path"):
+            raise PostizMediaError(f"Postiz upload failed (HTTP {status})")
+        return {"id": body["id"], "path": body["path"]}
+
+    def publish_client_post(self, *, integration_id: str, platform: str, content: str, media: List[dict],
+                            scheduled_for: datetime, options: Optional[dict] = None,
+                            identifier: Optional[str] = None, db_path: Optional[Path] = None) -> dict:
+        """Schedule ONE post on a connected account (the personal-branding client path: no episode, no ledger).
+        Returns {"post_id", "integration_id"}. Raises PostizPublishRejectedError when Postiz definitively said no
+        (safe to fix and retry), PostizAmbiguousClientPostError when it may have gone through (never retry)."""
+        if platform not in self.supported_platforms:
+            raise UnsupportedPlatformError(f"'postiz' does not support platform {platform!r}")
+        if scheduled_for.tzinfo is None:
+            raise PostizScheduleValidationError("scheduled_for must be timezone-aware")
+        headers = self._headers(db_path)
+        settings = build_platform_settings(platform, title=None, options=options or {})
+        if identifier:                      # e.g. "instagram-standalone": the integration's own provider identifier
+            settings["__type"] = identifier
+        body = build_create_post_body(integration_id=integration_id, platform=platform, content=content,
+                                      media=media, settings=settings, scheduled_for=scheduled_for, publish_now=False)
+        try:
+            resp = self._transport.post(url=f"{self._base_url}/posts", headers=headers, json_body=body,
+                                        timeout=_DEFAULT_TIMEOUT_SECONDS)
+        except PostizTransportError as exc:
+            raise PostizAmbiguousClientPostError(f"transport error after sending: {exc}") from exc
+        status, rb = resp.status_code, resp.json_body
+        if status in (200, 201):
+            entry = next((e for e in rb if isinstance(e, dict) and e.get("integration") == integration_id and e.get("postId")), None) \
+                if isinstance(rb, list) else None
+            if entry is None:
+                raise PostizAmbiguousClientPostError(f"no postId in the reply: {_error_text(rb)}")
+            return {"post_id": entry["postId"], "integration_id": integration_id}
+        if status == 429 or status >= 500:
+            raise PostizAmbiguousClientPostError(f"HTTP {status}: {_error_text(rb)}")
+        raise PostizPublishRejectedError(f"Postiz rejected the post (HTTP {status}): {_error_text(rb)}")
 
     def delete_post(self, provider_post_id: str, *, db_path: Optional[Path] = None) -> bool:
         headers = self._headers(db_path)

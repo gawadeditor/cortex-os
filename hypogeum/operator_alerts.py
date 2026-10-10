@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS operator_alert_checks (
 
 # per-check minimum interval (seconds) — run_operator_checks is called from
 # every worker iteration (~60s); the network-backed checks run less often.
-_INTERVALS = {"adapters": 300, "run_failures": 60, "queue_failures": 120, "buffer_gap": 1800, "production_stalled": 1800, "partial_releases": 300, "public_youtube_shorts": 600, "postiz_post_errors": 600, "client_grants": 3600, "client_drafts": 600, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
+_INTERVALS = {"adapters": 300, "run_failures": 60, "queue_failures": 120, "buffer_gap": 1800, "production_stalled": 1800, "partial_releases": 300, "public_youtube_shorts": 600, "postiz_post_errors": 600, "client_grants": 3600, "client_drafts": 600, "client_publishing_media": 600, "client_publishing_posts": 600, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
               "youtube_covers": 300, "stuck_releases": 300, "youtube_flip_auth": 3600, "posts": 1800, "unpublished": 300, "accounts": 600, "archive": 300, "archive_backlog": 600, "disk": 1800}
 _DASHBOARD = "http://127.0.0.1:5001"
 _CREDIT_LOW_USD = 3.0
@@ -741,6 +741,36 @@ def check_client_drafts(db_path, now: datetime) -> dict:
     return out
 
 
+def check_client_publishing(db_path, now: datetime) -> dict:
+    """An approved Instagram post that cannot go out (no material, a [placeholder] left, account not connected in
+    Postiz) or whose send failed / is uncertain (hypogeum.client_publishing). Only clients switched to 'manage'."""
+    try:
+        from hypogeum.client_publishing import _managed
+        from hypogeum.dashboard_clients import calendars_of
+        clients = _managed(db_path)
+    except Exception:  # noqa: BLE001
+        return {}
+    out = {}
+    for c in clients:
+        for cal in calendars_of(c.get("brief") or {}).values():
+            for p in cal.get("posts") or []:
+                a = (p.get("auto") or {}).get("instagram") or {}
+                if (p.get("status") or "draft") != "approved":
+                    continue
+                key = f"{c['client_id']}:{p.get('date')}"
+                if a.get("state") == "blocked":
+                    out[f"clientmedia:{key}"] = (
+                        f"بوست Instagram موافق عليه بس مش قادر يتنشر · {p.get('date')}",
+                        "السبب: " + "؛ ".join(a.get("issues") or ["غير معروف"]) + f"\nمن الداشبورد: /client/{c['client_id']}/plan")
+                elif a.get("state") == "failed":
+                    out[f"clientpost:{key}"] = (f"بوست Instagram فشل · {p.get('date')}", f"{a.get('error') or ''}\nراجع /client/{c['client_id']}/plan")
+                elif a.get("state") == "ambiguous":
+                    out[f"clientpost:{key}"] = (
+                        f"بوست Instagram مش متأكدين اتنشر ولا لأ · {p.get('date')}",
+                        "افتح حساب Instagram وبوستز وشوف الأول. المصنع مش هيبعته تاني لوحده عشان ما يتنشرش مرتين.\n" + (a.get("error") or ""))
+    return out
+
+
 def check_production_paused(db_path) -> dict:
     from hypogeum.db import get_worker_control
     dbp = Path(db_path) if db_path else None
@@ -1304,6 +1334,8 @@ def run_operator_checks(*, db_path=None, config=None, now: Optional[datetime] = 
         ("postiz_post_errors", "pzerr:", lambda: check_postiz_post_errors(db_path, now)),
         ("client_grants", "clientgrant:", lambda: check_client_grants(db_path, now)),
         ("client_drafts", "clientdraft:", lambda: check_client_drafts(db_path, now)),
+        ("client_publishing_media", "clientmedia:", lambda: {k: v for k, v in check_client_publishing(db_path, now).items() if k.startswith("clientmedia:")}),
+        ("client_publishing_posts", "clientpost:", lambda: {k: v for k, v in check_client_publishing(db_path, now).items() if k.startswith("clientpost:")}),
         ("blocking_signals", "signal:", lambda: check_blocking_signals(db_path)),
         ("youtube_covers", "cover:", lambda: check_youtube_covers(db_path, now)),
         ("stuck_releases", "stuckrelease:", lambda: check_stuck_releases(db_path, now)),

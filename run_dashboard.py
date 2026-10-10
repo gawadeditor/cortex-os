@@ -8722,6 +8722,44 @@ def client_plan_post_update(client_id):
     return redirect(f"/client/{client_id}/plan?scope=client:{client_id}&flash={msg}", 302)
 
 
+@app.route("/client/<client_id>/plan/media", methods=["POST"])
+def client_plan_media(client_id):
+    """Attach the operator's material (image / video) to a drafted post, or clear a blocked/failed Instagram state."""
+    from hypogeum import client_manager as cm
+    from hypogeum.client_media import MediaRejected, save_post_media
+    from hypogeum.client_publishing import _set_auto, _store
+    db = _db_path()
+    back = f"/client/{client_id}/plan?scope=client:{client_id}"
+    if not cm.get_client(client_id, db_path=db):
+        return render_template("not_found.html", kind="Client", id=client_id), 404
+    post_date = request.form.get("date") or ""
+    if request.form.get("action") == "reset":
+        ok = _store(db, client_id, post_date, lambda p: p.pop("auto", None) and None)
+        return redirect(f"{back}&flash={'Instagram state cleared — it will be tried again' if ok else 'Post not found'}", 302)
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return redirect(f"{back}&flash=Choose a file first", 302)
+    try:
+        media = save_post_media(client_id, post_date, f.filename, f.stream, db_path=db)
+    except MediaRejected as exc:
+        return redirect(f"{back}&flash={str(exc)}", 302)
+
+    def attach(p):
+        old = (p.get("media") or {}).get("path")
+        p["media"] = media
+        if (p.get("auto") or {}).get("instagram", {}).get("state") == "blocked":
+            p.pop("auto", None)                 # the blocker may be gone: let the publisher look again
+        if old and old != media["path"]:
+            try:
+                Path(old).unlink(missing_ok=True)
+            except OSError:
+                pass
+    if not _store(db, client_id, post_date, attach):
+        Path(media["path"]).unlink(missing_ok=True)
+        return redirect(f"{back}&flash=Post not found", 302)
+    return redirect(f"{back}&flash=Material attached ({media['name']})", 302)
+
+
 @app.route("/client/<client_id>/report")
 def client_report_page(client_id):
     from datetime import datetime, timezone
@@ -11416,6 +11454,11 @@ def main():
     # from the Workspaces page) and /stop — polled, no webhook needed.
     from hypogeum.alert_recipients import start_bot_loop
     start_bot_loop(_db_path())
+
+    # Publishes the operator-approved posts of clients switched to 'manage' (Instagram via Postiz). Does nothing,
+    # and calls nobody, while every client is still in 'observe'.
+    from hypogeum.client_publishing import start_client_publishing_loop
+    start_client_publishing_loop(_db_path())
 
     app.run(host=args.host, port=args.port, debug=False)
 

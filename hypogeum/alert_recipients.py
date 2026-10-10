@@ -122,7 +122,7 @@ ALERT_TYPES = [
 _PREFIX_TYPE = [("production:", "production"), ("run_failed:", "production"),
                 ("unpublished:", "production"), ("repair:", "production"), ("openrouter:", "credits"), ("openrouter_ws:", "credits"), ("cover:", "covers"),
                 ("postcover:", "covers"), ("post:", "posts"), ("account:", "accounts"),
-                ("approval:", "approvals"), ("clientdraft:", "approvals"), ("worker:", "system"), ("disk:", "system"),
+                ("approval:", "approvals"), ("clientdraft:", "approvals"), ("clientmedia:", "approvals"), ("clientpost:", "posts"), ("worker:", "system"), ("disk:", "system"),
                 ("archive:", "system"), ("signal:", "system"), ("system:", "system")]
 
 

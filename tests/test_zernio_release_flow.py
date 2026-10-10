@@ -401,3 +401,29 @@ class TestNoLiveCalls:
             publishing_provider=ZernioProvider(transport=publish_transport),
         )
         assert result.status == "published"
+
+
+class TestHasVerticalCover:
+    """2026-10-10: a salvaged episode lost its thumbnail reference and its YouTube Short was scheduled public with
+    no cover hold. The designed cover next to the video is the fallback."""
+
+    def _jpg(self, path, size):
+        from PIL import Image
+        path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", size, (10, 10, 10)).save(path)
+
+    def test_package_thumbnail_wins_then_the_sibling_cover_is_the_fallback(self, tmp_path):
+        from types import SimpleNamespace
+        from hypogeum.publishing.zernio_publish_runtime import _has_vertical_cover
+        video = tmp_path / "ep" / "main_ep.mp4"
+        video.parent.mkdir()
+        video.write_bytes(b"x")
+        d = SimpleNamespace(thumbnail_local_path=None, local_path=video, deliverable_id="main_episode")
+        assert _has_vertical_cover(d) is False                                  # nothing at all
+        self._jpg(tmp_path / "ep" / "thumbnails" / "main_episode.jpg", (1080, 1920))
+        assert _has_vertical_cover(d) is True                                   # fallback: vertical cover beside the video
+        self._jpg(tmp_path / "ep" / "thumbnails" / "main_episode.jpg", (1280, 720))
+        assert _has_vertical_cover(d) is False                                  # a landscape thumbnail is not a Short cover
+        self._jpg(tmp_path / "pkg.jpg", (1080, 1920))
+        d2 = SimpleNamespace(thumbnail_local_path=tmp_path / "pkg.jpg", local_path=video, deliverable_id="main_episode")
+        assert _has_vertical_cover(d2) is True

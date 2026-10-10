@@ -553,7 +553,7 @@ def publish_episode_package(
                 # records the hold and the cover-hold sweep flips it public later.
                 _extra = {}
                 if type(group_publisher).__name__ == "PostizProvider" and "youtube" in group_platforms \
-                        and _is_vertical_image(deliverable.thumbnail_local_path):
+                        and _has_vertical_cover(deliverable):
                     _extra["platform_options"] = {"youtube": {"cover_hold": True}}
                 try:
                     platform_results.update(group_publisher.publish_multi_platform(
@@ -658,6 +658,24 @@ def publish_episode_package(
         episode_id=package.episode_id, platforms=platforms,
         blocked=False, deliverables=outcomes,
     )
+
+
+def _has_vertical_cover(deliverable) -> bool:
+    """Does this deliverable have a vertical (Short) cover, i.e. must its YouTube upload be held private
+    until the operator sets the cover in Studio? The package's own thumbnail path is authoritative, but a
+    salvaged / re-assembled episode can lose that reference (2026-10-10: ep_014876fc went public with no
+    hold), so fall back to the designed cover that sits next to the episode's video:
+    <episode dir>/thumbnails/<deliverable_id>.jpg."""
+    if _is_vertical_image(getattr(deliverable, "thumbnail_local_path", None)):
+        return True
+    try:
+        from pathlib import Path  # noqa: PLC0415
+        video = getattr(deliverable, "local_path", None)
+        if video is not None:
+            return _is_vertical_image(Path(video).parent / "thumbnails" / f"{deliverable.deliverable_id}.jpg")
+    except Exception:  # noqa: BLE001
+        pass
+    return False
 
 
 def _is_vertical_image(path) -> bool:

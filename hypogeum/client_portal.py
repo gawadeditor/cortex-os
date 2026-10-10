@@ -23,6 +23,8 @@ from typing import Optional
 from hypogeum import portal_auth as pa
 
 _COOKIE = "cortex_portal"
+_PROVIDER_LABELS = {"openrouter": "OpenRouter", "muapi": "MUAPI", "elevenlabs": "ElevenLabs", "perplexity": "Perplexity",
+                    "voder": "Music (local)", "anthropic": "Anthropic"}
 
 _CSS = """
 :root{--bg:#090b11;--bg-2:#0c0f16;--surface:#14171d;--raised:#1b1f27;--border:#262b33;--border-strong:#363d47;
@@ -315,7 +317,7 @@ def create_app(db_path=None, config=None):
                 return "".join("<div class='row'><span>" + _esc(labeller(i)) + "</span><div class='bar-track'><i style='width:" +
                                str(round(100 * i["total"] / top)) + "%'></i></div><span class='t'>$" + format(i["total"], ".2f") + "</span></div>"
                                for i in items)
-            body += "<h2>By provider</h2><div class='panel'>" + bars(u["by_provider"], "provider", lambda i: i["provider"].capitalize()) + "</div>"
+            body += "<h2>By provider</h2><div class='panel'>" + bars(u["by_provider"], "provider", lambda i: _PROVIDER_LABELS.get(i["provider"], i["provider"].capitalize())) + "</div>"
             if len(u["by_channel"]) > 1 or any(c["channel_id"] for c in u["by_channel"]):
                 body += "<h2>By channel</h2><div class='panel'>" + bars(u["by_channel"], "channel_id",
                                                                           lambda i: names.get(i["channel_id"]) or i["channel_id"] or "-") + "</div>"

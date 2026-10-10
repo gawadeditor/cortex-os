@@ -1342,6 +1342,18 @@ def run_iteration(
     except Exception as exc:  # noqa: BLE001
         log.error("signal_noise_sweep_error error=%s", exc)
 
+    # Auto-salvage: when the iteration did no production, let the worker rescue ONE failed-but-near-complete
+    # episode (see hypogeum.auto_salvage). Blocking like a queue item; never affects the iteration outcome.
+    if not dry_run and proc is None and not queue_paused:
+        try:
+            from hypogeum.auto_salvage import run_auto_salvage
+            from hypogeum.logger import get_logger as _get_struct_logger
+            _salv = run_auto_salvage(db_path, config, _get_struct_logger(agent="auto_salvage"))
+            if _salv:
+                log.info("auto_salvage episode=%s ok=%s", _salv["episode_id"], _salv["ok"])
+        except Exception as exc:  # noqa: BLE001
+            log.error("auto_salvage_error error=%s", exc)
+
     poll_status = proc.status if proc else (
         "paused" if (queue_paused and not bypass_pause_for_bounded_run)
         else ("not_cleared" if not clearance.cleared else "empty")

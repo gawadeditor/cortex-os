@@ -398,6 +398,41 @@ def _restore_shrunk_plan_weekly_hold(
         conn.close()
 
 
+_STALE_RENDER_CHECKPOINTS = (
+    "final_render_package_{ep}.json", "qa_report_{ep}.json", "qa_approval_report_{ep}.json",
+    "asset_archive_record_{ep}.json", "episode_asset_index_{ep}.json",
+)
+
+
+def _stash_failed_render_checkpoints(episode_id: str, assets_root: Optional[Path] = None) -> list:
+    """A failed assembly leaves a final_render_package with production_ready=False (and the QA reports
+    built on it). run_pipeline resumes AFTER those checkpoints, so the QA re-judges the stale package and
+    rejects instantly -- the salvage never re-assembles. Move them aside (never delete) into
+    _pre_salvage_<UTC stamp>/ so assembly runs again with the recovered clips. Returns the moved names."""
+    import json  # noqa: PLC0415
+    import shutil  # noqa: PLC0415
+    from datetime import datetime, timezone  # noqa: PLC0415
+    d = _episode_dir(episode_id, assets_root)
+    frp = d / f"final_render_package_{episode_id}.json"
+    if not frp.exists():
+        return []
+    try:
+        ready = json.loads(frp.read_text(encoding="utf-8")).get("package_integrity", {}).get("production_ready")
+    except Exception:  # noqa: BLE001
+        ready = False
+    if ready:
+        return []                       # a viable package: nothing stale to stash
+    dest = d / ("_pre_salvage_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
+    moved = []
+    for pattern in _STALE_RENDER_CHECKPOINTS:
+        f = d / pattern.format(ep=episode_id)
+        if f.exists():
+            dest.mkdir(exist_ok=True)
+            shutil.move(str(f), str(dest / f.name))
+            moved.append(f.name)
+    return moved
+
+
 def salvage_episode(
     episode_id: str, *, config, db_path: Optional[object] = None, log=None,
     dry_run: bool = False,
@@ -469,6 +504,13 @@ def salvage_episode(
                 log.info("episode_salvage_plan_weekly_restored", episode_id=episode_id, amount_usd=_restored)
             except Exception:  # noqa: BLE001
                 pass
+
+        try:
+            _stashed = _stash_failed_render_checkpoints(episode_id)
+            if _stashed and log is not None:
+                log.info("episode_salvage_stale_checkpoints_stashed", episode_id=episode_id, files=_stashed)
+        except Exception:  # noqa: BLE001 — best effort; a failure here only means the old behaviour
+            pass
 
         bind_episode_admission(
             pre["channel_id"], episode_id, config=config,

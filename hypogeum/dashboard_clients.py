@@ -323,8 +323,8 @@ def update_plan_post(client_id: str, date: str, *, status: Optional[str] = None,
         if p.get("date") == date:
             if status is not None:
                 p["status"] = status
-                if status == "published":
-                    p["published_marked_at"] = datetime.now(timezone.utc).isoformat()
+                if status in ("published", "approved", "skipped"):
+                    p["published_marked_at" if status == "published" else f"{status}_at"] = datetime.now(timezone.utc).isoformat()
             if draft is not None and draft.strip():
                 p["draft"] = draft.replace("\r\n", "\n").strip()
                 p["edited_at"] = datetime.now(timezone.utc).isoformat()

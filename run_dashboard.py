@@ -8689,7 +8689,7 @@ def client_plan_post_update(client_id):
     from hypogeum.dashboard_clients import update_plan_post
     date = request.form.get("date") or ""
     action = request.form.get("action") or "save"
-    status = action if action in ("published", "draft") else None
+    status = {"published": "published", "draft": "draft", "approve": "approved", "skip": "skipped"}.get(action)
     ok = update_plan_post(client_id, date, status=status, draft=request.form.get("draft"),
                           db_path=_db_path())
     if ok and action == "published":
@@ -8717,6 +8717,7 @@ def client_plan_post_update(client_id):
                                            message=str(exc)[:300], finished_at=_dt.now(_tz.utc).isoformat())
             threading.Thread(target=_topup, name=f"brand-topup-{client_id}", daemon=True).start()
     msg = ("Marked as posted" if action == "published" else
+           "Approved" if action == "approve" else "Skipped" if action == "skip" else
            "Moved back to draft" if action == "draft" else "Edit saved") if ok else "Post not found"
     return redirect(f"/client/{client_id}/plan?scope=client:{client_id}&flash={msg}", 302)
 

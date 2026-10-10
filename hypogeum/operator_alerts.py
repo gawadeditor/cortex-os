@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS operator_alert_checks (
 
 # per-check minimum interval (seconds) — run_operator_checks is called from
 # every worker iteration (~60s); the network-backed checks run less often.
-_INTERVALS = {"adapters": 300, "run_failures": 60, "queue_failures": 120, "buffer_gap": 1800, "production_stalled": 1800, "partial_releases": 300, "public_youtube_shorts": 600, "postiz_post_errors": 600, "client_grants": 3600, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
+_INTERVALS = {"adapters": 300, "run_failures": 60, "queue_failures": 120, "buffer_gap": 1800, "production_stalled": 1800, "partial_releases": 300, "public_youtube_shorts": 600, "postiz_post_errors": 600, "client_grants": 3600, "client_drafts": 600, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
               "youtube_covers": 300, "stuck_releases": 300, "youtube_flip_auth": 3600, "posts": 1800, "unpublished": 300, "accounts": 600, "archive": 300, "archive_backlog": 600, "disk": 1800}
 _DASHBOARD = "http://127.0.0.1:5001"
 _CREDIT_LOW_USD = 3.0
@@ -724,6 +724,23 @@ def check_client_grants(db_path, now: datetime) -> dict:
     return out
 
 
+def check_client_drafts(db_path, now: datetime) -> dict:
+    """A client's drafted post is due within a week and nobody has decided: ask the operator, with the draft in
+    the message and Approve / Skip buttons (hypogeum.client_post_approvals). Drafts whose date passed are
+    marked skipped first, so they stop asking."""
+    try:
+        from hypogeum import client_post_approvals as cpa
+        cpa.expire_past(db_path, now.date())
+        items = cpa.due_drafts(db_path, now.date())
+    except Exception:  # noqa: BLE001
+        return {}
+    out = {}
+    for it in items:
+        title, body = cpa.alert_text(it)
+        out[f"clientdraft:{it['client_id']}:{it['post']['date']}"] = (title, body)
+    return out
+
+
 def check_production_paused(db_path) -> dict:
     from hypogeum.db import get_worker_control
     dbp = Path(db_path) if db_path else None
@@ -1286,6 +1303,7 @@ def run_operator_checks(*, db_path=None, config=None, now: Optional[datetime] = 
         ("public_youtube_shorts", "ytpublic:", lambda: check_public_youtube_shorts(db_path, now)),
         ("postiz_post_errors", "pzerr:", lambda: check_postiz_post_errors(db_path, now)),
         ("client_grants", "clientgrant:", lambda: check_client_grants(db_path, now)),
+        ("client_drafts", "clientdraft:", lambda: check_client_drafts(db_path, now)),
         ("blocking_signals", "signal:", lambda: check_blocking_signals(db_path)),
         ("youtube_covers", "cover:", lambda: check_youtube_covers(db_path, now)),
         ("stuck_releases", "stuckrelease:", lambda: check_stuck_releases(db_path, now)),

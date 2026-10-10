@@ -189,6 +189,10 @@
     <div class="post-actions">
       <button type="button" class="btn btn-primary btn-sm js-copy">{{ icon('check') }} Copy</button>
       <button type="submit" name="action" value="save" class="btn btn-sm">{{ icon('pencil') }} Save edit</button>
+      {% if st == 'draft' %}
+      <button type="submit" name="action" value="approve" class="btn btn-primary btn-sm">{{ icon('check') }} Approve</button>
+      <button type="submit" name="action" value="skip" class="btn btn-sm">{{ icon('x') }} Skip</button>
+      {% endif %}
       {% if st != 'published' %}
       <button type="submit" name="action" value="published" class="btn btn-sm">{{ icon('check') }} Mark posted</button>
       {% else %}

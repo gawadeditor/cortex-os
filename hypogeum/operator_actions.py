@@ -101,6 +101,9 @@ def buttons_for(alert_key: str, db_path=None) -> Optional[dict]:
         rows = rows + [[_btn("📋 حالة المصنع", "status")]]
     elif alert_key.startswith(("openrouter:", "openrouter_ws:")):
         rows = [[_url("💳 اشحن OpenRouter", "https://openrouter.ai/settings/credits")]]
+    elif alert_key.startswith("clientdraft:"):
+        _, cid, pdate = alert_key.split(":", 2)
+        rows = [[_btn("✅ وافق", "post_approve", f"{cid}|{pdate}"), _btn("⏭ تخطّى", "post_skip", f"{cid}|{pdate}")]]
     elif alert_key.startswith(("cover:", "postcover:")):
         post_id = alert_key.split(":", 1)[1]
         studio = _studio_url(post_id, db_path)
@@ -204,8 +207,26 @@ def _adapters(arg: str, db_path) -> str:
         f"⚠️ مقدرتش أسجّلهم (لازم الكود يكون متعمله commit): {(r.stderr or '').strip()[-200:]}"
 
 
+def _post_decision(status: str):
+    def run(arg, db_path):
+        client_id, _, post_date = arg.partition("|")
+        from hypogeum import client_post_approvals as cpa
+        if not cpa.set_status(client_id, post_date, status, db_path=db_path):
+            return "⚠️ المسودة دي مش موجودة أو اتقفلت قبل كده."
+        try:
+            from hypogeum import operator_alerts as oa
+            oa.resolve(f"clientdraft:{client_id}:{post_date}", "اتحسمت", db_path=db_path, send=lambda t: True)
+        except Exception:  # noqa: BLE001
+            pass
+        if status == "approved":
+            return f"✅ اتوافق على بوست {post_date}. اتسجّل كموافق عليه (النشر الأوتوماتيك لسه مش متوصّل، فانشره بإيدك لحد ما نبنيه)."
+        return f"⏭ اتخطّينا بوست {post_date}."
+    return run
+
+
 ACTIONS = {"cancel": lambda arg, db_path: "تمام، ما عملتش حاجة.", "resume": _resume, "restart_worker": _restart_worker, "mount_archive": _mount_archive,
-           "disk": _disk, "cover_done": _cover_done, "adapters": _adapters}
+           "disk": _disk, "cover_done": _cover_done, "adapters": _adapters,
+           "post_approve": _post_decision("approved"), "post_skip": _post_decision("skipped")}
 
 
 def _operator_chats(db_path) -> set:

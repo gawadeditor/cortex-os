@@ -2,6 +2,7 @@
 """Serves the Postiz webhook receiver (hypogeum/postiz_webhook.py) on 127.0.0.1 only; a tunnel exposes just
 this port. Refuses to start without POSTIZ_WEBHOOK_SECRET."""
 import argparse
+import logging
 import sys
 
 from hypogeum.config import Config
@@ -16,6 +17,7 @@ def main() -> int:
     if not config.POSTIZ_WEBHOOK_SECRET:
         sys.stderr.write("POSTIZ_WEBHOOK_SECRET is not set; refusing to start.\n")
         return 2
+    logging.getLogger("werkzeug").setLevel(logging.ERROR)   # the access log would print the secret path
     create_app(config=config).run(host="127.0.0.1", port=args.port, threaded=True)
     return 0
 

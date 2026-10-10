@@ -72,6 +72,20 @@ def create_app(db_path=None, config=None):
             f"script-src 'nonce-{getattr(g, 'nonce', '')}'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
         return resp
 
+    @app.errorhandler(Exception)
+    def _friendly(exc):
+        from werkzeug.exceptions import HTTPException  # noqa: PLC0415
+        if isinstance(exc, HTTPException):
+            return exc
+        import sqlite3  # noqa: PLC0415
+        from hypogeum.logger import get_logger  # noqa: PLC0415
+        busy = isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc)
+        get_logger(agent="client_portal").warn("portal_request_failed", path=request.path, error=type(exc).__name__, busy=busy)
+        return render_template("portal/message.html", title="Please try again", heading="One moment",
+                               text=("Cortex is busy for a few seconds. Please try again." if busy else
+                                     "Something went wrong on our side. Please try again in a minute."),
+                               link_text="Back", link_href="/"), (503 if busy else 500)
+
     @app.context_processor
     def _nonce():
         return {"nonce": getattr(g, "nonce", "")}

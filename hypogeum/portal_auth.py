@@ -68,12 +68,21 @@ def _h(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+_READY: set = set()
+
+
 def _conn(db_path):
+    """A connection that waits for the worker's writes instead of failing ("database is locked" turned a sign-in
+    request into a 500 while every process was restarting). The schema is ensured once per process and database."""
     from hypogeum.db import get_connection  # noqa: PLC0415
     c = get_connection(Path(db_path) if db_path else None)
-    c.executescript(_DDL)
-    if "notify_email" not in {r[1] for r in c.execute("PRAGMA table_info(portal_users)")}:   # tables from Phase 6
-        c.execute("ALTER TABLE portal_users ADD COLUMN notify_email INTEGER NOT NULL DEFAULT 1")
+    c.execute("PRAGMA busy_timeout = 20000")
+    key = str(db_path)
+    if key not in _READY:
+        c.executescript(_DDL)
+        if "notify_email" not in {r[1] for r in c.execute("PRAGMA table_info(portal_users)")}:   # tables from Phase 6
+            c.execute("ALTER TABLE portal_users ADD COLUMN notify_email INTEGER NOT NULL DEFAULT 1")
+        _READY.add(key)
     return c
 
 

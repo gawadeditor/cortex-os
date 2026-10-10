@@ -389,3 +389,34 @@ def test_an_english_workspace_sees_alerts_in_english(env):
     conn.close()
     page = _login(create_app(env), env, "a@acme.com").get("/").get_data(as_text=True)
     assert "No OpenRouter key" in page and "Add your key in Setup." in page and "مفيش مفتاح" not in page
+
+
+def test_a_busy_database_gives_a_friendly_page_not_a_bare_500(env, monkeypatch):
+    import sqlite3
+    app = create_app(env)
+    monkeypatch.setattr(pa, "request_login_link", lambda *a, **k: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked")))
+    r = app.test_client().post("/login", data={"email": "a@acme.com"})
+    assert r.status_code == 503 and "Cortex is busy" in r.get_data(as_text=True) and "Internal Server Error" not in r.get_data(as_text=True)
+    monkeypatch.setattr(pa, "request_login_link", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    r2 = app.test_client().post("/login", data={"email": "a@acme.com"})
+    assert r2.status_code == 500 and "Something went wrong" in r2.get_data(as_text=True)
+    assert app.test_client().get("/nope").status_code == 404                         # HTTP errors keep their own status
+
+
+def test_a_start_that_hits_a_locked_database_is_retried_not_lost(monkeypatch):
+    import sqlite3
+    from hypogeum import alert_recipients as ar
+    calls = []
+    def flaky(chat, text, **k):
+        calls.append(1)
+        if len(calls) < 3:
+            raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(ar, "handle_message", flaky)
+    monkeypatch.setattr(ar.time, "sleep", lambda s: None)
+    monkeypatch.setattr(ar, "_get_offset", lambda db: 0)
+    monkeypatch.setattr(ar, "_save_offset", lambda db, o: None)
+    import hypogeum.operator_actions as oa_
+    monkeypatch.setattr(oa_, "handle_command", lambda *a, **k: None)
+    upd = {"result": [{"update_id": 1, "message": {"chat": {"id": 5, "type": "private"}, "text": "/start code123"}}]}
+    assert ar.poll_once(None, http=lambda method, params: upd if method == "getUpdates" else {}) == 1
+    assert len(calls) == 3

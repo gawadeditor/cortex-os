@@ -26,6 +26,8 @@ workspace alert (the operator runs the managed service and sees everything).
 from __future__ import annotations
 
 import json
+import sqlite3
+import time
 import secrets
 import threading
 import urllib.parse
@@ -428,8 +430,15 @@ def poll_once(db_path=None, *, http=None, timeout: int = 0) -> int:
                 if res:
                     send_to_chat(str(msg["chat"]["id"]), res[0], http=http, reply_markup=res[1])
                 else:
-                    handle_message(msg.get("chat") or {}, msg.get("text") or "", db_path=db_path,
-                                   reply=lambda cid, t: send_to_chat(cid, t, http=http))
+                    for attempt in range(4):        # a locked DB (everything restarting) must not lose a client's /start
+                        try:
+                            handle_message(msg.get("chat") or {}, msg.get("text") or "", db_path=db_path,
+                                           reply=lambda cid, t: send_to_chat(cid, t, http=http))
+                            break
+                        except sqlite3.OperationalError as exc:
+                            if "locked" not in str(exc) or attempt == 3:
+                                raise
+                            time.sleep(2 * (attempt + 1))
             handled += 1
         except Exception as exc:  # noqa: BLE001
             log.warn("telegram_update_failed", error=str(exc)[:200])

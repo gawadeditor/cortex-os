@@ -3965,6 +3965,58 @@ def shrink_terminal_weekly_reservation(
     return "shrunk"
 
 
+def reinstate_shrunk_weekly_reservation(
+    conn: sqlite3.Connection, reservation_id: str, plan_max, *, ceiling, at: str,
+) -> str:
+    """
+    The deliberate inverse of shrink_terminal_weekly_reservation(), for an
+    episode SALVAGE only (hypogeum.episode_salvage): restore a COMMITTED
+    channel_weekly plan reservation that the weekly-reservation reaper shrank
+    to a dead episode's real spend back up to the verified plan maximum.
+
+    Why it must exist: every post-plan paid step (upscale, repair) requires the
+    plan-weekly row to equal the plan maximum (capability_boundary's
+    reserved_amount == plan_max check), and the reaper's true-down breaks that
+    for any later salvage (2026-10-10: ep_014876fc 'weekly reservation amount
+    8.09 != verified plan maximum 25.28' denied every paid step).
+
+    Never an inflation bypass: the row is only raised after PROVING the channel's
+    weekly headroom still covers it (every other non-released hold in the same
+    scope + the restored amount must fit under `ceiling`).
+
+    Returns: "reinstated", "already_at_target", "not_committed", "not_found",
+    "refused_shrink" (plan_max below the current amount -- this never shrinks),
+    "refused_over_ceiling".
+    """
+    from decimal import Decimal
+
+    row = conn.execute(
+        "SELECT scope_kind, status, reserved_amount, scope_ref FROM budget_reservations "
+        "WHERE reservation_id = ?", (reservation_id,),
+    ).fetchone()
+    if row is None:
+        return "not_found"
+    if row["scope_kind"] != "channel_weekly" or row["status"] != "committed":
+        return "not_committed"
+    current = Decimal(str(row["reserved_amount"]))
+    target = Decimal(str(plan_max))
+    if target < current:
+        return "refused_shrink"
+    if target - current < Decimal("0.01"):
+        return "already_at_target"
+    others = Decimal(sum_reserved_and_committed(conn, "channel_weekly", row["scope_ref"])) - current
+    if others + target > Decimal(str(ceiling)):
+        return "refused_over_ceiling"
+    ts = f"{target:.6f}"
+    conn.execute(
+        "UPDATE budget_reservations SET reserved_amount=?, committed_amount=?, resolved_at=? "
+        "WHERE reservation_id=? AND status='committed'",
+        (ts, ts, at, reservation_id),
+    )
+    conn.commit()
+    return "reinstated"
+
+
 def sum_reserved_and_committed(conn: sqlite3.Connection, scope_kind: str, scope_ref: str) -> str:
     """Returns the exact Decimal-string sum of every non-released
     reservation for (scope_kind, scope_ref)."""

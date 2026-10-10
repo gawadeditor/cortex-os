@@ -340,6 +340,64 @@ def _reinstate_plan_weekly_reservation(channel_id: str, episode_id: str, *, db_p
     return 0.0
 
 
+def _plan_hash_and_max(episode_id: str, assets_root: Optional[Path] = None):
+    """(content_hash, maximum_bounded_cost_usd) of the episode's persisted Production Plan, or (None, None)."""
+    import json  # noqa: PLC0415
+    for _name in (f"production_plan_{episode_id}.json", "production_plan.json"):
+        _pp = _episode_dir(episode_id, assets_root) / _name
+        if _pp.exists():
+            try:
+                d = json.loads(_pp.read_text(encoding="utf-8"))
+                return d.get("content_hash"), d.get("maximum_bounded_cost_usd")
+            except Exception:  # noqa: BLE001
+                return None, None
+    return None, None
+
+
+def _restore_shrunk_plan_weekly_hold(
+    channel_id: str, episode_id: str, *, db_path, assets_root: Optional[Path] = None, log=None,
+) -> float:
+    """The weekly-reservation reaper does not only RELEASE a dead episode's plan hold (handled by
+    _reinstate_plan_weekly_reservation): when real post-plan money was spent it SHRINKS the hold to that
+    spend and leaves it 'committed'. Any paid step of a salvage then fails capability_boundary's
+    `reserved_amount == plan maximum` check. A salvage is a deliberate decision to finish the episode, so
+    restore the hold to the plan maximum -- after proving the current week's headroom covers it.
+    Returns the restored plan maximum (0.0 if nothing to do). Raises _ReinstateFailed if it does not fit."""
+    from datetime import datetime, timezone  # noqa: PLC0415
+    from decimal import Decimal  # noqa: PLC0415
+
+    plan_hash, plan_max = _plan_hash_and_max(episode_id, assets_root)
+    if not plan_hash or plan_max is None:
+        return 0.0
+    conn = _salvage_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT reservation_id, scope_ref FROM budget_reservations WHERE scope_kind = 'channel_weekly' "
+            "AND status = 'committed' AND idempotency_key = ?",
+            (f"plan-weekly:{channel_id}:{episode_id}:{plan_hash}",),
+        ).fetchone()
+        if row is None:
+            return 0.0
+        import hypogeum.db as _db  # noqa: PLC0415
+        import hypogeum.weekly_budget as _wb  # noqa: PLC0415
+        now = datetime.now(timezone.utc)
+        tz_name, ceiling = _wb.resolve_channel_weekly_policy(conn, channel_id)
+        if row["scope_ref"] != _wb.week_scope_ref(channel_id, _wb.compute_weekly_window(now, tz_name)):
+            return 0.0   # an older week: the normal path reserves a fresh current-week hold
+        res = _db.reinstate_shrunk_weekly_reservation(
+            conn, row["reservation_id"], Decimal(str(plan_max)), ceiling=ceiling, at=now.isoformat(),
+        )
+        if res == "refused_over_ceiling":
+            raise _ReinstateFailed(
+                f"the channel's weekly headroom no longer covers the plan maximum ({plan_max}) -- "
+                f"not resuming, the first paid step would be denied")
+        if res in ("refused_shrink", "not_found", "not_committed"):
+            return 0.0
+        return float(plan_max) if res == "reinstated" else 0.0
+    finally:
+        conn.close()
+
+
 def salvage_episode(
     episode_id: str, *, config, db_path: Optional[object] = None, log=None,
     dry_run: bool = False,
@@ -396,6 +454,19 @@ def salvage_episode(
             try:
                 log.info("episode_salvage_plan_weekly_reinstated", episode_id=episode_id,
                          amount_usd=_reinstated)
+            except Exception:  # noqa: BLE001
+                pass
+
+        try:
+            _restored = _restore_shrunk_plan_weekly_hold(
+                pre["channel_id"], episode_id, db_path=_p, log=log,
+            )
+        except _ReinstateFailed as exc:
+            out["reason"] = f"plan-weekly restore failed ({exc})"
+            return out
+        if _restored and log is not None:
+            try:
+                log.info("episode_salvage_plan_weekly_restored", episode_id=episode_id, amount_usd=_restored)
             except Exception:  # noqa: BLE001
                 pass
 

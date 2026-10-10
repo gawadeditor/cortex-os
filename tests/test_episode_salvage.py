@@ -133,3 +133,73 @@ def test_missing_finance_auth_is_blocked(dbp, tmp_path):
     pre = salvage_preconditions("ep_nofin", db_path=dbp, assets_root=root)
     assert pre["ok"] is False
     assert any("finance authorization" in b for b in pre["blockers"])
+
+
+# --- plan-weekly hold shrunk by the reaper: a salvage must restore it (2026-10-10, ep_014876fc) ---
+
+def _weekly_row(conn, rid, key, amount, scope_ref, status="committed"):
+    conn.execute(
+        "INSERT INTO budget_reservations (reservation_id, scope_kind, scope_ref, idempotency_key, reserved_amount, "
+        "currency, status, committed_amount, created_at, resolved_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (rid, "channel_weekly", scope_ref, key, amount, "USD", status, amount if status == "committed" else None,
+         "2026-10-10T00:00:00+00:00", None),
+    )
+    conn.commit()
+
+
+class TestReinstateShrunkWeeklyReservation:
+    def test_restores_the_plan_maximum_when_headroom_covers_it(self, dbp):
+        conn = db.get_connection(dbp)
+        _weekly_row(conn, "r1", "plan-weekly:ch:ep1:h", "8.090027", "ch:2026-W41")
+        _weekly_row(conn, "r2", "other", "2.334267", "ch:2026-W41")
+        assert db.reinstate_shrunk_weekly_reservation(conn, "r1", "25.2793", ceiling="135", at="t") == "reinstated"
+        row = conn.execute("SELECT status, reserved_amount, committed_amount FROM budget_reservations WHERE reservation_id='r1'").fetchone()
+        assert row["status"] == "committed" and float(row["reserved_amount"]) == pytest.approx(25.2793)
+        assert db.reinstate_shrunk_weekly_reservation(conn, "r1", "25.2793", ceiling="135", at="t") == "already_at_target"
+
+    def test_never_inflates_past_the_weekly_ceiling(self, dbp):
+        conn = db.get_connection(dbp)
+        _weekly_row(conn, "r1", "plan-weekly:ch:ep1:h", "8.09", "ch:2026-W41")
+        _weekly_row(conn, "r2", "other", "120", "ch:2026-W41")
+        assert db.reinstate_shrunk_weekly_reservation(conn, "r1", "25.28", ceiling="135", at="t") == "refused_over_ceiling"
+        assert float(conn.execute("SELECT reserved_amount FROM budget_reservations WHERE reservation_id='r1'").fetchone()[0]) == pytest.approx(8.09)
+
+    def test_never_shrinks_and_only_touches_committed_rows(self, dbp):
+        conn = db.get_connection(dbp)
+        _weekly_row(conn, "r1", "k1", "25", "ch:2026-W41")
+        _weekly_row(conn, "r2", "k2", "5", "ch:2026-W41", status="reserved")
+        assert db.reinstate_shrunk_weekly_reservation(conn, "r1", "10", ceiling="135", at="t") == "refused_shrink"
+        assert db.reinstate_shrunk_weekly_reservation(conn, "r2", "10", ceiling="135", at="t") == "not_committed"
+        assert db.reinstate_shrunk_weekly_reservation(conn, "nope", "10", ceiling="135", at="t") == "not_found"
+
+
+class TestSalvageRestoresTheShrunkPlanHold:
+    def _setup(self, dbp, tmp_path, monkeypatch, other="2.0"):
+        from datetime import datetime, timezone
+        from decimal import Decimal
+        import hypogeum.weekly_budget as wb
+        monkeypatch.setattr(wb, "resolve_channel_weekly_policy", lambda conn, ch: ("UTC", Decimal("135")))
+        ref = wb.week_scope_ref("ch", wb.compute_weekly_window(datetime.now(timezone.utc), "UTC"))
+        ep = tmp_path / "ep1"
+        ep.mkdir()
+        (ep / "production_plan_ep1.json").write_text(json.dumps({"content_hash": "h", "maximum_bounded_cost_usd": 25.28}))
+        conn = db.get_connection(dbp)
+        _weekly_row(conn, "r1", "plan-weekly:ch:ep1:h", "8.09", ref)
+        _weekly_row(conn, "r2", "other", other, ref)
+        return conn
+
+    def test_a_shrunk_hold_is_restored_to_the_plan_maximum(self, dbp, tmp_path, monkeypatch):
+        from hypogeum.episode_salvage import _restore_shrunk_plan_weekly_hold
+        conn = self._setup(dbp, tmp_path, monkeypatch)
+        assert _restore_shrunk_plan_weekly_hold("ch", "ep1", db_path=dbp, assets_root=tmp_path) == pytest.approx(25.28)
+        assert float(conn.execute("SELECT reserved_amount FROM budget_reservations WHERE reservation_id='r1'").fetchone()[0]) == pytest.approx(25.28)
+
+    def test_refuses_to_resume_when_the_week_has_no_headroom(self, dbp, tmp_path, monkeypatch):
+        from hypogeum.episode_salvage import _restore_shrunk_plan_weekly_hold, _ReinstateFailed
+        self._setup(dbp, tmp_path, monkeypatch, other="125")
+        with pytest.raises(_ReinstateFailed):
+            _restore_shrunk_plan_weekly_hold("ch", "ep1", db_path=dbp, assets_root=tmp_path)
+
+    def test_nothing_to_do_without_a_persisted_plan(self, dbp, tmp_path):
+        from hypogeum.episode_salvage import _restore_shrunk_plan_weekly_hold
+        assert _restore_shrunk_plan_weekly_hold("ch", "ep1", db_path=dbp, assets_root=tmp_path) == 0.0

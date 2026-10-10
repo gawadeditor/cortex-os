@@ -345,7 +345,7 @@ def check_workspace_credits(db_path, *, http_get=None) -> Optional[dict]:
                 f"{w['workspace_id']}: مفيش مفتاح OpenRouter",
                 "الـ Workspace دي مالهاش مفتاح OpenRouter، فإنتاجها مش هيشتغل.",
                 {"ws": w["workspace_id"], "en": ("No OpenRouter key", "This workspace has no OpenRouter key, so "
-                                                 "its episodes can't be written. Add one in Credentials.")})
+                                                 "its episodes can't be written. Add your key under Setup in your portal.")})
             continue
         res = check_openrouter_credits(SimpleNamespace(OPENROUTER_API_KEY=key), http_get=http_get)
         for _k, (t, b) in (res or {}).items():

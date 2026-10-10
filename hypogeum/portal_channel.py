@@ -220,3 +220,23 @@ def readiness(channel_id: str, workspace_id: str, db_path=None) -> list:
     items.append({"level": "ok" if sch else "warn", "title": "A schedule is set" if sch else "No active schedule",
                   "detail": f"Cadence: {sch['cadence']}." if sch else "Cortex has no production schedule for this channel yet."})
     return items
+
+
+def revenue(channel_id: str, db_path=None) -> list:
+    """Distance to each platform's monetization programme, from the operator dashboard's own growth data:
+    [{platform, program, note, eligible, headline, requirements: [{label, unit, current, target, pct, remaining, met, tracked}]}].
+    Criteria are the platforms' published ones and vary by country; only measured requirements get a bar."""
+    from hypogeum.dashboard_analytics import get_growth_dashboard  # noqa: PLC0415
+    try:
+        d = get_growth_dashboard(channel_id=channel_id, db_path=_p(db_path))
+        platforms = ((d.get("channels") or [{}])[0].get("monetization") or {}).get("platforms") or {}
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for plat, v in platforms.items():
+        reqs = [{"label": r.get("label"), "unit": r.get("unit"), "current": r.get("current"), "target": r.get("target"),
+                 "pct": min(100.0, float(r.get("pct") or 0)), "remaining": r.get("remaining"), "met": bool(r.get("met")),
+                 "tracked": bool(r.get("tracked", True)), "one_of": bool(r.get("one_of"))} for r in (v.get("requirements") or [])]
+        out.append({"platform": plat, "program": v.get("program"), "note": v.get("note"), "eligible": bool(v.get("eligible")),
+                    "headline": v.get("headline"), "requirements": reqs})
+    return out

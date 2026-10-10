@@ -110,7 +110,7 @@ def test_the_portal_has_no_operator_routes():
                      "/static/<path:filename>", "/notify", "/welcome", "/welcome/keys/<provider>",
                      "/welcome/telegram", "/usage", "/usage.csv",
                      "/channel/<channel_id>/posts", "/channel/<channel_id>/episodes", "/channel/<channel_id>/episodes/<episode_id>",
-                     "/channel/<channel_id>/analytics"}
+                     "/channel/<channel_id>/analytics", "/channel/<channel_id>/revenue"}
 
 
 def test_deliver_link_uses_smtp_only_when_configured_and_never_raises(monkeypatch):
@@ -519,3 +519,82 @@ def test_an_episode_cover_falls_back_to_the_publishers_poster_then_to_a_placehol
     conn.commit()
     conn.close()
     assert "cg-poster-empty" in a.get("/channel/acme_ch/episodes/ep_a1").get_data(as_text=True)                       # nothing at all: a calm placeholder
+
+
+def test_the_revenue_tab_shows_distance_to_each_programme_and_stays_in_the_workspace(shows, monkeypatch):
+    from hypogeum import portal_channel as pc
+    fake = {"channels": [{"monetization": {"platforms": {"youtube": {"program": "YouTube Partner Program", "note": "Criteria vary by country.", "eligible": False,
+            "headline": "20 / 1,000 subscribers — 980 to go.", "requirements": [
+                {"label": "Subscribers", "unit": "subs", "target": 1000, "current": 20, "pct": 2.0, "met": False, "tracked": True, "remaining": 980},
+                {"label": "Watch-hours", "unit": "hours", "target": 4000, "current": 9.7, "pct": 0.2, "met": False, "tracked": True, "one_of": True},
+                {"label": "Untracked thing", "unit": "x", "target": 5, "current": 0, "pct": 0, "met": False, "tracked": False}]}}}}]}
+    import hypogeum.dashboard_analytics as da
+    monkeypatch.setattr(da, "get_growth_dashboard", lambda **k: fake)
+    r = pc.revenue("acme_ch", shows)
+    assert r[0]["program"] == "YouTube Partner Program" and r[0]["requirements"][1]["one_of"] is True
+    a = _login(create_app(shows), shows, "a@acme.com")
+    page = a.get("/channel/acme_ch/revenue").get_data(as_text=True)
+    assert "YouTube Partner Program" in page and "980 to go" in page and "Subscribers" in page and "Untracked thing" not in page and "Not yet" in page
+    assert a.get("/channel/beta_ch/revenue").status_code == 404
+    monkeypatch.setattr(da, "get_growth_dashboard", lambda **k: (_ for _ in ()).throw(RuntimeError("down")))
+    assert "Nothing to measure yet" in a.get("/channel/acme_ch/revenue").get_data(as_text=True)
+
+
+def test_the_workspace_home_sums_views_watch_time_and_live_episodes_across_its_channels(shows, monkeypatch):
+    import hypogeum.dashboard_rollup as dr
+    monkeypatch.setattr(dr, "get_channel_rollup", lambda ch, db_path=None: {"views": 1200, "watch_time_s": 7200, "episodes_published": 3, "videos_live": 9} if ch == "acme_ch" else {})
+    a = _login(create_app(shows), shows, "a@acme.com")
+    page = a.get("/").get_data(as_text=True)
+    assert "1,200" in page and "2.0h" in page and "3 <span" in page and "9 videos live" in page and "1,200 views" in page
+
+
+# --- sign-in must not depend on the main database's write lock -------------------------------------------
+
+def test_the_portal_tables_live_in_their_own_file_so_a_production_run_cannot_block_sign_in(tmp_path, monkeypatch):
+    import sqlite3
+    main = tmp_path / "hypogeum.db"
+    monkeypatch.setattr(db, "_DEFAULT_DB_PATH", main)
+    db.initialize_schema(main)
+    pa._READY.clear()
+    assert pa._auth_path(None) == tmp_path / "portal_auth.db" and pa._auth_path(main) == tmp_path / "portal_auth.db"
+    other = tmp_path / "elsewhere.db"
+    assert pa._auth_path(other) == other                                           # tests and tools keep using their own path
+    # a production run holding the main database's write lock for as long as it likes
+    hog = sqlite3.connect(main, timeout=1, isolation_level=None)
+    hog.execute("BEGIN IMMEDIATE")
+    try:
+        pa.invite("late@acme.com", "acme", "owner", None)
+        tok = pa.request_login_link("late@acme.com", None)
+        sess = pa.consume_login_link(tok, None)
+        assert sess and pa.resolve_session(sess, None)["email"] == "late@acme.com"
+        pa.set_notify(pa.resolve_session(sess, None)["user_id"], False, None)
+        assert pa.workspace_emails("acme", None) == []
+        with pytest.raises(sqlite3.OperationalError):                              # the main database really is write-locked
+            c = sqlite3.connect(main, timeout=0.2)
+            c.execute("BEGIN IMMEDIATE")
+    finally:
+        hog.execute("ROLLBACK")
+        hog.close()
+
+
+def test_users_and_sessions_created_in_the_main_database_before_the_split_are_carried_over(tmp_path, monkeypatch):
+    import sqlite3
+    main = tmp_path / "hypogeum.db"
+    monkeypatch.setattr(db, "_DEFAULT_DB_PATH", main)
+    db.initialize_schema(main)
+    old = sqlite3.connect(main)
+    old.executescript(pa._DDL.replace("notify_email  INTEGER NOT NULL DEFAULT 1", "notify_email INTEGER NOT NULL DEFAULT 1"))
+    old.execute("INSERT INTO portal_users (user_id, email, workspace_id, role, status, created_at, notify_email) VALUES ('u1','old@acme.com','acme','owner','active','2026-10-01',0)")
+    old.execute("INSERT INTO portal_sessions (session_hash, user_id, created_at, expires_at) VALUES ('h1','u1','2026-10-10','2099-01-01')")
+    old.commit()
+    old.close()
+    pa._READY.clear()
+    conn = pa._conn(None)
+    row = conn.execute("SELECT email, notify_email FROM portal_users").fetchone()
+    assert (row["email"], row["notify_email"]) == ("old@acme.com", 0)
+    assert conn.execute("SELECT COUNT(*) FROM portal_sessions").fetchone()[0] == 1
+    conn.close()
+    pa._READY.clear()
+    again = pa._conn(None)                                                         # a second start does not duplicate anything
+    assert again.execute("SELECT COUNT(*) FROM portal_users").fetchone()[0] == 1
+    again.close()

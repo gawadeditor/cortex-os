@@ -26,14 +26,18 @@
     </div>
   </div>
   <div class="stat-card">
-    <div class="stat-lbl">{{ icon('channels') }} Channels</div>
-    <div class="stat-val">{{ channels|length }}</div>
-    <div class="stat-note">in your workspace</div>
+    <div class="stat-lbl">{{ icon('live') }} Views</div>
+    <div class="stat-val">{{ '{:,}'.format(totals.views) }}</div>
+    <div class="stat-note">all-time, across your channels</div>
   </div>
   <div class="stat-card">
-    <div class="stat-lbl">{{ icon('live') }} Published</div>
-    <div class="stat-val">{{ counts.published }}</div>
-    <div class="stat-note">posts live across your platforms</div>
+    <div class="stat-lbl">{{ icon('play') }} Watch time</div>
+    <div class="stat-val">{{ (totals.watch_s / 3600)|round(1) }}h</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-lbl">{{ icon('review') }} Live</div>
+    <div class="stat-val">{{ totals.episodes }} <span style="font-size:14px;font-weight:400;color:var(--muted);">episodes</span></div>
+    <div class="stat-note">{{ totals.videos }} videos live (incl. shorts)</div>
   </div>
   <div class="stat-card">
     <div class="stat-lbl">{{ icon('calendar') }} Scheduled</div>
@@ -48,6 +52,7 @@
   <a href="/channel/{{ c.channel_id }}" class="stat-card" style="text-decoration:none; color:inherit;">
     <div class="stat-lbl">{{ icon('channels') }} Channel</div>
     <div class="stat-val" style="font-size:17px;">{{ c.name }}</div>
+    {% if c.views is not none %}<div class="stat-note">{{ '{:,}'.format(c.views|int) }} views · {{ c.episodes or 0 }} episodes live</div>{% endif %}
     <div class="stat-note" style="margin-top:8px;">
       {% if c.auth.active %}<span class="pill is-good">Production authorized</span> · {{ c.auth.days_left }} days left{% if c.auth.weekly_ceiling_usd %} · up to ${{ c.auth.weekly_ceiling_usd }}/week{% endif %}
       {% else %}<span class="pill is-warn">Waiting for spending authorization</span>{% endif %}

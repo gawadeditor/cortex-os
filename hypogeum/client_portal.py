@@ -249,10 +249,25 @@ def create_app(db_path=None, config=None):
         except Exception:  # noqa: BLE001
             notify_on = True
         pct = 0 if not b["ceiling_usd"] else min(100, round(100 * b["month_spend_usd"] / b["ceiling_usd"]))
+        from hypogeum.dashboard_rollup import get_channel_rollup  # noqa: PLC0415
+        totals = {"views": 0, "watch_s": 0, "episodes": 0, "videos": 0}
+        rolls = {}
+        for ch in chans:
+            try:
+                r = get_channel_rollup(ch, db_path=dbp)
+            except Exception:  # noqa: BLE001
+                continue
+            rolls[ch] = r
+            totals["views"] += r.get("views") or 0
+            totals["watch_s"] += r.get("watch_time_s") or 0
+            totals["episodes"] += r.get("episodes_published") or 0
+            totals["videos"] += r.get("videos_live") or 0
         return render_template("portal/home.html", **shell(user, "home", "Overview"), paused=paused, spend=b["month_spend_usd"],
                                ceiling=b["ceiling_usd"], pct=pct, counts=counts, posts=posts, alerts=alerts, notify=notify_on,
                                setup_total=len(sts),
-                               channels=[{"channel_id": ch, "name": names.get(ch) or ch, "auth": cg.grant_state(ch, dbp)} for ch in chans])
+                               totals=totals,
+                               channels=[{"channel_id": ch, "name": names.get(ch) or ch, "auth": cg.grant_state(ch, dbp),
+                                          "views": (rolls.get(ch) or {}).get("views"), "episodes": (rolls.get(ch) or {}).get("episodes_published")} for ch in chans])
 
     def channel_name(channel_id):
         c = conn()
@@ -296,6 +311,15 @@ def create_app(db_path=None, config=None):
         cover = f"/episode/{episode_id}/thumbnail" if find_cover_path(channel_id, episode_id) else remote_cover(channel_id, episode_id)
         return render_template("portal/channel_episode.html", **shell(user, f"channel:{channel_id}", e["title"], name, channel_id, "episodes"),
                                name=name, e=e, labels=_PROVIDER_LABELS, cover=cover)
+
+    @app.get("/channel/<channel_id>/revenue")
+    def channel_revenue(channel_id):
+        user = need_user()
+        own_channel(user, channel_id)
+        from hypogeum import portal_channel as pc  # noqa: PLC0415
+        name, _ = channel_name(channel_id)
+        return render_template("portal/channel_revenue.html", **shell(user, f"channel:{channel_id}", name, name, channel_id, "revenue"),
+                               name=name, programs=pc.revenue(channel_id, dbp))
 
     @app.get("/channel/<channel_id>/analytics")
     def channel_analytics(channel_id):

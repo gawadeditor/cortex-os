@@ -1,0 +1,32 @@
+{% extends 'portal/_layout.html' %}
+{% from '_icons.html' import icon %}
+{% from '_hero.html' import hero %}
+{% block content %}
+<div class="breadcrumb"><a href="/">Overview</a><span class="breadcrumb-sep">›</span><a href="/channel/{{ channel_id }}">{{ name }}</a><span class="breadcrumb-sep">›</span><span>Revenue</span></div>
+{% call hero(eyebrow=name, title='Revenue',
+             lede='How far this channel is from each platform’s monetization programme. The criteria are the platforms’ own published ones and can vary by country.',
+             meta=[{'label': 'programmes', 'value': programs|length}, {'label': 'eligible', 'value': programs | selectattr('eligible') | list | length}]) %}{% endcall %}
+{% if not programs %}
+<div class="dv-empty">{{ icon('dollar') }}<div class="dv-empty-title">Nothing to measure yet</div><div class="dv-empty-sub">Progress appears once the channel has followers and views on a platform.</div></div>
+{% else %}
+<div style="display:grid;gap:var(--gap);">
+{% for p in programs %}
+<div class="card {{ 'is-good' if p.eligible else '' }}">
+  <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap;">
+    <div><div class="stat-lbl">{{ p.platform | capitalize }}</div><h3 style="margin:2px 0 4px;font-size:16px;">{{ p.program }}</h3></div>
+    <span class="pill {{ 'is-good' if p.eligible else 'is-warn' }}">{{ 'Eligible' if p.eligible else 'Not yet' }}</span>
+  </div>
+  {% if p.headline %}<p style="margin:6px 0 12px;color:var(--text);">{{ p.headline }}</p>{% endif %}
+  {% for r in p.requirements if r.tracked %}
+  <div class="bar-row" style="grid-template-columns:minmax(120px,220px) 1fr 150px;">
+    <span>{{ r.label }}{% if r.one_of %} <span class="muted" style="font-size:11px;">(one of)</span>{% endif %}</span>
+    <div class="bar-track"><i style="width:{{ [r.pct, 1.5 if r.current else 0] | max }}%"></i></div>
+    <span class="t">{{ '{:,}'.format((r.current or 0)|round(1)|float|int if (r.current or 0) >= 100 else (r.current or 0)|round(1)) }} / {{ '{:,}'.format(r.target|int) }}</span>
+  </div>
+  {% endfor %}
+  {% if p.note %}<p class="muted" style="font-size:12px;margin:12px 0 0;">{{ p.note }}</p>{% endif %}
+</div>
+{% endfor %}
+</div>
+{% endif %}
+{% endblock %}

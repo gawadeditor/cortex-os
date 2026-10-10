@@ -69,19 +69,59 @@ def _h(token: str) -> str:
 
 
 _READY: set = set()
+_TABLES = ("portal_users", "portal_login_tokens", "portal_sessions")
+
+
+def _auth_path(db_path) -> Optional[Path]:
+    """Where the portal's own tables live. For the production database that is a SEPARATE file next to it
+    (portal_auth.db): a production run can hold the main database's write lock for many minutes, and a client must
+    still be able to sign in meanwhile. For any explicit other path (tests, tools) it is that path itself."""
+    from hypogeum.db import _DEFAULT_DB_PATH  # noqa: PLC0415
+    default = Path(_DEFAULT_DB_PATH)
+    main = Path(db_path) if db_path else default
+    return main.with_name("portal_auth.db") if main.resolve() == default.resolve() else (Path(db_path) if db_path else None)
+
+
+def _migrate_from_main(auth_conn, main_path: Path) -> None:
+    """One time: the tables used to live in the main database. Copy them over (a read: never blocked by a writer)."""
+    import sqlite3  # noqa: PLC0415
+    if auth_conn.execute("SELECT COUNT(*) FROM portal_users").fetchone()[0]:
+        return
+    try:
+        src = sqlite3.connect(f"file:{main_path}?mode=ro", uri=True, timeout=10)
+    except sqlite3.Error:
+        return
+    try:
+        for t in _TABLES:
+            if not src.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (t,)).fetchone():
+                continue
+            cols = [r[1] for r in auth_conn.execute(f"PRAGMA table_info({t})")]
+            have = {r[1] for r in src.execute(f"PRAGMA table_info({t})")}
+            use = [c for c in cols if c in have]
+            rows = src.execute(f"SELECT {','.join(use)} FROM {t}").fetchall()
+            auth_conn.executemany(f"INSERT OR IGNORE INTO {t} ({','.join(use)}) VALUES ({','.join('?' * len(use))})", rows)
+        auth_conn.commit()
+    except sqlite3.Error:
+        pass
+    finally:
+        src.close()
 
 
 def _conn(db_path):
-    """A connection that waits for the worker's writes instead of failing ("database is locked" turned a sign-in
-    request into a 500 while every process was restarting). The schema is ensured once per process and database."""
-    from hypogeum.db import get_connection  # noqa: PLC0415
-    c = get_connection(Path(db_path) if db_path else None)
+    """A connection that waits for other writers instead of failing. The schema is ensured once per process and
+    database; the portal tables are in their own file in production (see _auth_path)."""
+    from hypogeum.db import _DEFAULT_DB_PATH, get_connection  # noqa: PLC0415
+    path = _auth_path(db_path)
+    c = get_connection(path)
     c.execute("PRAGMA busy_timeout = 20000")
-    key = str(db_path)
+    key = str(path)
     if key not in _READY:
         c.executescript(_DDL)
         if "notify_email" not in {r[1] for r in c.execute("PRAGMA table_info(portal_users)")}:   # tables from Phase 6
             c.execute("ALTER TABLE portal_users ADD COLUMN notify_email INTEGER NOT NULL DEFAULT 1")
+        main = Path(db_path) if db_path else Path(_DEFAULT_DB_PATH)
+        if path is not None and Path(path).resolve() != main.resolve():
+            _migrate_from_main(c, main)
         _READY.add(key)
     return c
 

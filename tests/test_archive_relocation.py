@@ -284,3 +284,88 @@ def test_rollback_on_move_failure(dbp, tmp_path, monkeypatch):
     assert (ep_dir / "video" / "sc_s01.mp4").exists()
     assert (ep_dir / "video" / "sc_s02.mp4").exists()
     assert (ep_dir / "thumbnails" / "main.jpg").exists()
+
+
+def _seed_relocated(dbp, tmp_path, episode_id):
+    """An episode already relocated once, with a fresh local copy re-created."""
+    from hypogeum import archive_relocation as rl
+    work = tmp_path / "episodes"
+    work.mkdir(exist_ok=True)
+    ep_dir = _seed_episode_dir(work, episode_id)
+    set_factory_setting("archive_root", str(tmp_path / "arch"), db_path=dbp)
+    _mark_published(dbp, episode_id)
+    conn = get_connection(dbp)
+    try:
+        insert_archive_index_entry(
+            conn, archive_id=f"lo_{episode_id}", asset_id="x", episode_id=episode_id,
+            asset_type="clip", provider="muapi", archived_at="2026-08-01T00:00:00+00:00",
+            file_path=f"episodes/{episode_id}/video/sc_s01.mp4")
+        conn.commit()
+    finally:
+        conn.close()
+    first = rl.relocate_episode_assets(episode_id, db_path=dbp, output_dir=ep_dir,
+                                       catalog_dir=tmp_path / "c")
+    assert first["verdict"] == "RELOCATED" and not ep_dir.exists()
+    # a later repair re-creates the working dir: same clip + a changed json
+    _seed_episode_dir(work, episode_id)
+    (ep_dir / "final_render_package.json").write_text('{"repaired": true}')
+    return ep_dir, first["dest_dir"]
+
+
+def _age(ep_dir, seconds=7 * 3600):
+    import os, time
+    old = time.time() - seconds
+    for p in ep_dir.rglob("*"):
+        os.utime(p, (old, old))
+
+
+class TestLocalLeftoversOfArchivedEpisode:
+    def test_merged_into_archive_and_local_removed(self, dbp, tmp_path):
+        from pathlib import Path
+        from hypogeum import archive_relocation as rl
+        ep_dir, dest = _seed_relocated(dbp, tmp_path, "ep_left")
+        _age(ep_dir)
+        rec = rl.relocate_episode_assets("ep_left", db_path=dbp, output_dir=ep_dir,
+                                         catalog_dir=tmp_path / "c")
+        assert rec["verdict"] == "RELOCATED"
+        assert not ep_dir.exists()
+        dest = Path(dest)
+        assert (dest / "final_render_package.json").read_text() == '{"repaired": true}'
+        superseded = list(dest.glob("final_render_package.json.superseded_*"))
+        assert len(superseded) == 1 and superseded[0].read_text() == "{}"
+        assert (dest / "video" / "sc_s01.mp4").read_bytes() == b"x" * 100
+        assert not list((dest / "video").glob("*.superseded_*"))
+
+    def test_recently_modified_leftovers_are_left_alone(self, dbp, tmp_path):
+        from hypogeum import archive_relocation as rl
+        ep_dir, _ = _seed_relocated(dbp, tmp_path, "ep_fresh")
+        rec = rl.relocate_episode_assets("ep_fresh", db_path=dbp, output_dir=ep_dir,
+                                         catalog_dir=tmp_path / "c")
+        assert rec["verdict"] == "SKIPPED"
+        assert (ep_dir / "final_render_package.json").exists()
+
+    def test_active_run_blocks_merge(self, dbp, tmp_path):
+        from hypogeum import archive_relocation as rl
+        ep_dir, _ = _seed_relocated(dbp, tmp_path, "ep_busy")
+        _age(ep_dir)
+        conn = get_connection(dbp)
+        try:
+            conn.execute("INSERT INTO runs (run_id, episode_id, started_at, status) "
+                         "VALUES ('r1', 'ep_busy', '2026-10-06T00:00:00+00:00', 'running')")
+            conn.commit()
+        finally:
+            conn.close()
+        rec = rl.relocate_episode_assets("ep_busy", db_path=dbp, output_dir=ep_dir,
+                                         catalog_dir=tmp_path / "c")
+        assert rec["verdict"] == "SKIPPED"
+        assert ep_dir.exists()
+
+    def test_sweep_finds_relocated_episode_with_local_files(self, dbp, tmp_path, monkeypatch):
+        from hypogeum import archive_relocation as rl
+        ep_dir, _ = _seed_relocated(dbp, tmp_path, "ep_sweep_left")
+        monkeypatch.setattr(rl, "_WORKING_EPISODES_DIR", ep_dir.parent)
+        assert rl.find_pending_published_episodes(db_path=dbp) == [("ep_sweep_left", "hypogeum")]
+        import shutil
+        shutil.rmtree(ep_dir)
+        assert rl.find_pending_published_episodes(db_path=dbp) == []
+

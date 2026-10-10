@@ -48,6 +48,14 @@ _ARCHIVE_FAIL_LIMIT = 3
 _ARCHIVE_BACKOFF_SECONDS = 1800
 _archive_backoff = {"consecutive_fail": 0, "skip_until": 0.0, "last_reason": ""}
 
+# Local files of an already-archived episode are only merged into the archive
+# once nothing has touched them for this long (a repair may still be writing).
+_LEFTOVER_QUIET_SECONDS = 6 * 3600
+
+# An episode with platforms still to be released keeps its local files this long after its
+# first platform succeeded (see find_pending_published_episodes).
+_RELEASE_GRACE_SECONDS = 12 * 3600
+
 _JSONL_CATALOGS = (
     "asset_catalog.jsonl",
     "clip_catalog.jsonl",
@@ -133,6 +141,38 @@ def _rows_already_relocated(episode_id: str, db_path: Optional[Path]) -> Optiona
         return None
 
 
+def _leftovers_busy_reason(
+    episode_id: str, src: Path, db_path: Optional[Path]
+) -> Optional[str]:
+    """Why local leftovers of an archived episode must not be merged yet, or
+    None. A run still working on the episode, or any file touched within
+    _LEFTOVER_QUIET_SECONDS, means a repair may be writing there right now."""
+    import time as _t
+    try:
+        from hypogeum.db import get_connection
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM runs WHERE episode_id = ? "
+                "AND status IN ('running', 'queued', 'paused')",
+                (episode_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row and row[0]:
+            return "a run is still active on this episode"
+    except Exception:  # noqa: BLE001
+        return "could not check for active runs"
+    cutoff = _t.time() - _LEFTOVER_QUIET_SECONDS
+    for p in src.rglob("*"):
+        try:
+            if p.is_file() and p.stat().st_mtime > cutoff:
+                return f"recently modified ({p.name})"
+        except OSError:
+            continue
+    return None
+
+
 def _move_tree(src: Path, dst: Path) -> tuple[list[tuple[Path, Path]], int]:
     """Move every file under src into the mirrored location under dst.
     Returns (moved_pairs, bytes_moved). Raises on the first failure so the
@@ -141,14 +181,27 @@ def _move_tree(src: Path, dst: Path) -> tuple[list[tuple[Path, Path]], int]:
     Uses shutil.copy (not copy2) as the cross-device copy function: network
     shares (SMB/AFP) reject the metadata/xattr copy copy2 attempts and raise
     OSError(EINVAL). Content + basic mode are preserved; timestamps are not.
+
+    A file already in the archive is never silently overwritten: a
+    byte-identical copy just drops the local file; a differing one is kept
+    beside it as ``<name>.superseded_<UTC stamp>`` before the local (newer)
+    file takes its place.
     """
+    import filecmp
     moved: list[tuple[Path, Path]] = []
     total = 0
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     for path in sorted(p for p in src.rglob("*") if p.is_file()):
         rel = path.relative_to(src)
         target = dst / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         size = path.stat().st_size
+        if target.exists():
+            if target.stat().st_size == size and filecmp.cmp(path, target, shallow=False):
+                path.unlink()
+                total += size
+                continue
+            shutil.copy(str(target), str(target.with_name(f"{target.name}.superseded_{stamp}")))
         shutil.move(str(path), str(target), copy_function=shutil.copy)
         moved.append((path, target))
         total += size
@@ -522,6 +575,43 @@ def relocate_episode_assets(
         log.info("archive_relocation_noop", episode_id=episode_id, verdict=rec["verdict"])
         return rec
 
+    if already:
+        # Leftovers: the episode was archived (catalog already points at the
+        # archive) but files reappeared locally — e.g. a repair re-rendered it
+        # after relocation. Nothing used to sweep these, so they stayed on the
+        # laptop forever. Merge them into the archive copy and drop the local
+        # tree; the catalog is already correct, so it is not touched.
+        busy = _leftovers_busy_reason(episode_id, src, db_path)
+        if busy:
+            rec["verdict"] = "SKIPPED"
+            rec["warnings"].append(f"local leftovers not merged yet: {busy}")
+            return rec
+        if dry_run:
+            files = [p for p in src.rglob("*") if p.is_file()]
+            rec["files_moved"] = len(files)
+            rec["bytes_moved"] = sum(p.stat().st_size for p in files)
+            rec["verdict"] = "RELOCATED"
+            rec["warnings"].append("dry-run — nothing moved")
+            return rec
+        try:
+            dst.mkdir(parents=True, exist_ok=True)
+            moved, total = _move_tree(src, dst)
+            rec["files_moved"] = len(moved)
+            rec["bytes_moved"] = total
+        except Exception as exc:  # noqa: BLE001
+            # No rollback: every file already handled is safely in the
+            # archive; whatever is left stays local for the next sweep.
+            rec["verdict"] = "FAILED"
+            rec["failures"].append(f"leftover merge failed: {exc}")
+            log.warn("archive_leftovers_failed", episode_id=episode_id, error=str(exc))
+            return rec
+        shutil.rmtree(src, ignore_errors=True)
+        rec["relocated"] = True
+        rec["verdict"] = "RELOCATED"
+        log.info("archive_leftovers_merged", episode_id=episode_id,
+                 files=rec["files_moved"], bytes=rec["bytes_moved"], dest=str(dst))
+        return rec
+
     if dry_run:
         files = [p for p in src.rglob("*") if p.is_file()]
         rec["files_moved"] = len(files)
@@ -589,7 +679,8 @@ def relocate_episode_assets(
 def find_pending_published_episodes(db_path: Optional[Path] = None) -> list[tuple[str, str]]:
     """
     Episodes with a succeeded publication whose archive_index rows are not all
-    relocated yet. Returns [(episode_id, channel_id), ...].
+    relocated yet, or that are relocated but have files back in the working
+    dir. Returns [(episode_id, channel_id), ...].
 
     Catches the scheduled-release case: at pipeline end the publication is
     still 'scheduled', so the pipeline's own relocation step no-ops; once the
@@ -611,14 +702,34 @@ def find_pending_published_episodes(db_path: Optional[Path] = None) -> list[tupl
             JOIN archive_index ai ON ai.episode_id = pi.episode_id
             WHERE pi.status = 'succeeded'
             GROUP BY pi.episode_id
-            HAVING total > 0 AND moved < total
+            HAVING total > 0
             """
         ).fetchall()
     except Exception:  # noqa: BLE001
         return []
     finally:
         conn.close()
-    return [(r["episode_id"], r["channel_id"] or "hypogeum") for r in rows]
+    # Not yet moved, or fully moved but files reappeared in the working dir
+    # (a post-archive repair) — the latter would otherwise stay local forever.
+    out = []
+    for r in rows:
+        if r["moved"] < r["total"] or _has_local_files(_WORKING_EPISODES_DIR / r["episode_id"]):
+            # Never move an episode's files while platforms are still to be released:
+            # the release needs them (2026-10-10). After the grace window the operator
+            # is alerted about the partial release instead (operator_alerts.check_partial_releases).
+            from hypogeum.release_completeness import incomplete_release
+            inc = incomplete_release(r["episode_id"], r["channel_id"] or "hypogeum", db_path=db_path)
+            if inc and inc["age_s"] < _RELEASE_GRACE_SECONDS:
+                continue
+            out.append((r["episode_id"], r["channel_id"] or "hypogeum"))
+    return out
+
+
+def _has_local_files(path: Path) -> bool:
+    try:
+        return path.is_dir() and any(p.is_file() for p in path.rglob("*"))
+    except OSError:
+        return False
 
 
 def relocate_pending_published_episodes(

@@ -105,7 +105,8 @@ def test_the_portal_has_no_operator_routes():
     app = create_app(None)
     rules = {r.rule for r in app.url_map.iter_rules()}
     assert rules <= {"/login", "/auth/<token>", "/logout", "/", "/channel/<channel_id>", "/episode/<episode_id>/thumbnail",
-                     "/static/<path:filename>", "/notify"}
+                     "/static/<path:filename>", "/notify", "/welcome", "/welcome/keys/<provider>",
+                     "/welcome/telegram"}
 
 
 def test_deliver_link_uses_smtp_only_when_configured_and_never_raises(monkeypatch):
@@ -239,3 +240,73 @@ def test_email_templates_are_multipart_branded_and_escape_their_input():
         assert subject and text and "#f0a838" in html and "Cortex" in html and "<script>" not in html
     assert "&lt;b&gt;Acme&lt;/b&gt;" in et.invitation("<b>Acme</b>", "https://x/auth/t", "https://x")[2]
     assert "Resolved" in et.alert("✅ Back to normal\nfixed", "https://x")[2]
+
+
+# --- onboarding wizard ----------------------------------------------------------------------------------
+
+def test_probe_distinguishes_a_rejected_key_from_a_check_that_could_not_run():
+    from hypogeum import portal_setup as ps
+    assert ps.probe("openrouter", "k", lambda url, h, timeout=10: 200) == "ok"
+    assert ps.probe("elevenlabs", "k", lambda url, h, timeout=10: 401) == "invalid"
+    assert ps.probe("muapi", "k", lambda url, h, timeout=10: 500) == "unknown"
+    assert ps.probe("perplexity", "k", lambda *a, **k: 200) == "unknown"          # no cheap check: verified on first use
+    def boom(*a, **k): raise OSError("net")
+    assert ps.probe("openrouter", "k", boom) == "unknown"
+
+
+def test_a_rejected_key_is_never_stored_and_a_good_one_lands_in_the_workspace_vault(env):
+    from hypogeum import portal_setup as ps, workspace_keys as wk
+    ps._ATTEMPTS.clear()
+    bad = ps.save_key("acme", "openrouter", "sk-or-" + "x" * 30, env, http_get=lambda u, h, timeout=10: 401)
+    assert bad["ok"] is False and wk.workspace_key("openrouter", "acme", db_path=env) is None
+    assert ps.save_key("acme", "openrouter", "short", env)["ok"] is False and ps.save_key("acme", "nope", "k" * 30, env)["ok"] is False
+    good = ps.save_key("acme", "openrouter", "sk-or-" + "y" * 30, env, http_get=lambda u, h, timeout=10: 200)
+    assert good["ok"] and good["status"] == "verified"
+    assert wk.workspace_key("openrouter", "acme", db_path=env) == "sk-or-" + "y" * 30
+    assert wk.workspace_key("openrouter", "beta", db_path=env) is None                      # the other tenant sees nothing
+    assert ps.key_status("acme", env)["openrouter"] is True and ps.key_status("beta", env)["openrouter"] is False
+    unsure = ps.save_key("acme", "perplexity", "pplx-" + "z" * 30, env)
+    assert unsure["ok"] and unsure["status"] == "saved"
+
+
+def test_attempts_are_rate_limited(env):
+    from hypogeum import portal_setup as ps
+    ps._ATTEMPTS.clear()
+    for _ in range(10):
+        ps.save_key("acme", "openrouter", "k" * 30, env, http_get=lambda u, h, timeout=10: 401)
+    assert "Too many" in ps.save_key("acme", "openrouter", "k" * 30, env, http_get=lambda u, h, timeout=10: 200)["message"]
+
+
+def test_steps_follow_the_real_state(env, monkeypatch):
+    from hypogeum import client_grants as cg, portal_setup as ps
+    ps._ATTEMPTS.clear()
+    monkeypatch.setattr(cg, "grant_state", lambda ch, db=None, now=None: _fake_state(False))
+    st = {s["key"]: s["done"] for s in ps.steps("acme", env)}
+    assert st == {"welcome": True, "keys": False, "alerts": True, "publishing": False, "authorization": False}   # email is on by default
+    for prov in ps.PROVIDERS:
+        ps.save_key("acme", prov, f"{prov}-" + "k" * 30, env, http_get=lambda u, h, timeout=10: 200)
+    monkeypatch.setattr(cg, "grant_state", lambda ch, db=None, now=None: _fake_state(True))
+    st = {s["key"]: s["done"] for s in ps.steps("acme", env)}
+    assert st["keys"] and st["authorization"] and not st["publishing"]
+
+
+def test_the_wizard_page_owner_only_forms_and_cross_origin_posts_are_refused(env, monkeypatch):
+    from hypogeum import portal_setup as ps
+    ps._ATTEMPTS.clear()
+    monkeypatch.setattr(ps, "_http_get", lambda url, headers, timeout=10: 200)
+    app = create_app(env)
+    assert app.test_client().get("/welcome").status_code == 302                           # needs a session
+    pa.invite("view@acme.com", "acme", "viewer", env)
+    v = _login(app, env, "view@acme.com")
+    page = v.get("/welcome").get_data(as_text=True)
+    assert "Connect your keys" in page and "type='password'" not in page                  # a viewer cannot enter keys
+    assert v.post("/welcome/keys/openrouter", data={"key": "k" * 30}).status_code == 403
+    c = _login(app, env, "a@acme.com")
+    assert "type='password'" in c.get("/welcome").get_data(as_text=True)
+    assert c.post("/welcome/keys/openrouter", data={"key": "k" * 30}, headers={"Origin": "https://evil.example"}).status_code == 403
+    r = c.post("/welcome/keys/openrouter", data={"key": "sk-or-" + "q" * 30})
+    assert r.status_code == 302 and r.headers["Location"].endswith("/welcome?k=openrouter&r=verified")
+    assert "OpenRouter connected and verified." in c.get("/welcome?k=openrouter&r=verified").get_data(as_text=True)
+    assert "<script>" not in c.get("/welcome?k=<script>&r=<script>").get_data(as_text=True)
+    assert c.post("/welcome/keys/unknown", data={"key": "k" * 30}).status_code == 404
+    assert "Continue setup" in c.get("/").get_data(as_text=True)                          # banner on the home page

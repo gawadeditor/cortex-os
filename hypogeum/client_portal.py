@@ -76,6 +76,16 @@ input[type=email]:focus{border-color:var(--accent)}
 .btn:hover{transform:translateY(-1px);box-shadow:0 8px 24px -8px rgba(240,168,56,.55)}
 .btn.ghost{background:transparent;color:var(--muted);border-color:var(--border-strong);font-size:13px;padding:6px 12px}.btn.ghost:hover{color:var(--text);box-shadow:none}
 .center{max-width:460px;margin:9vh auto 0}
+.steps{display:grid;gap:14px}.step{display:grid;grid-template-columns:44px 1fr;gap:16px;align-items:start}
+.num{width:36px;height:36px;border-radius:99px;border:1px solid var(--border-strong);display:flex;align-items:center;justify-content:center;font-weight:700;color:var(--muted);background:var(--surface)}
+.num.done{background:var(--good-bg);border-color:var(--good);color:var(--good)}.num.now{border-color:var(--accent);color:var(--accent);background:var(--accent-bg)}
+.step h3{margin:2px 0 4px;font-size:17px;letter-spacing:-.01em}.step p{margin:0;color:var(--muted);font-size:14px}
+.keyrow{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;margin-top:14px;padding-top:14px;border-top:1px solid var(--border)}
+.keyrow b{font-size:14px}.keyrow small{display:block;color:var(--muted);font-size:12.5px}
+.keyrow form{display:flex;gap:8px;grid-column:1/-1}.keyrow input[type=password]{flex:1;font:inherit;padding:9px 12px;border-radius:var(--radius-sm);border:1px solid var(--border-strong);background:var(--surface);color:var(--text)}
+.msg{border:1px solid var(--good);background:var(--good-bg);color:#c9f0d4;border-radius:var(--radius-sm);padding:10px 14px;margin:0 0 16px;font-size:14px}.msg.bad{border-color:var(--critical);background:var(--critical-bg);color:#ffd7d3}
+.banner{display:flex;gap:14px;align-items:center;justify-content:space-between;border:1px solid var(--accent-line);background:var(--accent-bg);border-radius:var(--radius);padding:14px 18px;margin-bottom:8px}
+.progress{height:6px;background:var(--border);border-radius:99px;overflow:hidden;margin:14px 0 26px}.progress i{display:block;height:100%;background:linear-gradient(90deg,var(--accent-line),var(--accent))}
 @media(max-width:600px){main{padding:24px 16px 70px}h1{font-size:25px}input[type=email]{min-width:0;width:100%;margin-bottom:10px}.cards{grid-template-columns:repeat(2,1fr)}}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
 """
@@ -109,6 +119,13 @@ def create_app(db_path=None, config=None):
         if u is None:
             abort(redirect("/login"))
         return u
+
+    @app.before_request
+    def _same_origin_posts():
+        if request.method == "POST":                       # the cookie is SameSite=Lax; this is the second lock
+            origin = request.headers.get("Origin")
+            if origin and origin.split("://", 1)[-1].split("/", 1)[0] != request.host:
+                abort(403)
 
     @app.after_request
     def _headers(resp):
@@ -170,6 +187,80 @@ def create_app(db_path=None, config=None):
                         secure=secure_cookie, samesite="Lax")
         return resp
 
+    _MSGS = {"verified": "connected and verified.", "saved": "saved. It will be checked the first time it is used."}
+
+    @app.get("/welcome")
+    def welcome():
+        return render_welcome(need_user(), request.args.get("k"), request.args.get("r"), None)
+
+    def render_welcome(user, k, r, tg_link):
+        from hypogeum import portal_setup as ps  # noqa: PLC0415
+        sts = ps.steps(user["workspace_id"], db_path)
+        keys = ps.key_status(user["workspace_id"], db_path)
+        done = sum(1 for x in sts if x["done"])
+        first_open = next((x["n"] for x in sts if not x["done"]), None)
+        owner = user["role"] == "owner"
+        body = "<h1>Let’s get you set up</h1><p class='sub'>Your keys stay yours: they are stored encrypted and are never shown again.</p>"
+        body += "<div class='progress'><i style='width:" + str(round(100 * done / len(sts))) + "%'></i></div>"
+        if k in ps.PROVIDERS and r in ("verified", "saved"):
+            body += "<div class='msg'>" + _esc(ps.PROVIDERS[k]["label"]) + " " + _MSGS[r] + "</div>"
+        elif k in ps.PROVIDERS and r == "invalid":
+            body += "<div class='msg bad'>" + _esc(ps.PROVIDERS[k]["label"]) + " rejected that key. Check it and try again.</div>"
+        elif r == "limit":
+            body += "<div class='msg bad'>Too many attempts. Please try again in an hour.</div>"
+        body += "<div class='steps'>"
+        for x in sts:
+            cls = "done" if x["done"] else ("now" if x["n"] == first_open else "")
+            inner = "<h3>" + _esc(x["title"]) + "</h3><p>" + _esc(x["detail"]) + "</p>"
+            if x["key"] == "keys" and owner:
+                for pk, meta in ps.PROVIDERS.items():
+                    state = ("<span class='pill published'>Connected</span>" if keys[pk] else "<span class='pill'>Not connected</span>")
+                    inner += ("<div class='keyrow'><div><b>" + _esc(meta["label"]) + "</b><small>" + _esc(meta["role"]) + " · " +
+                              _esc(meta["where"]) + "</small></div>" + state +
+                              "<form method='post' action='/welcome/keys/" + pk + "' autocomplete='off'>"
+                              "<input type='password' name='key' placeholder='Paste your " + _esc(meta["label"]) + " key' required autocomplete='off'>"
+                              "<button class='btn' type='submit'>" + ("Replace" if keys[pk] else "Save &amp; test") + "</button></form></div>")
+            if x["key"] == "alerts":
+                if tg_link:
+                    inner += ("<p style='margin-top:12px'><a class='btn' href='" + _esc(tg_link) + "' target='_blank' rel='noopener noreferrer'>"
+                              "Open Telegram and press Start</a></p><p class='when'>The link works once and expires in 30 minutes.</p>")
+                elif owner:
+                    inner += ("<form method='post' action='/welcome/telegram' style='margin-top:12px'><button class='btn ghost' type='submit'>"
+                              "Connect Telegram</button></form><p class='when' style='margin-top:8px'>Email alerts can be turned on or off from "
+                              "<a href='/'>your home page</a>.</p>")
+            if x["key"] == "authorization" and not x["done"]:
+                inner += "<p class='when' style='margin-top:8px'>Nothing for you to do here. We will email you when it is done.</p>"
+            body += ("<div class='panel step'><div class='num " + cls + "'>" + ("&#10003;" if x["done"] else str(x["n"])) + "</div><div>"
+                     + inner + "</div></div>")
+        body += "</div><p style='margin-top:28px'><a href='/'>Go to my channels →</a></p>"
+        return page("Set up", body, user)
+
+    @app.post("/welcome/keys/<provider>")
+    def welcome_key(provider):
+        user = need_user()
+        if user["role"] != "owner":
+            abort(403)
+        from hypogeum import portal_setup as ps  # noqa: PLC0415
+        if provider not in ps.PROVIDERS:
+            abort(404)
+        res = ps.save_key(user["workspace_id"], provider, request.form.get("key", ""), db_path, actor=user["email"])
+        code = res["status"] if res["ok"] else ("limit" if "Too many" in res["message"] else "invalid")
+        return redirect(f"/welcome?k={provider}&r={code}")
+
+    @app.post("/welcome/telegram")
+    def welcome_telegram():
+        user = need_user()
+        if user["role"] != "owner":
+            abort(403)
+        from hypogeum import alert_recipients as ar  # noqa: PLC0415
+        try:
+            link = ar.create_link(user["workspace_id"], db_path=db_path).get("url")
+        except Exception:  # noqa: BLE001
+            link = None
+        if not link:
+            return redirect("/welcome")
+        return render_welcome(user, None, None, link)
+
     @app.post("/notify")
     def notify():
         user = need_user()
@@ -205,7 +296,17 @@ def create_app(db_path=None, config=None):
                 names[r[0]] = r[1]
         except Exception:  # noqa: BLE001
             pass
-        body = "<h1>Your channels</h1><p class='sub'>Everything we are producing and publishing for you.</p><h2>Channels</h2>"
+        body = ""
+        try:
+            from hypogeum import portal_setup as ps  # noqa: PLC0415
+            sts = ps.steps(user["workspace_id"], db_path)
+            left = sum(1 for x in sts if not x["done"])
+            if left and user["role"] == "owner":
+                body += ("<div class='banner'><div><b>Finish setting up</b><div class='sub'>" + str(len(sts) - left) + " of " + str(len(sts)) +
+                         " steps done.</div></div><a class='btn' href='/welcome'>Continue setup</a></div>")
+        except Exception:  # noqa: BLE001
+            pass
+        body += "<h1>Your channels</h1><p class='sub'>Everything we are producing and publishing for you.</p><h2>Channels</h2>"
         chans = "".join("<a class='panel chan' href='/channel/" + _esc(c) + "'><span class='name'>" + _esc(names.get(c) or c) +
                         "</span><div style='margin-top:8px'>" + auth_line(c) + "</div><span class='go'>View posts →</span></a>" for c in channels)
         body += "<div class='grid'>" + (chans or "<div class='ok'>No channels yet.</div>") + "</div>"

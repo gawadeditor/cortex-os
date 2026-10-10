@@ -1,0 +1,108 @@
+"""tests/test_client_portal.py — Phase 6: who gets in, and that tenants never see each other."""
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+import hypogeum.db as db
+from hypogeum import portal_auth as pa
+from hypogeum import workspaces as ws
+from hypogeum.client_portal import create_app
+
+
+@pytest.fixture()
+def env(tmp_path):
+    p = tmp_path / "portal.db"
+    db.initialize_schema(p)
+    ws.create_workspace("Platform", workspace_id="plat", kind="platform_owner", db_path=p)
+    ws.create_workspace("Acme", workspace_id="acme", db_path=p)
+    ws.create_workspace("Beta", workspace_id="beta", db_path=p)
+    ws.assign("channel", "acme_ch", "acme", db_path=p)
+    ws.assign("channel", "beta_ch", "beta", db_path=p)
+    ws.assign("channel", "plat_ch", "plat", db_path=p)
+    pa.invite("a@acme.com", "acme", db_path=p)
+    pa.invite("b@beta.com", "beta", db_path=p)
+    return p
+
+
+def _login(app, p, email):
+    tok = pa.request_login_link(email, p)
+    c = app.test_client()
+    r = c.get(f"/auth/{tok}")
+    assert r.status_code == 302
+    return c
+
+
+def test_everything_needs_a_session(env):
+    c = create_app(env).test_client()
+    for url in ("/", "/channel/acme_ch", "/episode/ep1/thumbnail"):
+        r = c.get(url)
+        assert r.status_code == 302 and r.headers["Location"].endswith("/login")
+    assert c.get("/login").status_code == 200
+
+
+def test_a_link_works_once_expires_and_unknown_emails_get_nothing(env):
+    tok = pa.request_login_link("a@acme.com", env)
+    assert pa.consume_login_link(tok, env) is not None
+    assert pa.consume_login_link(tok, env) is None                                   # single use
+    old = pa.request_login_link("a@acme.com", env, now=datetime.now(timezone.utc) - timedelta(minutes=16))
+    assert pa.consume_login_link(old, env) is None                                   # expired
+    assert pa.request_login_link("nobody@x.com", env) is None and pa.request_login_link("not an email", env) is None
+    app = create_app(env)
+    known = app.test_client().post("/login", data={"email": "a@acme.com"})
+    unknown = app.test_client().post("/login", data={"email": "ghost@x.com"})
+    assert known.status_code == unknown.status_code == 200 and known.data == unknown.data   # no enumeration
+
+
+def test_login_requests_are_rate_limited(env):
+    got = [pa.request_login_link("a@acme.com", env) for _ in range(pa.MAX_LINKS_PER_HOUR + 2)]
+    assert sum(1 for t in got if t) == pa.MAX_LINKS_PER_HOUR
+
+
+def test_a_client_sees_only_their_own_channels_and_others_are_404(env):
+    app = create_app(env)
+    a, b = _login(app, env, "a@acme.com"), _login(app, env, "b@beta.com")
+    home_a = a.get("/").get_data(as_text=True)
+    assert "acme_ch" in home_a and "beta_ch" not in home_a and "plat_ch" not in home_a
+    assert "beta_ch" in b.get("/").get_data(as_text=True)
+    assert a.get("/channel/beta_ch").status_code == 404 and a.get("/channel/plat_ch").status_code == 404
+    assert a.get("/channel/does_not_exist").status_code == 404                      # same as "not yours"
+    assert b.get("/channel/acme_ch").status_code == 404
+
+
+def test_episode_cover_is_scoped_to_the_workspace(env):
+    conn = db.get_connection(env)
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("INSERT INTO runs (run_id, episode_id, started_at, status, channel_id) VALUES ('r1','ep_beta','2026-10-10','completed','beta_ch')")
+    conn.commit()
+    conn.close()
+    app = create_app(env)
+    assert _login(app, env, "a@acme.com").get("/episode/ep_beta/thumbnail").status_code == 404
+    assert _login(app, env, "a@acme.com").get("/episode/unknown/thumbnail").status_code == 404
+
+
+def test_logout_disable_and_session_expiry_end_access(env):
+    app = create_app(env)
+    c = _login(app, env, "a@acme.com")
+    assert c.get("/").status_code == 200
+    c.post("/logout")
+    assert c.get("/").status_code == 302
+    c2 = _login(app, env, "a@acme.com")
+    pa.disable("a@acme.com", env)
+    assert c2.get("/").status_code == 302                                           # disabled: session is gone
+    assert pa.request_login_link("a@acme.com", env) is None
+    sess = pa.consume_login_link(pa.request_login_link("b@beta.com", env), env)
+    assert pa.resolve_session(sess, env, now=datetime.now(timezone.utc) + timedelta(days=8)) is None
+
+
+def test_one_email_cannot_belong_to_two_workspaces(env):
+    with pytest.raises(ValueError):
+        pa.invite("a@acme.com", "beta", db_path=env)
+
+
+def test_the_portal_has_no_operator_routes():
+    app = create_app(None)
+    rules = {r.rule for r in app.url_map.iter_rules()}
+    assert rules <= {"/login", "/auth/<token>", "/logout", "/", "/channel/<channel_id>", "/episode/<episode_id>/thumbnail",
+                     "/static/<path:filename>"}

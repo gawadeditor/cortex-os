@@ -693,6 +693,16 @@ class Config:
         # POSTIZ_WEBHOOK_SECRET: the secret path segment of the Postiz webhook receiver
         # (hypogeum/postiz_webhook.py -- Postiz signs nothing, so the URL itself is the credential). Unset = the
         # receiver refuses every request.
+        # Client portal (hypogeum/client_portal.py): sign-in links are emailed over SMTP when PORTAL_SMTP_HOST is set
+        # (otherwise the operator hands a link over with scripts/workspaces.py login-link). PORTAL_COOKIE_SECURE must
+        # be true once the portal is served over HTTPS; PORTAL_BASE_URL is the public address used inside the links.
+        self.PORTAL_SMTP_HOST = _get_optional("PORTAL_SMTP_HOST")
+        self.PORTAL_SMTP_PORT = _get_int("PORTAL_SMTP_PORT", 587)
+        self.PORTAL_SMTP_USER = _get_optional("PORTAL_SMTP_USER")
+        self.PORTAL_SMTP_PASSWORD = _get_optional("PORTAL_SMTP_PASSWORD")
+        self.PORTAL_SMTP_FROM = _get_optional("PORTAL_SMTP_FROM")
+        self.PORTAL_BASE_URL = _get_optional("PORTAL_BASE_URL")
+        self.PORTAL_COOKIE_SECURE = _get_bool("PORTAL_COOKIE_SECURE", default=False)
         self.POSTIZ_WEBHOOK_SECRET = _get_optional("POSTIZ_WEBHOOK_SECRET", "")
         # COVERAGE_AUTO_STRETCH_MAX_DEFICIT_SECONDS (operator decision 2026-10-10): a beat that is still short
         # after the 1.10x editorial speed-up AND after extra-clip generation, by LESS than this many seconds,

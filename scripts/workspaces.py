@@ -89,6 +89,15 @@ def main() -> int:
     k.add_argument("provider", choices=["openrouter", "muapi", "elevenlabs", "perplexity", "anthropic", "zernio", "postiz"])
     ks = sub.add_parser("keys")
     ks.add_argument("workspace_id")
+    iv = sub.add_parser("invite", help="allow an email into a workspace's client portal")
+    iv.add_argument("workspace_id")
+    iv.add_argument("email")
+    iv.add_argument("--role", default="owner", choices=["owner", "viewer"])
+    ll = sub.add_parser("login-link", help="print a one-time portal sign-in link (valid 15 minutes) to hand over")
+    ll.add_argument("email")
+    ll.add_argument("--base-url", default="http://127.0.0.1:5003")
+    off = sub.add_parser("disable-user", help="lock an email out of the portal and end its sessions")
+    off.add_argument("email")
     args = ap.parse_args()
 
     if args.cmd == "list":
@@ -105,6 +114,20 @@ def main() -> int:
         return 0
     if args.cmd == "create":
         print(ws.create_workspace(args.name, workspace_id=args.id, language=args.language, db_path=DB))
+        return 0
+    if args.cmd in ("invite", "login-link", "disable-user"):
+        from hypogeum import portal_auth as pa
+        if args.cmd == "invite":
+            print(pa.invite(args.email, args.workspace_id, args.role, DB))
+        elif args.cmd == "disable-user":
+            pa.disable(args.email, DB)
+            print("disabled")
+        else:
+            tok = pa.request_login_link(args.email, DB)
+            if not tok:
+                print("no active portal user with that email (or too many links requested this hour)")
+                return 1
+            print(f"{args.base_url.rstrip('/')}/auth/{tok}")
         return 0
     if args.cmd == "set-key":
         return _set_key(args.workspace_id, args.provider)

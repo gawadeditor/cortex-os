@@ -192,8 +192,12 @@ def create_app(db_path=None, config=None):
         b = wc.budget_status(wid, dbp)
         c = conn()
         try:
-            alerts = [dict(r) for r in c.execute("SELECT title FROM operator_alerts WHERE status = 'open' AND workspace_id = ? "
-                                                 "ORDER BY opened_at DESC LIMIT 20", (wid,))]
+            en = next((w.get("language") == "en" for w in ws.list_workspaces(dbp) if w["workspace_id"] == wid), True)
+            alerts = []
+            for r in c.execute("SELECT title, body, title_en, body_en FROM operator_alerts WHERE status = 'open' AND workspace_id = ? "
+                               "ORDER BY opened_at DESC LIMIT 20", (wid,)):
+                use_en = en and r["title_en"]                  # an English workspace sees the English text, not the operator's Arabic
+                alerts.append({"title": r["title_en"] if use_en else r["title"], "detail": (r["body_en"] if use_en else r["body"]) or ""})
         except Exception:  # noqa: BLE001
             alerts = []
         posts, counts = [], {"published": 0, "scheduled": 0}

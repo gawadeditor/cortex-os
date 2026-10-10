@@ -62,7 +62,7 @@
 <div class="card {{ 'is-critical' if alerts else 'is-good' }}">
   {% if alerts %}
     {% for a in alerts %}
-    <div class="rd-item"><span class="rd-mark rd-blocker">{{ icon('warning') }}</span><div><div class="rd-title">{{ a.title }}</div></div></div>
+    <div class="rd-item"><span class="rd-mark rd-blocker">{{ icon('warning') }}</span><div><div class="rd-title">{{ a.title }}</div>{% if a.detail %}<div class="rd-detail">{{ a.detail }}</div>{% endif %}</div></div>
     {% endfor %}
   {% else %}
     <div class="rd-item" style="align-items:center;"><span class="rd-mark rd-ok">{{ icon('check') }}</span>

@@ -378,3 +378,14 @@ def test_post_origin_rules_match_what_browsers_really_send(env):
     assert c.post("/notify", data={"on": "1"}, headers={"Origin": "http://localhost"}).status_code == 302
     r = c.get("/")
     assert r.headers["Referrer-Policy"] == "same-origin" and "no-transform" in r.headers["Cache-Control"]
+
+
+def test_an_english_workspace_sees_alerts_in_english(env):
+    from hypogeum import operator_alerts as oa
+    conn = oa._conn(env)
+    conn.execute("INSERT INTO operator_alerts (alert_key, status, title, body, opened_at, send_ok, workspace_id, title_en, body_en) "
+                 "VALUES ('k1','open','مفيش مفتاح','تفاصيل','2026-10-10T10:00:00',1,'acme','No OpenRouter key','Add your key in Setup.')")
+    conn.commit()
+    conn.close()
+    page = _login(create_app(env), env, "a@acme.com").get("/").get_data(as_text=True)
+    assert "No OpenRouter key" in page and "Add your key in Setup." in page and "مفيش مفتاح" not in page

@@ -366,3 +366,15 @@ def test_the_usage_pages_are_scoped_and_the_csv_is_safe(spend):
     text = r.get_data(as_text=True)
     assert "acme_ch" in text and "beta_ch" not in text and "plat_ch" not in text
     assert "'=cmd" in text and ",=cmd" not in text                                        # formula injection neutralised
+
+
+def test_post_origin_rules_match_what_browsers_really_send(env):
+    app = create_app(env)
+    c = _login(app, env, "a@acme.com")
+    assert c.post("/notify", data={"on": "0"}, headers={"Sec-Fetch-Site": "same-origin", "Origin": "null"}).status_code == 302   # the real-world case
+    assert c.post("/notify", data={"on": "1"}, headers={"Sec-Fetch-Site": "cross-site"}).status_code == 403
+    assert c.post("/notify", data={"on": "1"}, headers={"Sec-Fetch-Site": "same-site"}).status_code == 403
+    assert c.post("/notify", data={"on": "1"}, headers={"Origin": "null"}).status_code == 403                                   # no Fetch-Metadata: null is not trusted
+    assert c.post("/notify", data={"on": "1"}, headers={"Origin": "http://localhost"}).status_code == 302
+    r = c.get("/")
+    assert r.headers["Referrer-Policy"] == "same-origin" and "no-transform" in r.headers["Cache-Control"]

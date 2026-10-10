@@ -46,16 +46,27 @@ def create_app(db_path=None, config=None):
     def _guards():
         g.nonce = secrets.token_urlsafe(16)
         if request.method == "POST":                       # the cookie is SameSite=Lax; this is the second lock
+            site = request.headers.get("Sec-Fetch-Site")
             origin = request.headers.get("Origin")
-            if origin and origin.split("://", 1)[-1].split("/", 1)[0] != request.host:
+            if site is not None:                           # sent by every modern browser: the authoritative answer
+                bad = site not in ("same-origin", "none")
+            elif origin:
+                oh = origin.split("://", 1)[-1].split("/", 1)[0]
+                base = (getattr(config, "PORTAL_BASE_URL", None) or "").split("://", 1)[-1].split("/", 1)[0]
+                bad = oh not in ({request.host, request.headers.get("X-Forwarded-Host", ""), base} - {""})
+            else:
+                bad = False
+            if bad:
+                from hypogeum.logger import get_logger  # noqa: PLC0415
+                get_logger(agent="client_portal").warn("portal_cross_origin_refused", site=site, origin=origin, host=request.host, path=request.path)
                 abort(403)
 
     @app.after_request
     def _headers(resp):
         resp.headers["X-Content-Type-Options"] = "nosniff"
         resp.headers["X-Frame-Options"] = "DENY"
-        resp.headers["Referrer-Policy"] = "no-referrer"
-        resp.headers["Cache-Control"] = "no-store"
+        resp.headers["Referrer-Policy"] = "same-origin"      # "no-referrer" makes browsers send Origin: null on our own forms
+        resp.headers["Cache-Control"] = "no-store, no-transform"   # no-transform: Cloudflare must not rewrite emails or inject scripts
         resp.headers["Content-Security-Policy"] = (
             f"default-src 'none'; img-src 'self' https://media.zernio.com data:; style-src 'unsafe-inline'; "
             f"script-src 'nonce-{getattr(g, 'nonce', '')}'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
@@ -307,10 +318,14 @@ def create_app(db_path=None, config=None):
         from hypogeum import portal_setup as ps  # noqa: PLC0415
         sts = ps.steps(user["workspace_id"], dbp)
         msg = None
-        if k in ps.PROVIDERS and r in _MSG:
+        if r == "telegram_failed":
+            msg = {"ok": False, "text": "Could not create the Telegram link right now. Please try again in a minute."}
+        elif k in ps.PROVIDERS and r in _MSG:
             msg = {"ok": True, "text": f"{ps.PROVIDERS[k]['label']} {_MSG[r]}"}
         elif k in ps.PROVIDERS and r == "invalid":
             msg = {"ok": False, "text": f"{ps.PROVIDERS[k]['label']} rejected that key. Check it and try again."}
+        elif r == "telegram_failed":
+            msg = {"ok": False, "text": "Could not create the Telegram link right now. Please try again in a minute."}
         elif r == "limit":
             msg = {"ok": False, "text": "Too many attempts. Please try again in an hour."}
         return render_template("portal/welcome.html", **shell(user, "setup", "Setup", "Setup"), steps=sts, done=sum(1 for x in sts if x["done"]),
@@ -343,6 +358,8 @@ def create_app(db_path=None, config=None):
             link = ar.create_link(user["workspace_id"], db_path=dbp).get("url")
         except Exception:  # noqa: BLE001
             link = None
-        return render_welcome(user, tg_link=link) if link else redirect("/welcome")
+        if not link:
+            return render_welcome(user, k="telegram", r="telegram_failed")
+        return render_welcome(user, tg_link=link)
 
     return app

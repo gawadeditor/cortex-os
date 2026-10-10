@@ -722,3 +722,24 @@ class TestMandatoryMainEpisodeThumbnail:
         thumb = next(c for c in result.checks if c.capability == "F_THUMBNAIL")
         assert thumb.status == "pass", thumb.reason
         assert thumb.evidence["width"] == 1280
+
+
+class TestBindingAcceptsEveryRoutableProvider:
+    """2026-10-10: the check demanded the caller's default provider (zernio) for every platform, so
+    Postiz-bound Facebook/Instagram/YouTube were refused and a new episode went out on TikTok only."""
+
+    def _check(self, monkeypatch, bound_provider):
+        from hypogeum.publishing import readiness
+        monkeypatch.setattr(readiness, "resolve_active_binding",
+                            lambda *a, **k: {"provider_id": bound_provider} if bound_provider else None)
+        return readiness._check_publishing_binding("ch", ["youtube"], "default", "zernio", None)
+
+    def test_postiz_bound_platform_passes_under_the_zernio_default(self, monkeypatch):
+        assert self._check(monkeypatch, "postiz").status == "pass"
+
+    def test_zernio_bound_platform_still_passes(self, monkeypatch):
+        assert self._check(monkeypatch, "zernio").status == "pass"
+
+    def test_no_binding_or_unknown_provider_still_blocks(self, monkeypatch):
+        assert self._check(monkeypatch, None).status == "fail"
+        assert self._check(monkeypatch, "somethingelse").status == "fail"

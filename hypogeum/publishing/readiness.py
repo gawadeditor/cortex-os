@@ -878,7 +878,11 @@ def _check_publishing_binding(
             db_path, channel_id=channel_id, capability="publishing",
             platform=platform, logical_alias=logical_alias,
         )
-        if binding is None or binding.get("provider_id") != provider_id:
+        # Each platform is published through the provider its OWN binding names
+        # (zernio_publish_runtime._route_platforms_by_binding), so accept any routable
+        # provider -- not only the caller's default (2026-10-10: Postiz-bound
+        # Facebook/Instagram/YouTube were refused and never released).
+        if binding is None or binding.get("provider_id") not in (provider_id, "zernio", "postiz"):
             missing.append(platform)
     if missing:
         return GateCheckResult(

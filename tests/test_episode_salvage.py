@@ -203,3 +203,37 @@ class TestSalvageRestoresTheShrunkPlanHold:
     def test_nothing_to_do_without_a_persisted_plan(self, dbp, tmp_path):
         from hypogeum.episode_salvage import _restore_shrunk_plan_weekly_hold
         assert _restore_shrunk_plan_weekly_hold("ch", "ep1", db_path=dbp, assets_root=tmp_path) == 0.0
+
+
+class TestReinstateReleasedPlanHold:
+    """2026-10-11 (ep_48391bc5): a failed run's cleanup releases the plan-weekly hold; the operator's rerun
+    must be able to re-hold it -- but only if it still fits under the channel-week ceiling."""
+
+    def _setup(self, dbp, tmp_path, monkeypatch, other):
+        import hypogeum.episode_salvage as es
+        monkeypatch.setattr(es, "_ASSETS_ROOT", tmp_path)
+        ep = tmp_path / "ep1"
+        ep.mkdir()
+        (ep / "production_plan_ep1.json").write_text(json.dumps({"content_hash": "h"}))
+        conn = db.get_connection(dbp)
+        conn.execute(
+            "INSERT INTO budget_reservations (reservation_id, scope_kind, scope_ref, idempotency_key, reserved_amount, "
+            "currency, status, created_at, weekly_ceiling_snapshot) VALUES (?,?,?,?,?,?,?,?,?)",
+            ("plan1", "channel_weekly", "ch:2026-W41", "plan-weekly:ch:ep1:h", "25.28", "USD", "released",
+             "2026-10-10T00:00:00+00:00", "135"))
+        conn.commit()
+        _weekly_row(conn, "other1", "other", other, "ch:2026-W41")
+        return conn
+
+    def test_a_released_plan_hold_is_reinstated_when_it_fits(self, dbp, tmp_path, monkeypatch):
+        from hypogeum.episode_salvage import _reinstate_plan_weekly_reservation
+        conn = self._setup(dbp, tmp_path, monkeypatch, other="30")
+        assert _reinstate_plan_weekly_reservation("ch", "ep1", db_path=dbp) == pytest.approx(25.28)
+        assert conn.execute("SELECT status FROM budget_reservations WHERE reservation_id='plan1'").fetchone()[0] == "reserved"
+
+    def test_it_is_refused_when_the_week_has_no_capacity(self, dbp, tmp_path, monkeypatch):
+        from hypogeum.episode_salvage import _reinstate_plan_weekly_reservation, _ReinstateFailed
+        conn = self._setup(dbp, tmp_path, monkeypatch, other="120")
+        with pytest.raises(_ReinstateFailed):
+            _reinstate_plan_weekly_reservation("ch", "ep1", db_path=dbp)
+        assert conn.execute("SELECT status FROM budget_reservations WHERE reservation_id='plan1'").fetchone()[0] == "released"

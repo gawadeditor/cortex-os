@@ -290,13 +290,31 @@ def _reinstate_plan_weekly_reservation(channel_id: str, episode_id: str, *, db_p
             conn = _salvage_conn(db_path)
             try:
                 rows = conn.execute(
-                    "SELECT reservation_id, reserved_amount FROM budget_reservations "
+                    "SELECT reservation_id, reserved_amount, scope_ref, weekly_ceiling_snapshot "
+                    "FROM budget_reservations "
                     "WHERE scope_kind = 'channel_weekly' AND status = 'released' "
                     "AND idempotency_key = ?",
                     (like,),
                 ).fetchall()
                 if not rows:
                     return 0.0
+                # Capacity check (2026-10-11): re-holding a plan's money must still fit under the
+                # channel-week ceiling it was reserved against; otherwise refuse (fail closed).
+                for r in rows:
+                    try:
+                        ceiling = float(r["weekly_ceiling_snapshot"])
+                    except (TypeError, ValueError):
+                        continue            # no snapshot recorded: the weekly gate re-checks at spend time
+                    used = conn.execute(
+                        "SELECT COALESCE(SUM(CAST(reserved_amount AS REAL)), 0) FROM budget_reservations "
+                        "WHERE scope_kind = 'channel_weekly' AND scope_ref = ? "
+                        "AND status IN ('reserved','committed') AND reservation_id != ?",
+                        (r["scope_ref"], r["reservation_id"]),
+                    ).fetchone()[0]
+                    if used + float(r["reserved_amount"] or 0) > ceiling:
+                        raise _ReinstateFailed(
+                            f"no weekly capacity to re-hold the plan: {used:.2f} already held + "
+                            f"{float(r['reserved_amount'] or 0):.2f} > ceiling {ceiling:.2f}")
                 now = datetime.now(timezone.utc).isoformat()
                 total = 0.0
                 for r in rows:

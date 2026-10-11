@@ -5343,6 +5343,21 @@ def api_run_rerun(run_id: str):
     channel_id   = run.get("channel_id") or episode.get("channel_id") or "hypogeum"
     episode_id   = run.get("episode_id")  # preserve so worker reuses disk checkpoints
 
+    # ── An operator pressing "rerun" on a failed run is a deliberate decision to finish the episode ──
+    # (2026-10-11, ep_48391bc5): the failed run's cleanup RELEASED the plan's weekly hold and may have
+    # left the admission bound to an old grant, so the re-run died at its first paid step (upscale)
+    # with "released reservation cannot be replayed". hypogeum.episode_salvage already knows how to
+    # prepare a re-drive (rebind a stale failed admission; re-hold the plan money, now capacity-checked
+    # against the channel-week ceiling). Best-effort: if it cannot (no capacity), the run simply
+    # proceeds as before and the weekly gate denies the paid step.
+    if episode_id:
+        try:
+            from hypogeum.episode_salvage import _rebind_stale_admission, _reinstate_plan_weekly_reservation
+            _rebind_stale_admission(channel_id, episode_id, db_path=_db_path())
+            _reinstate_plan_weekly_reservation(channel_id, episode_id, db_path=_db_path())
+        except Exception:
+            pass
+
     # ── Cancel stale queued items for this episode before inserting fresh ones ──
     # Prevents the worker from picking an older queued row for the same episode
     # instead of this new rerun intent. Does not touch 'claimed' rows.

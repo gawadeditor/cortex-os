@@ -1283,6 +1283,15 @@ CREATE TABLE IF NOT EXISTS retention_moments (
 );
 CREATE INDEX IF NOT EXISTS idx_rm_channel ON retention_moments(channel_id, video_id);
 
+-- episode_timelines: the narration/script/scene timeline of an episode, cached the first time its folder was readable,
+-- so retention learning keeps working when the archive (NAS) is unreachable (episodes are moved there after release).
+CREATE TABLE IF NOT EXISTS episode_timelines (
+    episode_id     TEXT NOT NULL PRIMARY KEY,
+    timeline_json  TEXT NOT NULL,
+    total_seconds  REAL NOT NULL,
+    cached_at      TEXT NOT NULL
+);
+
 -- ---------------------------------------------------------------------------
 -- model_registry — the versioned generation-model catalogue Cortex tracks
 -- (Phase 6 / Factory Capability Evolution substrate). Synced from a

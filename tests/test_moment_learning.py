@@ -69,3 +69,29 @@ def test_too_few_videos_writes_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(ml, "_roots", lambda cid: [tmp_path / "eps"])
     out = ml.learn_channel("ch", db_path=db, frames=False)
     assert out["directive"] is None and out["videos"] == 0
+
+
+def test_timeline_is_cached_and_used_when_the_episode_folder_is_unreachable(tmp_path, monkeypatch):
+    """The archive (NAS) can be down; episodes are moved there after release. Learning must keep working
+    from the cached timeline once the folder has been read once."""
+    db = tmp_path / "t.db"
+    initialize_schema(db)
+    root = tmp_path / "eps"
+    monkeypatch.setattr(ml, "FRAME_DIR", tmp_path / "frames")
+    vals = [1.0] * 4 + [0.6] * 32
+    conn = get_connection(db)
+    for n in range(7):
+        ep = f"ep_{n}"
+        _episode(root, ep, [f"hook {n}", f"second {n}"] + [f"line {j}" for j in range(7)])
+        _seed(conn, ep, f"V{n}", 100 + n, _curve(vals), 36.0)
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(ml, "_roots", lambda cid: [root])
+    first = ml.learn_channel("ch", db_path=db, frames=False)
+    assert first["videos"] == 7
+
+    # the archive goes away
+    monkeypatch.setattr(ml, "_roots", lambda cid: [tmp_path / "unreachable"])
+    second = ml.learn_channel("ch", db_path=db, frames=False)
+    assert second["videos"] == 7 and second["moments"] > 0

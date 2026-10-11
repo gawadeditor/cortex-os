@@ -81,6 +81,22 @@ def _render_path(ep_dir: Path, episode_id: str) -> Optional[Path]:
     return hits[0] if hits else None
 
 
+def _cache_timeline(conn, episode_id: str, tl: List[dict]) -> None:
+    try:
+        conn.execute("INSERT OR REPLACE INTO episode_timelines (episode_id, timeline_json, total_seconds, cached_at) VALUES (?,?,?,?)",
+                     (episode_id, json.dumps(tl, ensure_ascii=False), tl[-1]["end"], _now()))
+    except Exception:  # noqa: BLE001 -- the cache is an optimisation, never a reason to fail
+        pass
+
+
+def _cached_timeline(conn, episode_id: str) -> Optional[List[dict]]:
+    try:
+        row = conn.execute("SELECT timeline_json FROM episode_timelines WHERE episode_id = ?", (episode_id,)).fetchone()
+        return json.loads(row[0]) if row else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def analyse_channel(conn, channel_id: str, *, frames: bool = True) -> dict:
     """Pure read of the DB + episode folders. Returns {"videos": {vid: {...}}, "skipped": [...]}."""
     out: Dict[str, dict] = {}
@@ -88,20 +104,27 @@ def analyse_channel(conn, channel_id: str, *, frames: bool = True) -> dict:
     for v in _youtube_videos(conn, channel_id):
         dur = v["aw"] / v["vp"]
         d = find_episode_dir(v["ep"], _roots(channel_id))
-        if d is None:
-            skipped.append((v["vid"], "episode folder not found"))
-            continue
-        tl = timeline_for_episode(d)
+        rp = None
+        if d is not None:
+            tl = timeline_for_episode(d)
+            if tl:
+                _cache_timeline(conn, v["ep"], tl)
+            rp = _render_path(d, v["ep"])
+        else:
+            # folder unreachable (archive/NAS down, or never kept): use the cached timeline
+            tl = _cached_timeline(conn, v["ep"])
+            if not tl:
+                skipped.append((v["vid"], "episode folder not found and no cached timeline"))
+                continue
         total = tl[-1]["end"] if tl else 0
         if not tl or abs(total - dur) > 6:
             skipped.append((v["vid"], f"video {dur:.0f}s vs narration {total:.0f}s"))
             continue
         curve = json.loads(v["cur"])
         ms = moments_for_video(curve, dur, tl)
-        if frames:
-            rp = _render_path(d, v["ep"])
+        if frames and rp:
             for i, m in enumerate(ms):
-                if m["kind"] == "exit" and i < 2 and rp:
+                if m["kind"] == "exit" and i < 2:
                     m["frame_path"] = extract_frame(rp, m["t"], FRAME_DIR / f"{v['vid']}_{m['kind']}_{int(m['t'] * 10)}.jpg")
         out[v["vid"]] = {"episode_id": v["ep"], "views": v["views"], "avg_view_pct": v["vp"], "duration_s": dur,
                          "moments": ms, "beats": beat_losses(curve, dur, tl)}

@@ -181,10 +181,44 @@ def run_clip_repair(
             is_short = s.get("source_type") == "short"
             return (int(is_short), s.get("scene_index", 999))
 
-        _outro_missing = [s for s in still_missing if _is_outro_scene(s)]
-        _story_missing = [s for s in still_missing if not _is_outro_scene(s)]
+        # Free recovery first, OUTSIDE the cap (2026-10-11, ep_48391bc5): MUAPI was slow
+        # that night, every poll timed out and all 16 clips were missing — but the jobs
+        # COMPLETED on the provider afterwards (already paid for). The cap of
+        # CLIP_REPAIR_MAX_GENERATED only bounds NEW paid generations; a clip that can be
+        # recovered from its own already-recorded provider job costs nothing, yet the cap
+        # was applied to those too, so 13 of 16 were recovered over two runs and the last
+        # 3 (complete and waiting on MUAPI) were abandoned one pass short. The reconcile
+        # call is read-only unless the job turned out complete (see muapi.
+        # reconcile_stuck_scene_authorization); a recovered scene then goes through the
+        # normal loop below, where submit_scene() just reuses the file (no spend).
+        _recovered_free: List[str] = []
+        if channel_id is not None:
+            for _sid in still_missing:
+                _ms = scene_by_id.get(_sid, {})
+                _tp = _expected_clip_path(_sid, _ms, assets_root, episode_id) if _ms else None
+                if _tp is None or _tp.exists():
+                    continue
+                try:
+                    from hypogeum.muapi import reconcile_stuck_scene_authorization  # noqa: PLC0415
+                    reconcile_stuck_scene_authorization(
+                        episode_id=episode_id, scene_id=_sid, short_id=_ms.get("short_id"),
+                        is_fallback=False, output_dir=assets_root / "episodes" / episode_id,
+                        config=config, log=log,
+                    )
+                except Exception:  # noqa: BLE001 -- best-effort; the loop below still reconciles per scene
+                    continue
+                if _tp.exists() and _tp.stat().st_size > 0:
+                    _recovered_free.append(_sid)
+            if _recovered_free:
+                log.info("clip_repair_free_recovery", episode_id=episode_id,
+                         recovered=len(_recovered_free), scenes=_recovered_free)
+        _free = set(_recovered_free)
+
+        _outro_missing = [s for s in still_missing if _is_outro_scene(s) and s not in _free]
+        _story_missing = [s for s in still_missing if not _is_outro_scene(s) and s not in _free]
         to_generate = (
-            sorted(_story_missing, key=_priority)[:max_generated]
+            sorted(_recovered_free, key=_priority)
+            + sorted(_story_missing, key=_priority)[:max_generated]
             + sorted(_outro_missing, key=_priority)
         )
 

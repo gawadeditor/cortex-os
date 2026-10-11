@@ -517,6 +517,52 @@ class TestStrategyB:
         )
         assert len(generate_calls) == 2
 
+    def test_clips_recoverable_from_their_provider_job_are_not_counted_against_the_cap(self, tmp_path):
+        """Regression (2026-10-11, ep_48391bc5): MUAPI was slow, every poll timed out, then the jobs finished
+        (already paid). The cap bounds NEW paid generations only; clips that reconcile can pull from their own
+        recorded job must all be recovered for free, however many there are."""
+        assets_root = tmp_path / "assets"
+        assets_root.mkdir()
+        scenes = [_make_scene(f"sc_{i:03d}", scene_index=i, description="story scene") for i in range(6)]
+        vp = _make_visual_package(scenes)
+        cfg = _make_config(max_generated=1)       # at most ONE new paid generation
+        log = MagicMock()
+        finished_at_provider = {"sc_000", "sc_001", "sc_002", "sc_003"}   # 4 of the 6 completed late
+        generated = []
+
+        def _mock_reconcile(episode_id, scene_id, short_id, is_fallback, output_dir, config, log):
+            if scene_id in finished_at_provider:
+                _write_generated_clip(output_dir, {"scene_id": scene_id})
+                return "recovered_clip"
+            return "not_applicable"
+
+        def _mock_submit(scene_spec, config, episode_id, output_dir, agent, **kwargs):
+            sid = scene_spec["scene_id"]
+            existing = output_dir / "video" / f"sc_{sid}.mp4"
+            if existing.exists():
+                return {"generation_status": "reused"}
+            generated.append(sid)
+            _write_generated_clip(output_dir, scene_spec)
+            return {"generation_status": "generated"}
+
+        with patch("hypogeum.muapi.submit_scene", side_effect=_mock_submit), \
+             patch("hypogeum.muapi.reconcile_stuck_scene_authorization", side_effect=_mock_reconcile):
+            result = run_clip_repair(
+                visual_package=vp,
+                missing_scene_ids=[f"sc_{i:03d}" for i in range(6)],
+                present_clip_ids=[],
+                assets_root=assets_root,
+                config=cfg,
+                episode_id="ep_free",
+                log=log,
+                channel_id="hypogeum",
+            )
+
+        assert generated == ["sc_004"], "only ONE new paid generation (the cap); the 4 finished clips cost nothing"
+        recovered = set(result.repaired_by_generation)
+        assert finished_at_provider <= recovered and "sc_004" in recovered
+        assert "sc_005" not in recovered          # beyond the cap and not finished: stays missing, not bought
+
     def test_generated_outro_scene_regenerated_even_past_the_cap(self, tmp_path):
         """A channel generated-outro scene (narration_reference 'b_outro*') is
         regenerated even when the story cap is already spent — a dropped outro

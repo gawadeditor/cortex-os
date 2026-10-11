@@ -627,7 +627,7 @@ class TestPerSceneRetryLoop:
         s["production_spec"]["fallback_prompt"] = "FALLBACK"
         return s
 
-    def _run(self, monkeypatch, config, outcomes):
+    def _run(self, monkeypatch, config, outcomes, reconcile="released"):
         """outcomes: list of (manifest_or_None, reason) returned by successive
         _submit_scene_via_gate calls. Returns (result, recorded_calls)."""
         import hypogeum.muapi as m
@@ -646,20 +646,23 @@ class TestPerSceneRetryLoop:
                 return (None, "exhausted_test_outcomes")
 
         monkeypatch.setattr(m, "_submit_scene_via_gate", _fake_gate)
+        monkeypatch.setattr(m, "reconcile_stuck_scene_authorization", lambda **kw: reconcile)
         res = m.submit_scene(self._spec(), config, "ep_x", Path("/tmp"), channel_id="ch")
         return res, calls
 
-    def test_recovers_on_the_fallback_prompt(self, monkeypatch):
+    def test_recovers_on_a_retry_with_the_plan_authorized_primary_prompt(self, monkeypatch):
         cfg = make_config()
         cfg.MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE = 3
         ok = {"scene_id": "s01b01", "asset_id": "a", "generation_status": "generated"}
         res, calls = self._run(monkeypatch, cfg, [(None, "transient blip"), (ok, None)])
         assert res["generation_status"] == "generated"
-        assert calls == [("PRIMARY", False, 0), ("FALLBACK", True, 0)]
+        # the plan declares only the primary prompt; after the provider confirms the first job is
+        # dead (reconcile -> released) the same identity is retried with that prompt
+        assert calls == [("PRIMARY", False, 0), ("PRIMARY", False, 0)]
 
-    def test_third_attempt_uses_a_fresh_recovery_key(self, monkeypatch):
+    def test_stranded_authorization_recovery_uses_a_fresh_key_and_the_plan_prompt(self, monkeypatch):
         cfg = make_config()
-        cfg.MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE = 4
+        cfg.MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE = 2
         ok = {"scene_id": "s01b01", "asset_id": "a", "generation_status": "generated"}
         res, calls = self._run(monkeypatch, cfg, [
             (None, "authorization state is 'submitting'"),
@@ -667,7 +670,55 @@ class TestPerSceneRetryLoop:
             (ok, None),
         ])
         assert res["generation_status"] == "generated"
-        assert calls[2] == ("FALLBACK", False, 1)  # recovery_generation=1
+        assert calls[2] == ("PRIMARY", False, 3)  # fresh recovery identity, plan-authorized prompt
+
+    def test_a_timed_out_first_attempt_is_reconciled_before_any_rebuy(self, monkeypatch, tmp_path):
+        """Regression (2026-10-11, ep_48391bc5): the first attempt only TIMED OUT, the job finished later at
+        the provider (already paid). The clip must be recovered from that job, not bought again."""
+        import hypogeum.muapi as m
+        cfg = make_config()
+        cfg.MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE = 2
+        dest = m.scene_file_path(tmp_path, "s01b01", None)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(m, "_resolve_authorization_grant", lambda ch, eid, at: (object(), False))
+        monkeypatch.setattr(m.video_prompt_writer, "assemble_video_scene_prompt", lambda p, channel_id=None: p)
+        calls = []
+        monkeypatch.setattr(m, "_submit_scene_via_gate",
+                            lambda **kw: (calls.append(kw["recovery_generation"]) or (None, "poll did not reach a terminal state: timeout")))
+
+        def _reconcile(**kw):
+            dest.write_bytes(b"x" * 20_000)       # the provider job had completed; the clip is now on disk
+            return "recovered_clip"
+
+        monkeypatch.setattr(m, "reconcile_stuck_scene_authorization", _reconcile)
+        res = m.submit_scene(self._spec(), cfg, "ep_x", tmp_path, channel_id="ch")
+        assert res["generation_status"] == "reused"
+        assert calls == [0]                       # no second paid attempt was made
+
+    def test_a_job_still_running_at_the_provider_is_not_bought_again(self, monkeypatch, tmp_path):
+        import hypogeum.muapi as m
+        cfg = make_config()
+        cfg.MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE = 3
+        monkeypatch.setattr(m, "_resolve_authorization_grant", lambda ch, eid, at: (object(), False))
+        monkeypatch.setattr(m.video_prompt_writer, "assemble_video_scene_prompt", lambda p, channel_id=None: p)
+        calls = []
+        monkeypatch.setattr(m, "_submit_scene_via_gate",
+                            lambda **kw: (calls.append(kw["recovery_generation"]) or (None, "poll did not reach a terminal state: timeout")))
+        monkeypatch.setattr(m, "reconcile_stuck_scene_authorization", lambda **kw: "still_unresolved")
+        res = m.submit_scene(self._spec(), cfg, "ep_x", tmp_path, channel_id="ch")
+        assert res["generation_status"] == "generation_failed"
+        assert calls == [0]
+
+    def test_a_plain_denial_gets_no_automatic_retry(self, monkeypatch):
+        import hypogeum.muapi as m
+        cfg = make_config()
+        cfg.MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE = 3
+        ok = {"scene_id": "s01b01", "asset_id": "a", "generation_status": "generated"}
+        # _run's default reconcile says 'released'; override to the not-applicable case via a wrapper
+        res, calls = self._run(monkeypatch, cfg, [(None, "gate_denied[None]: provider explicitly rejected"), (ok, None)],
+                               reconcile="not_applicable")
+        assert res["generation_status"] == "generation_failed"
+        assert len(calls) == 1
 
     def test_systemic_billing_failure_stops_immediately(self, monkeypatch):
         cfg = make_config()

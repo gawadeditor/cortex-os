@@ -462,8 +462,10 @@ class TestOutcomeAccounting:
         with patch("hypogeum.muapi.requests.post") as mock_post2, \
              patch("hypogeum.muapi.requests.get") as mock_get2:
             second = submit_scene(make_scene_spec(), config, "ep_gate_test", tmp_path, channel_id="test_channel")
+            # no paid submission. A read-only status poll of the already-recorded provider job is
+            # allowed (2026-10-11): the retry first asks the provider what became of the first
+            # attempt (the clip may have finished there, already paid) before deciding anything.
             assert mock_post2.called is False
-            assert mock_get2.called is False
         assert second["generation_status"] == "generation_failed"
 
         rows = _weekly_rows(db_path)

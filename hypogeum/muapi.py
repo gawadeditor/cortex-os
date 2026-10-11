@@ -1840,12 +1840,14 @@ def submit_scene(
         _max_attempts = max(1, int(getattr(config, "MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE", 1) or 1))
         failure_reason = None
         for _attempt in range(_max_attempts):
-            if _attempt == 0:
-                _p, _fb, _rec = primary_prompt, False, 0
-            elif _attempt == 1:
-                _p, _fb, _rec = fallback_prompt, True, 0
-            else:
-                _p, _fb, _rec = fallback_prompt, False, _attempt - 1
+            # 2026-10-11 (ep_48391bc5): a retry re-sends the PRIMARY prompt. The authorized
+            # Production Plan declares only the primary prompt's fingerprint for each asset,
+            # so the old ':fallback' attempt (a different prompt) was rejected 'prompt_mismatch'
+            # every single time (24 of 24 in the logs) — and it overwrote the real failure
+            # reason, so the stranded-authorization recovery below never fired. A scene whose
+            # first attempt merely TIMED OUT was therefore lost for good even though the job
+            # finished at the provider (already paid).
+            _p, _fb, _rec = primary_prompt, False, 0
             manifest, failure_reason = _submit_scene_via_gate(
                 channel_id=channel_id, grant=grant, prompt=_p, tier=primary_tier,
                 reference_image_url=reference_image_url, scene_id=scene_id, short_id=short_id,
@@ -1869,6 +1871,31 @@ def submit_scene(
                     "muapi_gate_path_systemic_stop",
                     scene_id=scene_id, attempt=_attempt + 1, reason=failure_reason,
                 )
+                break
+            if _attempt + 1 >= _max_attempts:
+                break
+            # Before ANY further paid attempt ask the provider what became of this one. A poll
+            # that merely timed out (provider slow) usually means the job FINISHES later,
+            # already paid for — buying the scene again would pay twice. reconcile re-polls the
+            # recorded job id (read-only): clip recovered -> use it; job still running -> do
+            # NOT re-buy (clip_repair reconciles again later); job confirmed dead -> the
+            # identity is released and the retry below can use it; anything else (a definite
+            # rejection, a plain denial) -> no automatic retry (a rejected identity is never
+            # auto-retried).
+            _outcome = reconcile_stuck_scene_authorization(
+                episode_id=eid, scene_id=scene_id, short_id=short_id, is_fallback=False,
+                output_dir=output_dir, config=config, log=log,
+            )
+            if _outcome == "recovered_clip" and dest_path.exists() and dest_path.stat().st_size >= _MIN_VIDEO_BYTES:
+                log.info("muapi_gate_path_recovered_from_provider_job", scene_id=scene_id)
+                return {
+                    "scene_id": scene_id, "asset_id": _compute_asset_id(eid, scene_id, short_id),
+                    "generation_status": "reused", "provider": "muapi", "tier_used": None,
+                    "model_used": "cached", "prompt_used": None, "fallback_used": False,
+                    "failure_reason": None,
+                }
+            if _outcome != "released":
+                log.warn("muapi_gate_path_no_automatic_retry", scene_id=scene_id, reconcile=_outcome)
                 break
 
         # Stranded-authorization recovery (2026-09-06). A ':primary'/':fallback'
@@ -1906,6 +1933,25 @@ def submit_scene(
             and not _scene_failure_is_systemic(failure_reason)
             and _stranded_recoveries < _MAX_STRANDED_AUTH_RECOVERIES
         ):
+            # Same rule as the loop above: ask the provider first. Only a confirmed-dead job
+            # (reconcile -> "released") may be bought again; a recovered clip is simply used,
+            # a still-running job is never re-bought, and a rejected identity ("not_applicable")
+            # is never auto-retried (2026-10-11: this block used to re-send a DIFFERENT prompt
+            # that the plan always refused; now it re-sends the authorized one, so it must be
+            # this careful).
+            _o = reconcile_stuck_scene_authorization(
+                episode_id=eid, scene_id=scene_id, short_id=short_id, is_fallback=False,
+                output_dir=output_dir, config=config, log=log,
+            )
+            if _o == "recovered_clip" and dest_path.exists() and dest_path.stat().st_size >= _MIN_VIDEO_BYTES:
+                return {
+                    "scene_id": scene_id, "asset_id": _compute_asset_id(eid, scene_id, short_id),
+                    "generation_status": "reused", "provider": "muapi", "tier_used": None,
+                    "model_used": "cached", "prompt_used": None, "fallback_used": False,
+                    "failure_reason": None,
+                }
+            if _o != "released":
+                break
             _stranded_recoveries += 1
             _recovery_generation = _max_attempts + _stranded_recoveries  # always a fresh :recovery{n}
             log.info(
@@ -1914,7 +1960,7 @@ def submit_scene(
                 prior_reason=failure_reason,
             )
             manifest, failure_reason = _submit_scene_via_gate(
-                channel_id=channel_id, grant=grant, prompt=fallback_prompt, tier=primary_tier,
+                channel_id=channel_id, grant=grant, prompt=primary_prompt, tier=primary_tier,
                 reference_image_url=reference_image_url, scene_id=scene_id, short_id=short_id,
                 aspect_ratio=aspect_ratio, requested_duration=requested_duration, episode_id=eid,
                 output_dir=output_dir, config=config, log=log, is_fallback=False,

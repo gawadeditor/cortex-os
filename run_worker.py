@@ -406,6 +406,21 @@ def _run_learning_cycle(db_path: Path) -> dict:
             except Exception as exc:
                 log.error("learning_cycle_episode_error episode=%s error=%s", ep, exc)
 
+        # Retention moments: tie where viewers left to what was said/shown, per channel,
+        # and write the measured pattern as a directive (hypogeum/moment_learning.py).
+        try:
+            from hypogeum.channel_config import list_channel_profiles
+            from hypogeum.moment_learning import learn_channel
+            for cp in list_channel_profiles(db_path=db_path):
+                cid = getattr(cp, "channel_id", None)
+                if cid:
+                    ml = learn_channel(cid, db_path=db_path)
+                    if ml.get("moments"):
+                        log.info("moment_learning channel=%s videos=%s moments=%s directive=%s",
+                                 cid, ml["videos"], ml["moments"], ml.get("directive"))
+        except Exception as exc:
+            log.error("learning_cycle_moments_error error=%s", exc)
+
         # Per-channel content_volume (weekly-cadence) recommendation.
         try:
             from hypogeum.channel_config import list_channel_profiles

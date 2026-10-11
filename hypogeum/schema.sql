@@ -1256,6 +1256,34 @@ CREATE INDEX IF NOT EXISTS idx_cld_channel   ON channel_learning_directives(chan
 CREATE INDEX IF NOT EXISTS idx_cld_dimension ON channel_learning_directives(channel_id, dimension, active);
 
 -- ---------------------------------------------------------------------------
+-- retention_moments: what was said and shown at the seconds viewers LEFT (or re-watched).
+-- Written by hypogeum/moment_learning.py from the platform retention curve + the episode's own
+-- narration/script/visual packages; replaced wholesale per video on every learning cycle.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS retention_moments (
+    moment_id     TEXT    NOT NULL PRIMARY KEY,   -- <video_id>:<kind>:<n>
+    channel_id    TEXT    NOT NULL,
+    episode_id    TEXT    NOT NULL,
+    video_id      TEXT    NOT NULL,
+    platform      TEXT    NOT NULL DEFAULT 'youtube',
+    kind          TEXT    NOT NULL,               -- exit | rewatch
+    t0            REAL    NOT NULL,
+    t1            REAL    NOT NULL,
+    loss          REAL    NOT NULL,               -- share of the starting audience (negative = re-watch)
+    video_views   INTEGER,
+    beat_id       TEXT,
+    beat_index    INTEGER,
+    beats_total   INTEGER,
+    signals_json  TEXT,
+    spoken_text   TEXT,
+    scene_id      TEXT,
+    visual_json   TEXT,                           -- subject / framing / motion_type / mood
+    frame_path    TEXT,                           -- the actual frame at that second (when the render is reachable)
+    created_at    TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rm_channel ON retention_moments(channel_id, video_id);
+
+-- ---------------------------------------------------------------------------
 -- model_registry — the versioned generation-model catalogue Cortex tracks
 -- (Phase 6 / Factory Capability Evolution substrate). Synced from a
 -- provider's model listing; a model that disappears from a fresh sync is

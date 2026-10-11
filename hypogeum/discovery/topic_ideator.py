@@ -213,6 +213,8 @@ def run_topic_ideator(
     try:
         from hypogeum.channel_learning import directive_texts
         _topic_learning = directive_texts(channel_id, "topic", db_path=db_path)
+        # measured YouTube search demand (hypogeum/youtube_traffic.py): what real viewers typed to find us
+        _topic_learning = list(dict.fromkeys(_topic_learning + directive_texts(channel_id, "search_demand", db_path=db_path)))
     except Exception:  # noqa: BLE001
         _topic_learning = []
 

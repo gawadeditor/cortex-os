@@ -1285,6 +1285,25 @@ CREATE INDEX IF NOT EXISTS idx_rm_channel ON retention_moments(channel_id, video
 
 -- episode_timelines: the narration/script/scene timeline of an episode, cached the first time its folder was readable,
 -- so retention learning keeps working when the archive (NAS) is unreachable (episodes are moved there after release).
+-- youtube_traffic_insights: where a channel's YouTube views COME FROM and what viewers searched, straight from the
+-- YouTube Analytics API (hypogeum/youtube_traffic.py). One snapshot per channel per day, replaced wholesale.
+-- dimension: traffic_type | search_term | ext_url | related_video | subscribed | device
+CREATE TABLE IF NOT EXISTS youtube_traffic_insights (
+    channel_id          TEXT NOT NULL,
+    snapshot_date       TEXT NOT NULL,
+    dimension           TEXT NOT NULL,
+    key                 TEXT NOT NULL,
+    subkey              TEXT NOT NULL DEFAULT '',
+    views               INTEGER,
+    minutes_watched     REAL,
+    avg_view_duration_s REAL,
+    avg_view_pct        REAL,          -- 0-100 as YouTube reports it
+    window_days         INTEGER,
+    created_at          TEXT NOT NULL,
+    PRIMARY KEY (channel_id, snapshot_date, dimension, key, subkey)
+);
+CREATE INDEX IF NOT EXISTS idx_yti_channel ON youtube_traffic_insights(channel_id, dimension, snapshot_date);
+
 CREATE TABLE IF NOT EXISTS episode_timelines (
     episode_id     TEXT NOT NULL PRIMARY KEY,
     timeline_json  TEXT NOT NULL,

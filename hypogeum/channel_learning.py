@@ -36,6 +36,7 @@ from hypogeum.db import get_connection, initialize_schema
 _ADVISORY_DIMENSIONS = {
     "thumbnail", "hook", "pacing", "topic", "title", "description",
     "retention_moments",   # written by hypogeum/moment_learning.py from measured exits
+    "search_demand",       # written by hypogeum/youtube_traffic.py from measured YouTube search/traffic data
 }
 
 

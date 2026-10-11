@@ -421,6 +421,22 @@ def _run_learning_cycle(db_path: Path) -> dict:
         except Exception as exc:
             log.error("learning_cycle_moments_error error=%s", exc)
 
+        # Where YouTube views come from + what viewers searched (YouTube Analytics API, per-channel OAuth),
+        # written as a `search_demand` directive (hypogeum/youtube_traffic.py). At most one fetch per day.
+        try:
+            from hypogeum.channel_config import list_channel_profiles
+            from hypogeum.youtube_traffic import learn_channel_traffic
+            for cp in list_channel_profiles(db_path=db_path):
+                cid = getattr(cp, "channel_id", None)
+                if cid:
+                    yt = learn_channel_traffic(cid, db_path=db_path)
+                    if yt.get("fetched") or yt.get("directive"):
+                        log.info("youtube_traffic channel=%s rows=%s directive=%s", cid, yt.get("rows"), yt.get("directive"))
+                    elif yt.get("error"):
+                        log.debug("youtube_traffic_skip channel=%s reason=%s", cid, yt["error"])
+        except Exception as exc:
+            log.error("learning_cycle_youtube_traffic_error error=%s", exc)
+
         # Per-channel content_volume (weekly-cadence) recommendation.
         try:
             from hypogeum.channel_config import list_channel_profiles

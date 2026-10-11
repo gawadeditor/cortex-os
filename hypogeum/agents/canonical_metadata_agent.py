@@ -93,6 +93,12 @@ You will receive a JSON object with:
       guesses -- build visible_hashtags and backend_tags directly from
       competitor_hashtags + high_volume_search_terms + trending_terms, and
       weave an audience_question phrasing into the description where natural.
+      channel_context may also carry "measured_viewer_search_terms": the exact
+      queries REAL viewers typed on YouTube to find this channel's videos
+      ({{term, views, avg_view_pct}}). When present and relevant to this
+      episode, use those exact phrases (higher avg_view_pct = better) in the
+      title, description and tags; never invent a measured term and never use
+      one that does not truthfully describe this episode.
   "sources": a list of {{"title", "url"}} objects -- real, verified sources for
       this episode. You may reference these in a CTA or description, but you
       must NEVER invent a different source or URL.
@@ -665,6 +671,18 @@ def generate_canonical_platform_metadata_for_deliverable(
     except Exception as exc:  # noqa: BLE001
         log.warn("canonical_metadata_keyword_research_unavailable",
                  deliverable_id=deliverable_id, error=str(exc))
+
+    # MEASURED viewer search terms (hypogeum/youtube_traffic.py): the exact queries real viewers typed on YouTube
+    # to find this channel's videos, with how much of the video they then watched. Real, not researched.
+    try:
+        from hypogeum.youtube_traffic import search_terms_for_metadata  # noqa: PLC0415
+        _measured = search_terms_for_metadata(channel_id) if channel_id else []
+        if _measured:
+            if channel_context is None:
+                channel_context = {"brand_is_unknown": True}
+            channel_context["measured_viewer_search_terms"] = _measured
+    except Exception as exc:  # noqa: BLE001
+        log.warn("canonical_metadata_measured_terms_unavailable", deliverable_id=deliverable_id, error=str(exc))
 
     input_package = {
         "deliverable_class": deliverable_class,

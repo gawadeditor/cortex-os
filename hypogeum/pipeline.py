@@ -3007,7 +3007,7 @@ def _get_episode_publish_at(episode_id: str, db_path: Optional[Path]) -> Optiona
     rather than default to public.
     """
     try:
-        from hypogeum.db import _db_path as _resolve_db_path
+        from hypogeum.db import resolve_db_path as _resolve_db_path
         conn = get_connection(_resolve_db_path(db_path))
         try:
             row = conn.execute(

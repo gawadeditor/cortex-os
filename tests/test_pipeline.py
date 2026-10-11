@@ -2168,3 +2168,30 @@ class TestSkipShortsFlag:
 
         call_kwargs = mock_audio.call_args[1]
         assert call_kwargs["skip_shorts"] is True
+
+
+class TestEpisodePublishAtLookup:
+    """Regression (2026-10-11, ep_48391bc5): the lookup imported hypogeum.db._db_path, which no longer exists; the
+    ImportError was swallowed, publish_at was ALWAYS None, and the in-run Zernio publish therefore ran with
+    publish_now=True -- TikTok went live immediately instead of at the episode's slot."""
+
+    def test_returns_the_most_recent_target_publish_at(self, tmp_path):
+        from hypogeum.db import get_connection, initialize_schema
+        from hypogeum.pipeline import _get_episode_publish_at
+        db = tmp_path / "t.db"
+        initialize_schema(db)
+        conn = get_connection(db)
+        conn.execute("INSERT INTO episode_topics (topic_id, channel_id, episode_id, topic_text, status, created_at, updated_at, "
+                     "target_publish_at) VALUES ('t1','ch','ep_x','x','consumed','2026-10-10T00:00:00','x','2026-10-16T16:00:00+00:00')")
+        conn.execute("INSERT INTO episode_topics (topic_id, channel_id, episode_id, topic_text, status, created_at, updated_at, "
+                     "target_publish_at) VALUES ('t2','ch','ep_x','x','consumed','2026-10-11T00:00:00','x','2026-10-18T14:00:00+00:00')")
+        conn.commit()
+        conn.close()
+        assert _get_episode_publish_at("ep_x", db) == "2026-10-18T14:00:00+00:00"
+
+    def test_none_when_the_episode_has_no_target(self, tmp_path):
+        from hypogeum.db import initialize_schema
+        from hypogeum.pipeline import _get_episode_publish_at
+        db = tmp_path / "t.db"
+        initialize_schema(db)
+        assert _get_episode_publish_at("ep_nothing", db) is None

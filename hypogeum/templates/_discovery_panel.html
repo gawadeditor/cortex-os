@@ -1,0 +1,100 @@
+{# What the factory learned about how viewers FIND and LEAVE a channel (hypogeum/dashboard_discovery.py). #}
+{% from '_charts.html' import hbar %}
+{% for p in discovery %}
+<div class="sec-head">
+  <h2>{% if discovery | length > 1 %}{{ p.channel_name }} · {% endif %}How viewers find you and where they leave</h2>
+  {% if p.snapshot_date %}<span class="sec-count">YouTube data as of {{ p.snapshot_date }}</span>{% endif %}
+</div>
+{% if not p.has_data %}
+  <div class="card"><p class="muted" style="margin:0;">Nothing learned yet for this channel. The factory refreshes this after each analytics sync (once a day for YouTube traffic); it needs a few videos with enough views.</p></div>
+{% else %}
+
+<div class="card" style="padding:0;">
+  <div class="table-wrap" style="border:none;">
+    <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:var(--space-lg,16px); padding:16px;">
+
+      <div>
+        <div class="card-title">Where views come from</div>
+        {% for m in p.mix %}
+        <div style="margin:9px 0;">
+          <div class="row" style="justify-content:space-between; font-size:12.5px;">
+            <span>{{ m.label }}</span>
+            <span class="muted" style="font-variant-numeric:tabular-nums;">{{ (m.share * 100) | round | int }}% of views · {{ (m.avg_view_pct | round(0) | int) if m.avg_view_pct <= 100 else 100 }}% watched</span>
+          </div>
+          {{ hbar(m.share, 1, ('good' if m.avg_view_pct >= 70 else ('warn' if m.avg_view_pct >= 40 else 'critical'))) }}
+        </div>
+        {% endfor %}
+        {% if p.retention_gap is not none and p.retention_gap > 5 %}
+          <p class="muted" style="font-size:12px;">People who arrive by search watch <b style="color:var(--text);">{{ p.retention_gap | round | int }} points more</b> of the video than people in the Shorts feed.</p>
+        {% elif p.retention_gap is not none and p.retention_gap < -5 %}
+          <p class="muted" style="font-size:12px;">Search visitors watch <b style="color:var(--text);">{{ (-p.retention_gap) | round | int }} points less</b> than people in the Shorts feed — search may be sending the wrong audience.</p>
+        {% endif %}
+      </div>
+
+      <div>
+        <div class="card-title">What viewers searched to find you</div>
+        {% if p.search_terms %}
+        <table style="width:100%; font-size:12.5px;">
+          <thead><tr><th style="text-align:left;">Search</th><th style="text-align:right;">Views</th><th style="text-align:right;">Watched</th></tr></thead>
+          <tbody>
+          {% for t in p.search_terms %}
+            <tr><td>{{ t.key }}</td><td style="text-align:right; font-variant-numeric:tabular-nums;">{{ t.views }}</td>
+                <td style="text-align:right; font-variant-numeric:tabular-nums;" class="muted">{{ (t.avg_view_pct | round(0) | int) if t.avg_view_pct <= 100 else 100 }}%</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% if p.brand_terms %}<p class="muted" style="font-size:11.5px; margin-top:8px;">Also searched the channel by name: {{ p.brand_terms | map(attribute='key') | join(', ') }}.</p>{% endif %}
+        {% else %}
+          <p class="muted" style="font-size:12.5px;">No search terms with enough views yet.</p>
+        {% endif %}
+      </div>
+
+      <div>
+        <div class="card-title">Who and on what</div>
+        {% for s in p.subscribed %}
+          <div class="row" style="justify-content:space-between; font-size:12.5px; margin:6px 0;"><span>{{ s.label }} viewers</span><span class="muted">{{ (s.share * 100) | round | int }}% of views</span></div>
+        {% endfor %}
+        {% for d in p.devices %}
+          <div class="row" style="justify-content:space-between; font-size:12.5px; margin:6px 0;"><span>{{ d.label }}</span><span class="muted">{{ (d.share * 100) | round | int }}% · {{ (d.avg_view_pct | round(0) | int) if d.avg_view_pct <= 100 else 100 }}% watched</span></div>
+        {% endfor %}
+      </div>
+
+    </div>
+  </div>
+</div>
+
+{% if p.exits %}
+<div class="sec-head" style="margin-top:20px;"><h3 style="margin:0; font-size:14px;">Where viewers left — the exact moment, what was said and what was on screen</h3></div>
+<div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:var(--space-md,12px);">
+  {% for e in p.exits %}
+  <div class="card" style="display:flex; gap:12px; align-items:flex-start;">
+    {% if e.frame %}
+      <img src="/retention-frame/{{ e.frame }}" alt="Frame at {{ e.t }}s" width="72" height="128" loading="lazy"
+           style="flex:none; width:72px; height:128px; object-fit:cover; border-radius:6px; border:1px solid var(--border); background:var(--bg);">
+    {% endif %}
+    <div style="min-width:0; font-size:12.5px;">
+      <div class="row" style="gap:8px; margin-bottom:4px;">
+        <span class="pill is-critical" style="padding:2px 8px; font-size:10.5px;">{{ e.loss_pts }} pts left</span>
+        <span class="muted">at {{ e.t }}s{% if e.beat %} · beat {{ e.beat }}{% endif %}</span>
+      </div>
+      <div style="margin:4px 0;"><span class="muted">Said:</span> “{{ (e.spoken or '') | truncate(130) }}”</div>
+      {% if e.subject %}<div class="muted" style="margin:4px 0;">On screen: {{ e.subject | truncate(90) }}{% if e.framing %} · {{ e.framing | truncate(50) }}{% endif %}</div>{% endif %}
+      <a href="/analytics/episode/{{ e.episode_id }}" style="font-size:11.5px;">{{ e.episode_id | episode_name }} →</a>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if p.directives %}
+<div class="sec-head" style="margin-top:20px;"><h3 style="margin:0; font-size:14px;">What the factory changed because of this</h3></div>
+{% for d in p.directives %}
+<div class="card accent" style="margin-bottom:10px;">
+  <div class="card-title">{{ d.title }} <span class="muted" style="text-transform:none; font-weight:400;">· written {{ d.created_at[:10] }}, read by the writers on the next episode</span></div>
+  <p style="font-size:12.5px; line-height:1.55; margin:6px 0 0;">{{ d.text }}</p>
+</div>
+{% endfor %}
+{% endif %}
+
+{% endif %}
+{% endfor %}

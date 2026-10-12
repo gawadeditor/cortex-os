@@ -8422,10 +8422,37 @@ def _render_analytics_overview():
         )
     except Exception:
         pass
+    # What the factory learned about how viewers find and leave a channel (traffic sources, search terms,
+    # exit moments with frames, and the directives written from them). One panel per channel in scope.
+    discovery = []
+    try:
+        from hypogeum.dashboard_discovery import get_discovery_panel
+        _chs = [c for c in _nav_channels() if (not ch or c["channel_id"] == ch)]
+        for c in _chs:
+            panel = get_discovery_panel(c["channel_id"], db_path=_db_path())
+            panel["channel_name"] = c.get("name") or c["channel_id"]
+            discovery.append(panel)
+    except Exception:
+        discovery = []
     return render_template("analytics.html",
-                           overview=overview, channels=channels,
+                           overview=overview, channels=channels, discovery=discovery,
                            valid_platforms=sorted(_VALID_PLATFORMS),
                            youtube_connected=youtube_connected)
+
+
+@app.route("/retention-frame/<name>")
+def retention_frame(name: str):
+    """The frame extracted at a retention exit (hypogeum/moment_learning.py). Plain file names only."""
+    import re as _re
+    from flask import send_file
+    if not _re.fullmatch(r"[A-Za-z0-9_\-]+\.jpg", name or ""):
+        return ("not found", 404)
+    p = _ROOT / ".hypogeum-assets" / "retention_frames" / name
+    if not p.is_file():
+        return ("not found", 404)
+    resp = send_file(str(p), mimetype="image/jpeg")
+    resp.headers["Cache-Control"] = "private, max-age=3600"
+    return resp
 
 
 @app.route("/intelligence")

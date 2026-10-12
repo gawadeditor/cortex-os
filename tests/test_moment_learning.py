@@ -131,3 +131,31 @@ def test_no_database_write_lock_is_held_while_frames_are_extracted(tmp_path, mon
     monkeypatch.setattr(ml, "extract_frame", _fake_extract)
     out = ml.learn_channel("ch", db_path=db, frames=True)
     assert out["videos"] == 7 and checked["n"] > 0
+
+
+def test_frames_already_extracted_survive_a_pass_where_the_render_is_unreachable(tmp_path, monkeypatch):
+    db = tmp_path / "t.db"
+    initialize_schema(db)
+    root = tmp_path / "eps"
+    vals = [1.0] * 4 + [0.5] * 32
+    conn = get_connection(db)
+    for n in range(7):
+        ep = f"ep_{n}"
+        d = _episode(root, ep, [f"hook {n}", f"second {n}"] + [f"line {j}" for j in range(7)])
+        (d / f"main_{ep}.mp4").write_bytes(b"x")
+        _seed(conn, ep, f"V{n}", 100 + n, _curve(vals), 36.0)
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(ml, "_roots", lambda cid: [root])
+    monkeypatch.setattr(ml, "FRAME_DIR", tmp_path / "frames")
+    monkeypatch.setattr(ml, "extract_frame", lambda v, t, o: str(o))
+    ml.learn_channel("ch", db_path=db, frames=True)
+    conn = get_connection(db)
+    with_frames = conn.execute("SELECT COUNT(*) FROM retention_moments WHERE frame_path IS NOT NULL").fetchone()[0]
+    conn.close()
+    assert with_frames > 0
+    monkeypatch.setattr(ml, "_roots", lambda cid: [tmp_path / "unreachable"])      # NAS down: timelines come from the cache
+    ml.learn_channel("ch", db_path=db, frames=True)
+    conn = get_connection(db)
+    assert conn.execute("SELECT COUNT(*) FROM retention_moments WHERE frame_path IS NOT NULL").fetchone()[0] == with_frames
+    conn.close()

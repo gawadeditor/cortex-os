@@ -151,6 +151,9 @@ def store(conn, channel_id: str, analysis: dict) -> int:
     for _ep, _tl in (analysis.get("_timeline_cache") or {}).items():
         _cache_timeline(conn, _ep, _tl)
     for vid, info in analysis["videos"].items():
+        # keep frames already extracted (the render may be unreachable now, e.g. NAS down): remember them by moment id
+        _old_frames = {r[0]: r[1] for r in conn.execute(
+            "SELECT moment_id, frame_path FROM retention_moments WHERE video_id = ? AND frame_path IS NOT NULL", (vid,))}
         conn.execute("DELETE FROM retention_moments WHERE video_id = ?", (vid,))
         for i, m in enumerate(info["moments"]):
             conn.execute(
@@ -161,7 +164,7 @@ def store(conn, channel_id: str, analysis: dict) -> int:
                  info["views"], m.get("beat_id"), m.get("beat_index"), m.get("beats_total"),
                  json.dumps(m.get("signals") or []), m.get("text"), m.get("scene_id"),
                  json.dumps({k: m.get(k) for k in ("subject", "framing", "motion_type", "mood")}, ensure_ascii=False),
-                 m.get("frame_path"), _now()))
+                 m.get("frame_path") or _old_frames.get(f"{vid}:{m['kind']}:{i}"), _now()))
             n += 1
     return n
 

@@ -63,6 +63,20 @@
   </div>
 </div>
 
+{% if p.platforms %}
+<div class="sec-head" style="margin-top:20px;"><h3 style="margin:0; font-size:14px;">Which platform actually delivers — measured from every post's day-by-day numbers</h3></div>
+<div class="card" style="padding:0;"><div class="table-wrap" style="border:none;"><table style="width:100%; font-size:12.5px;">
+  <thead><tr><th style="text-align:left;">Platform</th><th style="text-align:right;">Posts</th><th style="text-align:right;">Avg views / post</th>
+    <th style="text-align:right;">Share of views</th><th style="text-align:right;">Like · comment · share · save</th><th style="text-align:right;">Views on day 1</th></tr></thead>
+  <tbody>{% for x in p.platforms %}
+    <tr><td>{{ x.platform }}</td><td style="text-align:right;">{{ x.posts }}</td>
+      <td style="text-align:right; font-variant-numeric:tabular-nums;">{{ "{:,}".format(x.avg_views) }}</td>
+      <td style="text-align:right;">{{ (x.share * 100) | round | int }}%</td>
+      <td style="text-align:right;">{{ '%.1f' % (x.engagement_rate * 100) }}%</td>
+      <td style="text-align:right;" class="muted">{% if x.day0_share is not none %}{{ (x.day0_share * 100) | round | int }}%{% else %}—{% endif %}</td></tr>
+  {% endfor %}</tbody></table></div></div>
+{% endif %}
+
 {% if p.exits %}
 <div class="sec-head" style="margin-top:20px;"><h3 style="margin:0; font-size:14px;">Where viewers left — the exact moment, what was said and what was on screen</h3></div>
 <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:var(--space-md,12px);">
@@ -75,7 +89,7 @@
     <div style="min-width:0; font-size:12.5px;">
       <div class="row" style="gap:8px; margin-bottom:4px;">
         <span class="pill is-critical" style="padding:2px 8px; font-size:10.5px;">{{ e.loss_pts }} pts left</span>
-        <span class="muted">at {{ e.t }}s{% if e.beat %} · beat {{ e.beat }}{% endif %}</span>
+        <span class="muted">at {{ e.t }}s{% if e.beat %} · beat {{ e.beat }}{% endif %} · {{ e.platform | title }}</span>
       </div>
       <div style="margin:4px 0;"><span class="muted">Said:</span> “{{ (e.spoken or '') | truncate(130) }}”</div>
       {% if e.subject %}<div class="muted" style="margin:4px 0;">On screen: {{ e.subject | truncate(90) }}{% if e.framing %} · {{ e.framing | truncate(50) }}{% endif %}</div>{% endif %}

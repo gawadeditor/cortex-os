@@ -406,6 +406,23 @@ def _run_learning_cycle(db_path: Path) -> dict:
             except Exception as exc:
                 log.error("learning_cycle_episode_error episode=%s error=%s", ep, exc)
 
+        # Day-by-day timelines + Facebook's per-second curves for every post (hypogeum/platform_timeline_sync.py), then what
+        # they say about which platform delivers (hypogeum/platform_learning.py). Reads first, so the moment learning below
+        # can use the Facebook curves in the same cycle.
+        try:
+            from hypogeum.channel_config import list_channel_profiles
+            from hypogeum.platform_learning import learn_channel_platforms
+            from hypogeum.platform_timeline_sync import sync_channel_timelines
+            for cp in list_channel_profiles(db_path=db_path):
+                cid = getattr(cp, "channel_id", None)
+                if cid:
+                    tl = sync_channel_timelines(cid, db_path=db_path)
+                    pl = learn_channel_platforms(cid, db_path=db_path)
+                    if tl.get("posts") or pl.get("directive"):
+                        log.info("platform_learning channel=%s timelines=%s curves=%s directive=%s", cid, tl.get("posts"), tl.get("curves"), pl.get("directive"))
+        except Exception as exc:
+            log.error("learning_cycle_platform_timeline_error error=%s", exc)
+
         # Retention moments: tie where viewers left to what was said/shown, per channel,
         # and write the measured pattern as a directive (hypogeum/moment_learning.py).
         try:

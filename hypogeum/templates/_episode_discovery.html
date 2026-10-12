@@ -1,5 +1,17 @@
 {# How each YouTube video of this episode was found, how long people stayed and where they left (hypogeum/dashboard_discovery.py). #}
 {% from '_charts.html' import areachart, hbar %}
+{% if discovery.platforms %}
+<div class="sec-head"><h2>How it grew on every platform</h2><span class="sec-count">cumulative views, day by day</span></div>
+<div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:12px;">
+  {% for pl in discovery.platforms %}
+  <div class="card">
+    <div class="card-title">{{ pl.platform }} <span class="muted" style="text-transform:none; font-weight:400;">· {{ "{:,}".format(pl.views) }} views over {{ pl.days }} day{{ '' if pl.days == 1 else 's' }}</span></div>
+    {{ areachart(pl.series, tone='accent') }}
+    {% if pl.curve %}<div class="card-title" style="margin-top:10px;">Still watching, second by second (Facebook)</div>{{ areachart(pl.curve, tone='accent') }}{% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
 {% for v in discovery.videos %}
 <div class="sec-head"><h2>YouTube video {{ v.video_id }}{% if discovery.videos | length == 1 %}{% endif %}</h2>
   <span class="sec-count">{{ "{:,}".format(v.views or 0) }} views{% if v.avg_view_pct %} · {{ ((v.avg_view_pct * 100) | round | int) }}% watched on average{% endif %}</span></div>

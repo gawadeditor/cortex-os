@@ -59,6 +59,30 @@ def _youtube_videos(conn, channel_id: str) -> List[dict]:
     return [dict(r) for r in rows if r["cur"] and r["vp"] and r["aw"]]
 
 
+def _facebook_videos(conn, channel_id: str) -> List[dict]:
+    """Facebook posts with a per-second retention curve (post_retention, filled by platform_timeline_sync). The curve is
+    {"<second>": share still watching}; it is normalised to the YouTube curve shape so the same analysis applies."""
+    rows = conn.execute(
+        "SELECT pr.post_id vid, pr.episode_id ep, pr.curve_json cur, pr.seconds secs, "
+        "(SELECT MAX(pt.views) FROM post_timeline pt WHERE pt.post_id = pr.post_id AND pt.platform = 'facebook') views "
+        "FROM post_retention pr WHERE pr.platform = 'facebook' AND pr.channel_id = ? AND pr.episode_id IS NOT NULL", (channel_id,)).fetchall()
+    out = []
+    for r in rows:
+        try:
+            raw = json.loads(r["cur"])
+            pts = sorted(((int(k), float(v)) for k, v in raw.items()), key=lambda x: x[0])
+        except (ValueError, TypeError):
+            continue
+        n = len(pts)
+        if n < 10:
+            continue
+        curve = [{"elapsedVideoTimeRatio": round((i + 1) / n, 4), "audienceWatchRatio": v} for i, (_, v) in enumerate(pts)]
+        vp = min(1.0, statistics.mean(min(v, 1.0) for _, v in pts))
+        out.append({"vid": f"fb:{r['vid']}", "ep": r["ep"], "views": r["views"] or 0, "vp": vp, "aw": None, "cur": json.dumps(curve),
+                    "platform": "facebook", "dur": float(n)})
+    return out
+
+
 def extract_frame(video_path: Path, t: float, out_path: Path) -> Optional[str]:
     """One JPEG frame at second `t`. None when the render is unreachable or ffmpeg fails."""
     try:
@@ -109,7 +133,7 @@ def analyse_channel(channel_id: str, *, db_path=None, frames: bool = True) -> di
 
     conn = get_connection(db_path)
     try:
-        candidates = _youtube_videos(conn, channel_id)
+        candidates = _youtube_videos(conn, channel_id) + _facebook_videos(conn, channel_id)
         cached = {v["ep"]: _cached_timeline(conn, v["ep"]) for v in candidates}
     finally:
         conn.close()                                    # nothing below touches the database
@@ -118,7 +142,8 @@ def analyse_channel(channel_id: str, *, db_path=None, frames: bool = True) -> di
     skipped: List[tuple] = []
     to_cache: Dict[str, List[dict]] = {}
     for v in candidates:
-        dur = v["aw"] / v["vp"]
+        dur = v["dur"] if v.get("dur") else v["aw"] / v["vp"]
+        platform = v.get("platform", "youtube")
         d = find_episode_dir(v["ep"], _roots(channel_id))
         rp = None
         if d is not None:
@@ -142,7 +167,7 @@ def analyse_channel(channel_id: str, *, db_path=None, frames: bool = True) -> di
                 if m["kind"] == "exit" and i < 2:
                     m["frame_path"] = extract_frame(rp, m["t"], FRAME_DIR / f"{v['vid']}_{m['kind']}_{int(m['t'] * 10)}.jpg")
         out[v["vid"]] = {"episode_id": v["ep"], "views": v["views"], "avg_view_pct": v["vp"], "duration_s": dur,
-                         "moments": ms, "beats": beat_losses(curve, dur, tl)}
+                         "platform": platform, "moments": ms, "beats": beat_losses(curve, dur, tl)}
     return {"videos": out, "skipped": skipped, "_timeline_cache": to_cache}
 
 
@@ -157,10 +182,10 @@ def store(conn, channel_id: str, analysis: dict) -> int:
         conn.execute("DELETE FROM retention_moments WHERE video_id = ?", (vid,))
         for i, m in enumerate(info["moments"]):
             conn.execute(
-                "INSERT INTO retention_moments (moment_id, channel_id, episode_id, video_id, kind, t0, t1, loss, video_views, "
+                "INSERT INTO retention_moments (moment_id, channel_id, episode_id, video_id, platform, kind, t0, t1, loss, video_views, "
                 "beat_id, beat_index, beats_total, signals_json, spoken_text, scene_id, visual_json, frame_path, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (f"{vid}:{m['kind']}:{i}", channel_id, info["episode_id"], vid, m["kind"], m["t0"], m["t1"], m["loss"],
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (f"{vid}:{m['kind']}:{i}", channel_id, info["episode_id"], vid, info.get("platform", "youtube"), m["kind"], m["t0"], m["t1"], m["loss"],
                  info["views"], m.get("beat_id"), m.get("beat_index"), m.get("beats_total"),
                  json.dumps(m.get("signals") or []), m.get("text"), m.get("scene_id"),
                  json.dumps({k: m.get(k) for k in ("subject", "framing", "motion_type", "mood")}, ensure_ascii=False),
@@ -177,10 +202,10 @@ def _words(t: str) -> int:
     return len((t or "").split())
 
 
-def derive_pattern(analysis: dict) -> Optional[dict]:
+def derive_pattern(analysis: dict, platform: str = "youtube") -> Optional[dict]:
     """The beat position that loses the most viewers across videos, with real examples of a beat that lost them and
     of the SAME position holding them. None when there is not enough material evidence."""
-    vids = analysis["videos"]
+    vids = {k: v for k, v in analysis["videos"].items() if v.get("platform", "youtube") == platform}
     if len(vids) < MIN_VIDEOS:
         return None
     by_pos: Dict[int, List[dict]] = {}
@@ -210,7 +235,18 @@ def _ex(b: dict) -> str:
     return f'"{(b["text"] or "").strip()[:140]}" (on screen: {b.get("subject") or "?"}, {b.get("framing") or "?"})'
 
 
-def directive_text(p: dict) -> str:
+def facebook_note(fb: Optional[dict], yt: Optional[dict]) -> str:
+    """One sentence on what Facebook's own per-second curves say, so the directive carries both audiences."""
+    if not fb:
+        return ""
+    k = fb["position"] + 1
+    same = yt is not None and yt["position"] == fb["position"]
+    return (f" Facebook's own per-second curves ({fb['videos']} videos) "
+            + (f"show the SAME leak: beat {k} loses {fb['mean_loss'] * 100:.0f} points there too." if same else
+               f"put the biggest leak at beat {k} (about {fb['mean_start_s']}s in, {fb['mean_loss'] * 100:.0f} points)."))
+
+
+def directive_text(p: dict, fb: Optional[dict] = None) -> str:
     k = p["position"] + 1
     held_pts = ", ".join(f"{b['loss'] * 100:.0f}" for b in p["held"])
     text = (
@@ -223,7 +259,7 @@ def directive_text(p: dict) -> str:
     )
     if abs(p["mean_words_lost"] - p["mean_words_held"]) >= 3:        # only cite a trait when it actually differs
         text += f" (high-loss lines averaged {p['mean_words_lost']} words, low-loss lines {p['mean_words_held']})"
-    return text + f". This is a measured pattern on this channel, not a style preference."
+    return text + "." + facebook_note(fb, p) + " This is a measured pattern on this channel, not a style preference."
 
 
 def learn_channel(channel_id: str, *, db_path: Optional[Path] = None, frames: bool = True) -> dict:
@@ -241,15 +277,17 @@ def learn_channel(channel_id: str, *, db_path: Optional[Path] = None, frames: bo
             conn.commit()
         finally:
             conn.close()
-        p = derive_pattern(analysis)
-        if p:
-            text = directive_text(p)
+        p = derive_pattern(analysis, "youtube")
+        fb = derive_pattern(analysis, "facebook")
+        if p or fb:
+            text = directive_text(p or fb, fb if p else None) if p else directive_text(fb).replace("MEASURED ON THIS CHANNEL", "MEASURED ON THIS CHANNEL'S FACEBOOK AUDIENCE", 1)
             active = [d for d in get_active_directives(channel_id, dimension=DIRECTIVE_DIMENSION, db_path=db_path)]
             if not active or active[0]["directive_text"] != text:
                 record_directive(channel_id, DIRECTIVE_DIMENSION, "change", text, db_path=db_path,
                                  source_episode=",".join(sorted({v["episode_id"] for v in analysis["videos"].values()}))[:200])
                 summary["directive"] = hashlib.sha256(text.encode()).hexdigest()[:10]
-            summary["pattern_position"] = p["position"] + 1
+            summary["pattern_position"] = (p or fb)["position"] + 1
+            summary["facebook_videos"] = sum(1 for v in analysis["videos"].values() if v.get("platform") == "facebook")
     except Exception as exc:  # noqa: BLE001 -- learning must never break the worker
         log.error("moment_learning_failed", channel_id=channel_id, error=str(exc)[:200])
     return summary

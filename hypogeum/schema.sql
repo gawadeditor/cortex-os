@@ -1285,6 +1285,44 @@ CREATE INDEX IF NOT EXISTS idx_rm_channel ON retention_moments(channel_id, video
 
 -- episode_timelines: the narration/script/scene timeline of an episode, cached the first time its folder was readable,
 -- so retention learning keeps working when the archive (NAS) is unreachable (episodes are moved there after release).
+-- post_timeline: how each post's numbers grew day by day on every platform (Zernio /analytics/post-timeline), and
+-- post_retention: the per-second watch curve the platform reports (Facebook gives one; the factory learns from it like
+-- from YouTube's). Written by hypogeum/platform_timeline_sync.py.
+CREATE TABLE IF NOT EXISTS post_timeline (
+    post_id         TEXT NOT NULL,
+    platform        TEXT NOT NULL,
+    date            TEXT NOT NULL,
+    channel_id      TEXT,
+    episode_id      TEXT,
+    deliverable_id  TEXT,
+    impressions     INTEGER,
+    reach           INTEGER,
+    views           INTEGER,
+    likes           INTEGER,
+    comments        INTEGER,
+    shares          INTEGER,
+    saves           INTEGER,
+    clicks          INTEGER,
+    replays         INTEGER,
+    completion_rate REAL,
+    follows         INTEGER,
+    fetched_at      TEXT NOT NULL,
+    PRIMARY KEY (post_id, platform, date)
+);
+CREATE INDEX IF NOT EXISTS idx_pt_episode ON post_timeline(episode_id, platform);
+
+CREATE TABLE IF NOT EXISTS post_retention (
+    post_id         TEXT NOT NULL,
+    platform        TEXT NOT NULL,
+    channel_id      TEXT,
+    episode_id      TEXT,
+    deliverable_id  TEXT,
+    curve_json      TEXT NOT NULL,       -- {"0": 1.0, "1": 1.0, ...}: share of viewers still watching at each second
+    seconds         INTEGER,
+    updated_at      TEXT NOT NULL,
+    PRIMARY KEY (post_id, platform)
+);
+
 -- episode_traits: script-level traits of an episode (the hook pattern it opened with and its first spoken line), cached
 -- when the episode folder was readable so hook learning does not depend on the archive (NAS) being reachable.
 CREATE TABLE IF NOT EXISTS episode_traits (

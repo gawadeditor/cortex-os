@@ -25,7 +25,7 @@ def _frame_name(path: Optional[str]) -> Optional[str]:
 
 def get_discovery_panel(channel_id: str, db_path=None) -> dict:
     out = {"channel_id": channel_id, "snapshot_date": None, "mix": [], "search_terms": [], "brand_terms": [],
-           "subscribed": [], "devices": [], "exits": [], "directives": [], "has_data": False}
+           "subscribed": [], "devices": [], "exits": [], "directives": [], "platforms": [], "has_data": False}
     try:
         from hypogeum.db import get_connection, initialize_schema
         initialize_schema(db_path)
@@ -64,10 +64,18 @@ def get_discovery_panel(channel_id: str, db_path=None) -> dict:
                                      "loss_pts": round(r["loss"] * 100), "views": r["video_views"], "spoken": r["spoken_text"],
                                      "beat": (r["beat_index"] + 1) if r["beat_index"] is not None else None,
                                      "subject": vis.get("subject"), "framing": vis.get("framing"),
-                                     "frame": _frame_name(r.get("frame_path"))})
+                                     "frame": _frame_name(r.get("frame_path")), "platform": (r.get("platform") or "youtube")})
                 if len(out["exits"]) >= 6:
                     break
-            for dim, title in (("retention_moments", "Where viewers leave"), ("search_demand", "What viewers search for")):
+            try:
+                from hypogeum.platform_learning import _NAMES, platform_stats
+                pt = [dict(r) for r in conn.execute("SELECT * FROM post_timeline WHERE channel_id = ?", (channel_id,))]
+                st = platform_stats(pt)
+                out["platforms"] = [{"platform": _NAMES.get(k, k), **v} for k, v in sorted(st.items(), key=lambda kv: -kv[1]["avg_views"])]
+            except Exception:  # noqa: BLE001
+                out["platforms"] = []
+            for dim, title in (("retention_moments", "Where viewers leave"), ("search_demand", "What viewers search for"),
+                               ("hook_patterns", "Which openings hold viewers"), ("platform_playbook", "Which platform delivers")):
                 for d in conn.execute("SELECT directive_text, created_at FROM channel_learning_directives WHERE channel_id = ? "
                                       "AND dimension = ? AND active = 1 ORDER BY created_at DESC LIMIT 1", (channel_id, dim)):
                     out["directives"].append({"title": title, "text": d["directive_text"], "created_at": d["created_at"]})
@@ -75,14 +83,41 @@ def get_discovery_panel(channel_id: str, db_path=None) -> dict:
             conn.close()
     except Exception:  # noqa: BLE001 -- the page must render even if a table is missing
         pass
-    out["has_data"] = bool(out["mix"] or out["exits"] or out["directives"])
+    out["has_data"] = bool(out["mix"] or out["exits"] or out["directives"] or out["platforms"])
+    return out
+
+
+def _episode_platform_growth(conn, episode_id: str) -> list:
+    """Per platform: the day-by-day cumulative views of this episode's posts (summed over its posts) + Facebook's curve."""
+    rows = [dict(r) for r in conn.execute(
+        "SELECT platform, date, SUM(views) v, SUM(likes) l, SUM(shares) sh FROM post_timeline WHERE episode_id = ? "
+        "GROUP BY platform, date ORDER BY platform, date", (episode_id,))]
+    by = {}
+    for r in rows:
+        by.setdefault(r["platform"], []).append(r)
+    out = []
+    for plat, rs in sorted(by.items()):
+        series = [r["v"] or 0 for r in rs]
+        if not any(series):
+            continue
+        item = {"platform": plat.title(), "series": series[:60], "views": max(series), "likes": max((r["l"] or 0) for r in rs),
+                "days": len(rs), "curve": []}
+        if plat == "facebook":
+            c = conn.execute("SELECT curve_json FROM post_retention WHERE episode_id = ? AND platform = 'facebook' LIMIT 1", (episode_id,)).fetchone()
+            if c:
+                try:
+                    raw = json.loads(c[0])
+                    item["curve"] = [round(min(float(v), 1.5), 3) for _, v in sorted(((int(k), v) for k, v in raw.items()))]
+                except (ValueError, TypeError):
+                    pass
+        out.append(item)
     return out
 
 
 def get_episode_discovery(episode_id: str, db_path=None) -> dict:
     """Per-episode view for /analytics/episode/<id>: for each of the episode's YouTube videos — the retention curve, the
     moments viewers left (with the frame) and how that video was found (traffic types + search terms). Never raises."""
-    out = {"videos": []}
+    out = {"videos": [], "platforms": []}
     try:
         from hypogeum.db import get_connection, initialize_schema
         from hypogeum.retention_moments import _points
@@ -130,6 +165,7 @@ def get_episode_discovery(episode_id: str, db_path=None) -> dict:
                         "SELECT subkey AS term, views, avg_view_pct FROM youtube_traffic_insights WHERE channel_id = ? AND snapshot_date = ? "
                         "AND dimension = 'video_search' AND key = ? AND views > 0 ORDER BY views DESC LIMIT 6", (channel_id, snap, v["v"]))]
                 out["videos"].append(item)
+            out["platforms"] = _episode_platform_growth(conn, episode_id)
         finally:
             conn.close()
     except Exception:  # noqa: BLE001

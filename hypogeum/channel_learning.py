@@ -38,6 +38,7 @@ _ADVISORY_DIMENSIONS = {
     "retention_moments",   # written by hypogeum/moment_learning.py from measured exits
     "search_demand",       # written by hypogeum/youtube_traffic.py from measured YouTube search/traffic data
     "hook_patterns",       # written by hypogeum/hook_learning.py: which opening patterns held viewers
+    "platform_playbook",   # written by hypogeum/platform_learning.py: which platform delivers, how fast posts take off
 }
 
 

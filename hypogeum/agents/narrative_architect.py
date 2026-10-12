@@ -152,7 +152,7 @@ def run_narrative_architect(
     # own retention analytics (hypogeum.channel_learning). Advisory to the model.
     try:
         from hypogeum.channel_learning import learning_input_block  # noqa: PLC0415
-        _input_package.update(learning_input_block(channel_id, "hook", "pacing", "retention_moments", "hook_patterns"))
+        _input_package.update(learning_input_block(channel_id, "hook", "pacing", "retention_moments", "hook_patterns", "platform_playbook"))
     except Exception:  # noqa: BLE001
         pass
 

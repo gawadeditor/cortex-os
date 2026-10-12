@@ -35,6 +35,8 @@ _TIMEOUT = 30
 WINDOW_DAYS = 89                      # the API's own limit for most reports
 MIN_SEARCH_VIEWS_TOTAL = 12           # evidence gate for a search_demand directive
 MIN_TERMS = 3
+_MAX_VIDEOS = 40                       # per-video traffic: the most-viewed videos only (2 API calls each)
+_MIN_VIDEO_VIEWS = 20
 DIRECTIVE_DIMENSION = "search_demand"
 _METRICS = "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage"
 
@@ -89,8 +91,10 @@ def _row(dimension: str, r: list) -> dict:
             "avg_view_pct": float(nums[3] or 0)}
 
 
-def fetch_channel_traffic(channel_id: str, *, db_path=None, token: Optional[str] = None) -> Optional[List[dict]]:
-    """Fetch every traffic report for the channel. None when the channel has no usable authorization."""
+def fetch_channel_traffic(channel_id: str, *, db_path=None, token: Optional[str] = None,
+                          video_ids: Optional[List[str]] = None) -> Optional[List[dict]]:
+    """Fetch every traffic report for the channel (and, for `video_ids`, how each of those videos was found).
+    None when the channel has no usable authorization."""
     if token is None:
         try:
             from hypogeum.publishing.youtube_privacy import _access_token
@@ -106,6 +110,21 @@ def fetch_channel_traffic(channel_id: str, *, db_path=None, token: Optional[str]
         for r in rows or []:
             try:
                 out.append(_row(dimension, r))
+            except (TypeError, ValueError, IndexError):
+                continue
+    for vid in (video_ids or [])[:_MAX_VIDEOS]:
+        base = {"ids": "channel==MINE", "startDate": start, "endDate": end, "metrics": _METRICS}
+        for r in _report(token, {**base, "dimensions": "insightTrafficSourceType", "filters": f"video=={vid}", "sort": "-views"}) or []:
+            try:
+                row = _row("video_traffic", r)
+                out.append({**row, "key": vid, "subkey": str(r[0])})
+            except (TypeError, ValueError, IndexError):
+                continue
+        for r in _report(token, {**base, "dimensions": "insightTrafficSourceDetail", "sort": "-views", "maxResults": 25,
+                                 "filters": f"video=={vid};insightTrafficSourceType==YT_SEARCH"}) or []:
+            try:
+                row = _row("video_search", r)
+                out.append({**row, "key": vid, "subkey": str(r[0])})
             except (TypeError, ValueError, IndexError):
                 continue
     return out
@@ -202,6 +221,14 @@ def search_terms_for_metadata(channel_id: str, *, db_path=None, limit: int = 10)
 # orchestration
 # ---------------------------------------------------------------------------
 
+def _video_ids(conn, channel_id: str) -> List[str]:
+    rows = conn.execute(
+        "SELECT pa.platform_video_id v, MAX(pa.views) m FROM platform_analytics pa WHERE pa.platform='youtube' AND pa.source='api' "
+        "AND pa.platform_video_id IS NOT NULL AND (SELECT et.channel_id FROM episode_topics et WHERE et.episode_id=pa.episode_id LIMIT 1)=? "
+        "GROUP BY pa.platform_video_id HAVING m >= ? ORDER BY m DESC LIMIT ?", (channel_id, _MIN_VIDEO_VIEWS, _MAX_VIDEOS)).fetchall()
+    return [r[0] for r in rows]
+
+
 def learn_channel_traffic(channel_id: str, *, db_path=None, force: bool = False, token: Optional[str] = None) -> dict:
     """Fetch (at most once per day unless forced), store, derive, write the directive. Never raises."""
     out = {"channel_id": channel_id, "fetched": False, "rows": 0, "directive": None, "error": None}
@@ -214,10 +241,11 @@ def learn_channel_traffic(channel_id: str, *, db_path=None, force: bool = False,
         try:
             have_today = conn.execute("SELECT 1 FROM youtube_traffic_insights WHERE channel_id = ? AND snapshot_date = ? LIMIT 1",
                                       (channel_id, today)).fetchone()
+            vids = _video_ids(conn, channel_id)
         finally:
             conn.close()
         if force or not have_today:
-            rows = fetch_channel_traffic(channel_id, db_path=db_path, token=token)
+            rows = fetch_channel_traffic(channel_id, db_path=db_path, token=token, video_ids=vids)
             if rows is None:
                 out["error"] = "no usable YouTube authorization for this channel"
                 return out

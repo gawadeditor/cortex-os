@@ -269,7 +269,7 @@ def run_script_engine(
     # retention analytics (hypogeum.channel_learning). Advisory to the model.
     try:
         from hypogeum.channel_learning import learning_input_block  # noqa: PLC0415
-        _input_package.update(learning_input_block(channel_id, "hook", "pacing", "retention_moments"))
+        _input_package.update(learning_input_block(channel_id, "hook", "pacing", "retention_moments", "hook_patterns"))
     except Exception:  # noqa: BLE001
         pass
 

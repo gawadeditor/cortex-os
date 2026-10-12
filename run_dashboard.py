@@ -8481,7 +8481,13 @@ def intelligence_episode_page(episode_id):
     if data is None:
         return render_template("not_found.html",
                                kind="Episode analytics", id=episode_id), 404
-    return render_template("analytics_episode.html", d=data)
+    discovery = {"videos": []}
+    try:
+        from hypogeum.dashboard_discovery import get_episode_discovery
+        discovery = get_episode_discovery(episode_id, db_path=_db_path())
+    except Exception:
+        pass
+    return render_template("analytics_episode.html", d=data, discovery=discovery)
 
 
 @app.route("/intelligence/learning")

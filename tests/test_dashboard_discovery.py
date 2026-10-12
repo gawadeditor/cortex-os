@@ -37,3 +37,31 @@ def test_empty_panel_does_not_raise(tmp_path):
     initialize_schema(db)
     p = get_discovery_panel("nobody", db_path=db)
     assert p["has_data"] is False and p["exits"] == []
+
+
+def test_episode_discovery_joins_curve_exits_and_traffic(tmp_path):
+    from hypogeum.dashboard_discovery import get_episode_discovery
+    db = tmp_path / "t.db"
+    initialize_schema(db)
+    conn = get_connection(db)
+    conn.execute("INSERT INTO episode_topics (topic_id, channel_id, episode_id, topic_text, status, created_at, updated_at) "
+                 "VALUES ('t','ch','ep_1','x','consumed','x','x')")
+    curve = [{"elapsedVideoTimeRatio": round((i + 1) / 20, 3), "audienceWatchRatio": 1.0 - i * 0.03} for i in range(20)]
+    conn.execute("INSERT INTO platform_analytics (record_id, episode_id, platform, snapshot_date, window_days, views, avg_view_pct, "
+                 "avg_watch_time_s, platform_video_id, source, imported_at, retention_curve_json) VALUES "
+                 "('r1','ep_1','youtube','2026-10-12',28,300,0.6,24,'V1','api','x',?)", (json.dumps(curve),))
+    conn.execute("INSERT INTO retention_moments (moment_id, channel_id, episode_id, video_id, kind, t0, t1, loss, video_views, beat_id, beat_index, "
+                 "beats_total, signals_json, spoken_text, scene_id, visual_json, frame_path, created_at) VALUES "
+                 "('V1:exit:0','ch','ep_1','V1','exit',4,5,0.2,300,'b2',1,9,'[]','Said line','s2','{}','/x/V1_exit_45.jpg','x')")
+    ins = ("INSERT INTO youtube_traffic_insights (channel_id, snapshot_date, dimension, key, subkey, views, minutes_watched, avg_view_duration_s, "
+           "avg_view_pct, window_days, created_at) VALUES ('ch','2026-10-12',?,?,?,?,0,10,?,89,'x')")
+    conn.execute(ins, ("video_traffic", "V1", "SHORTS", 250, 60.0))
+    conn.execute(ins, ("video_traffic", "V1", "YT_SEARCH", 50, 90.0))
+    conn.execute(ins, ("video_search", "V1", "stonehenge mystery", 3, 96.0))
+    conn.commit()
+    conn.close()
+    d = get_episode_discovery("ep_1", db_path=db)["videos"][0]
+    assert d["video_id"] == "V1" and len(d["curve"]) > 5
+    assert d["exits"][0]["frame"] == "V1_exit_45.jpg" and d["exits"][0]["loss_pts"] == 20
+    assert d["found_by"][0]["label"] == "the Shorts feed" and round(d["found_by"][1]["share"], 2) == round(50 / 300, 2)
+    assert d["searches"][0]["term"] == "stonehenge mystery"

@@ -421,6 +421,19 @@ def _run_learning_cycle(db_path: Path) -> dict:
         except Exception as exc:
             log.error("learning_cycle_moments_error error=%s", exc)
 
+        # Which hook patterns hold viewers (hypogeum/hook_learning.py): measured retention vs the pattern each script used.
+        try:
+            from hypogeum.channel_config import list_channel_profiles
+            from hypogeum.hook_learning import learn_channel_hooks
+            for cp in list_channel_profiles(db_path=db_path):
+                cid = getattr(cp, "channel_id", None)
+                if cid:
+                    hl = learn_channel_hooks(cid, db_path=db_path)
+                    if hl.get("directive"):
+                        log.info("hook_learning channel=%s videos=%s patterns=%s directive=%s", cid, hl["videos"], hl["patterns"], hl["directive"])
+        except Exception as exc:
+            log.error("learning_cycle_hook_learning_error error=%s", exc)
+
         # Where YouTube views come from + what viewers searched (YouTube Analytics API, per-channel OAuth),
         # written as a `search_demand` directive (hypogeum/youtube_traffic.py). At most one fetch per day.
         try:

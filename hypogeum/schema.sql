@@ -1285,9 +1285,19 @@ CREATE INDEX IF NOT EXISTS idx_rm_channel ON retention_moments(channel_id, video
 
 -- episode_timelines: the narration/script/scene timeline of an episode, cached the first time its folder was readable,
 -- so retention learning keeps working when the archive (NAS) is unreachable (episodes are moved there after release).
+-- episode_traits: script-level traits of an episode (the hook pattern it opened with and its first spoken line), cached
+-- when the episode folder was readable so hook learning does not depend on the archive (NAS) being reachable.
+CREATE TABLE IF NOT EXISTS episode_traits (
+    episode_id   TEXT NOT NULL PRIMARY KEY,
+    hook_pattern TEXT,
+    hook_text    TEXT,
+    cached_at    TEXT NOT NULL
+);
+
 -- youtube_traffic_insights: where a channel's YouTube views COME FROM and what viewers searched, straight from the
 -- YouTube Analytics API (hypogeum/youtube_traffic.py). One snapshot per channel per day, replaced wholesale.
 -- dimension: traffic_type | search_term | ext_url | related_video | subscribed | device
+--            | video_traffic (key=video, subkey=traffic type) | video_search (key=video, subkey=term)
 CREATE TABLE IF NOT EXISTS youtube_traffic_insights (
     channel_id          TEXT NOT NULL,
     snapshot_date       TEXT NOT NULL,

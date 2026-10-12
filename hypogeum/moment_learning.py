@@ -97,22 +97,37 @@ def _cached_timeline(conn, episode_id: str) -> Optional[List[dict]]:
         return None
 
 
-def analyse_channel(conn, channel_id: str, *, frames: bool = True) -> dict:
-    """Pure read of the DB + episode folders. Returns {"videos": {vid: {...}}, "skipped": [...]}."""
+def analyse_channel(channel_id: str, *, db_path=None, frames: bool = True) -> dict:
+    """Read the DB, then do ALL slow work (NAS reads, ffmpeg frame extraction) with NO database connection open.
+
+    2026-10-12: this used to hold a connection with an uncommitted write (the timeline cache) while ffmpeg ran
+    against the NAS, so every learning cycle blocked the worker's own pipeline writes for minutes ('database is
+    locked' killed a healthy episode run). Reads happen first on a short connection; writes are returned in
+    out["_timeline_cache"] and committed by store() in one short transaction.
+    Returns {"videos": {...}, "skipped": [...], "_timeline_cache": {episode_id: timeline}}."""
+    from hypogeum.db import get_connection  # noqa: PLC0415
+
+    conn = get_connection(db_path)
+    try:
+        candidates = _youtube_videos(conn, channel_id)
+        cached = {v["ep"]: _cached_timeline(conn, v["ep"]) for v in candidates}
+    finally:
+        conn.close()                                    # nothing below touches the database
+
     out: Dict[str, dict] = {}
     skipped: List[tuple] = []
-    for v in _youtube_videos(conn, channel_id):
+    to_cache: Dict[str, List[dict]] = {}
+    for v in candidates:
         dur = v["aw"] / v["vp"]
         d = find_episode_dir(v["ep"], _roots(channel_id))
         rp = None
         if d is not None:
             tl = timeline_for_episode(d)
             if tl:
-                _cache_timeline(conn, v["ep"], tl)
+                to_cache[v["ep"]] = tl
             rp = _render_path(d, v["ep"])
         else:
-            # folder unreachable (archive/NAS down, or never kept): use the cached timeline
-            tl = _cached_timeline(conn, v["ep"])
+            tl = cached.get(v["ep"])                    # folder unreachable (archive/NAS down, or never kept)
             if not tl:
                 skipped.append((v["vid"], "episode folder not found and no cached timeline"))
                 continue
@@ -128,11 +143,13 @@ def analyse_channel(conn, channel_id: str, *, frames: bool = True) -> dict:
                     m["frame_path"] = extract_frame(rp, m["t"], FRAME_DIR / f"{v['vid']}_{m['kind']}_{int(m['t'] * 10)}.jpg")
         out[v["vid"]] = {"episode_id": v["ep"], "views": v["views"], "avg_view_pct": v["vp"], "duration_s": dur,
                          "moments": ms, "beats": beat_losses(curve, dur, tl)}
-    return {"videos": out, "skipped": skipped}
+    return {"videos": out, "skipped": skipped, "_timeline_cache": to_cache}
 
 
 def store(conn, channel_id: str, analysis: dict) -> int:
     n = 0
+    for _ep, _tl in (analysis.get("_timeline_cache") or {}).items():
+        _cache_timeline(conn, _ep, _tl)
     for vid, info in analysis["videos"].items():
         conn.execute("DELETE FROM retention_moments WHERE video_id = ?", (vid,))
         for i, m in enumerate(info["moments"]):
@@ -213,11 +230,11 @@ def learn_channel(channel_id: str, *, db_path: Optional[Path] = None, frames: bo
         from hypogeum.channel_learning import get_active_directives, record_directive
         from hypogeum.db import get_connection, initialize_schema
         initialize_schema(db_path)
+        analysis = analyse_channel(channel_id, db_path=db_path, frames=frames)   # slow part: no connection held
         conn = get_connection(db_path)
         try:
-            analysis = analyse_channel(conn, channel_id, frames=frames)
             summary["videos"] = len(analysis["videos"])
-            summary["moments"] = store(conn, channel_id, analysis)
+            summary["moments"] = store(conn, channel_id, analysis)                # fast part: one short transaction
             conn.commit()
         finally:
             conn.close()

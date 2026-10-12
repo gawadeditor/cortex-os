@@ -95,3 +95,39 @@ def test_timeline_is_cached_and_used_when_the_episode_folder_is_unreachable(tmp_
     monkeypatch.setattr(ml, "_roots", lambda cid: [tmp_path / "unreachable"])
     second = ml.learn_channel("ch", db_path=db, frames=False)
     assert second["videos"] == 7 and second["moments"] > 0
+
+
+def test_no_database_write_lock_is_held_while_frames_are_extracted(tmp_path, monkeypatch):
+    """Regression (2026-10-12): analysis held an uncommitted write (the timeline cache) while ffmpeg read the NAS,
+    blocking the worker's pipeline writes for minutes ('database is locked' killed a healthy episode run)."""
+    import sqlite3
+    db = tmp_path / "t.db"
+    initialize_schema(db)
+    root = tmp_path / "eps"
+    vals = [1.0] * 4 + [0.5] * 32
+    conn = get_connection(db)
+    for n in range(7):
+        ep = f"ep_{n}"
+        d = _episode(root, ep, [f"hook {n}", f"second {n}"] + [f"line {j}" for j in range(7)])
+        (d / f"main_{ep}.mp4").write_bytes(b"x")
+        _seed(conn, ep, f"V{n}", 100 + n, _curve(vals), 36.0)
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(ml, "_roots", lambda cid: [root])
+    monkeypatch.setattr(ml, "FRAME_DIR", tmp_path / "frames")
+    checked = {"n": 0}
+
+    def _fake_extract(video_path, t, out_path):
+        other = sqlite3.connect(str(db), timeout=0.2)           # would raise 'database is locked' if anyone held a write txn
+        try:
+            other.execute("CREATE TABLE IF NOT EXISTS _probe (x)")
+            other.execute("INSERT INTO _probe VALUES (1)")
+            other.commit()
+        finally:
+            other.close()
+        checked["n"] += 1
+        return None
+
+    monkeypatch.setattr(ml, "extract_frame", _fake_extract)
+    out = ml.learn_channel("ch", db_path=db, frames=True)
+    assert out["videos"] == 7 and checked["n"] > 0

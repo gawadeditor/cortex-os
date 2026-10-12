@@ -219,6 +219,19 @@ function panel(){
     <div class="cb-step-head"><span class="eyebrow">Step 2</span><h2>Pick a niche</h2></div>
     <p class="cb-step-sub">Choose the sub-niche to launch in. Suggestions are ranked for a faceless,
       AI-produced short-video channel.</p>
+    ${(DEFAULTS.market||[]).length ? `
+    <div class="cb-step-sub" style="margin-top:6px"><b>Proven right now</b> — channels created in the last year that already hold millions of views
+      (from the factory's own YouTube market scan):</div>
+    <div class="cb-choice" style="margin:8px 0 14px">
+      ${DEFAULTS.market.map(m=>`
+        <div class="cb-opt ${S.genre===m.name?'sel':''}" data-genre="${esc(m.name)}">
+          <div class="cb-opt-t">${esc(m.name)}</div>
+          <div class="cb-opt-d">${esc(m.why)}</div>
+          ${(m.how||[]).map(h=>`<div class="cb-opt-d">${esc(h)}</div>`).join("")}
+          ${m.hashtags&&m.hashtags.length?`<div class="cb-opt-d"><b>Hashtags:</b> <bdi>${esc(m.hashtags.join("  "))}</bdi></div>`:''}
+          ${m.examples&&m.examples.length?`<div class="cb-opt-d"><b>Examples:</b> <bdi>${esc(m.examples.join("  ·  "))}</bdi></div>`:''}
+        </div>`).join("")}
+    </div>` : ''}
     <button class="btn btn-primary" id="f-genrun">✨ Suggest niches</button>
     <span class="cb-suggesting" id="f-genstat"></span>
     ${S.genreDisclaimer ? `<div class="cb-warn">⚠ ${esc(S.genreDisclaimer)}</div>` : ''}

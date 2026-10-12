@@ -467,6 +467,21 @@ def _run_learning_cycle(db_path: Path) -> dict:
         except Exception as exc:
             log.error("learning_cycle_youtube_traffic_error error=%s", exc)
 
+        # Market scan: what recently created YouTube channels with millions of views have in common (weekly, background thread,
+        # started just after Google's quota reset; hypogeum/market_intel.py).
+        try:
+            from hypogeum.channel_config import list_channel_profiles
+            from hypogeum.market_intel import learn_channel_market, maybe_run_weekly
+            if maybe_run_weekly(db_path):
+                log.info("market_scan_started")
+            for cp in list_channel_profiles(db_path=db_path):
+                if getattr(cp, "channel_id", None):
+                    mk = learn_channel_market(cp.channel_id, db_path=db_path)
+                    if mk.get("directive"):
+                        log.info("market_playbook channel=%s niche=%s", cp.channel_id, mk.get("niche"))
+        except Exception as exc:
+            log.error("learning_cycle_market_scan_error error=%s", exc)
+
         # Per-channel content_volume (weekly-cadence) recommendation.
         try:
             from hypogeum.channel_config import list_channel_profiles

@@ -39,6 +39,7 @@ _ADVISORY_DIMENSIONS = {
     "search_demand",       # written by hypogeum/youtube_traffic.py from measured YouTube search/traffic data
     "hook_patterns",       # written by hypogeum/hook_learning.py: which opening patterns held viewers
     "platform_playbook",   # written by hypogeum/platform_learning.py: which platform delivers, how fast posts take off
+    "market_playbook",     # written by hypogeum/market_intel.py: conventions of new channels that already hit millions in this niche
 }
 
 

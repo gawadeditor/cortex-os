@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Market scan — Cortex</title>
+  {% include '_base_style.html' %}
+</head>
+<body>
+{% include '_nav.html' %}
+<div class="container">
+
+<div class="sub-nav">
+  <a href="/intelligence/performance"        class="sub-nav-link">Portfolio</a>
+  <a href="/intelligence/platform/youtube"   class="sub-nav-link">YouTube</a>
+  <a href="/intelligence/market"             class="sub-nav-link active">Market scan</a>
+  <a href="/intelligence/sync"               class="sub-nav-link">Sync health</a>
+</div>
+
+<div class="sec-head"><h1 style="margin:0; font-size:22px;">What is working on YouTube right now, for brand-new channels</h1></div>
+<p class="muted" style="font-size:13px; max-width:820px;">The factory searches YouTube itself for the videos that gained the most views lately, keeps the channels behind them that were
+  <b>created in the last year</b> and already hold <b>millions of views</b>, reads their recent uploads and works out what they share: niche, title formulas,
+  description style, hashtags, Shorts vs long, upload rhythm. It runs weekly; the New Channel wizard shows the proven niches.</p>
+
+{% if flash == 'started' %}<div class="flash flash-ok">Scan started in the background — refresh in a minute or two.</div>{% endif %}
+{% if flash == 'already-running' %}<div class="flash flash-warn">A scan is already running.</div>{% endif %}
+
+<form method="post" action="/intelligence/market/scan" style="margin:10px 0 18px;">
+  <button class="btn btn-primary" type="submit">Scan the market now</button>
+  {% if rep %}<span class="muted" style="font-size:12px; margin-left:10px;">Last scan {{ rep.created_at[:16].replace('T',' ') }} UTC · {{ rep.channels_total }} channels · {{ rep.videos_total }} videos read · {{ rep.units_used }} of YouTube's daily API quota used{% if rep.stopped %} · stopped early: {{ rep.stopped }}{% endif %}</span>{% endif %}
+</form>
+
+{% if not rep %}
+  <div class="card"><p class="muted" style="margin:0;">No scan yet. Press the button — it takes a minute or two.</p></div>
+{% else %}
+
+<div class="sec-head"><h2>What to build</h2><span class="sec-count">{{ rep.suggestions | length }}</span></div>
+{% for sg in rep.suggestions %}
+<div class="card accent" style="margin-bottom:12px;">
+  <div class="card-title">{{ sg.niche | title }}</div>
+  <p style="font-size:13px; margin:4px 0 8px;">{{ sg.why }}</p>
+  <ul style="margin:0; padding-left:18px; font-size:12.5px; line-height:1.6;">
+    {% for h in sg.how %}<li>{{ h }}</li>{% endfor %}
+  </ul>
+</div>
+{% else %}
+<div class="card"><p class="muted" style="margin:0;">No niche has enough proven new channels yet (needs at least 2). Scan again later, or widen the seeds.</p></div>
+{% endfor %}
+
+<div class="sec-head" style="margin-top:24px;"><h2>By niche — the detail</h2><span class="sec-count">{{ rep.niches | length }}</span></div>
+{% for n in rep.niches %}
+<div class="card" style="margin-bottom:14px;">
+  <div class="card-title">{{ n.niche | title }} · {{ n.channels }} new channel{{ '' if n.channels == 1 else 's' }} · median {{ "{:,}".format(n.median_views_per_video) }} views per video</div>
+  <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:16px; font-size:12.5px; margin-top:8px;">
+    <div>
+      <div class="muted">Format</div>
+      <div>{{ (n.shorts_share * 100) | round | int }}% Shorts · {{ n.uploads_per_week }} uploads / week</div>
+      <div class="muted" style="margin-top:8px;">Titles</div>
+      <div>~{{ n.title.avg_len }} characters · {{ n.title.number_pct }}% with a number · {{ n.title.question_pct }}% questions · {{ n.title.power_word_pct }}% power words · {{ n.title.emoji_pct }}% emoji · {{ n.title.caps_word_pct }}% a CAPS word</div>
+      <div class="muted" style="margin-top:4px;">Openers: {{ n.title.top_openers | map(attribute=0) | join(', ') }}</div>
+      <div class="muted" style="margin-top:4px;">Terms: {{ n.title.top_terms[:8] | join(', ') }}</div>
+    </div>
+    <div>
+      <div class="muted">Description</div>
+      <div>~{{ n.description.avg_len }} characters · {{ n.description.with_hashtags_pct }}% with hashtags (avg {{ n.description.avg_hashtags }}) · {{ n.description.with_link_pct }}% with a link</div>
+      <div class="muted" style="margin-top:8px;">Hashtags</div>
+      <div><bdi>{% for h, c in n.hashtags[:10] %}{{ h }} <span class="muted">({{ c }})</span>{% if not loop.last %} · {% endif %}{% endfor %}</bdi></div>
+      <div class="muted" style="margin-top:8px;">Tags ({{ n.tags_per_video }} per video)</div>
+      <div><bdi>{% for t, c in n.tags[:8] %}{{ t }}{% if not loop.last %}, {% endif %}{% endfor %}</bdi></div>
+    </div>
+    <div>
+      <div class="muted">The channels</div>
+      {% for c in n.channel_examples %}
+        <div style="margin:3px 0;"><a href="https://www.youtube.com/channel/{{ c.ref }}" target="_blank" rel="noopener noreferrer">{{ c.title }}</a>
+          <span class="muted">· created {{ c.created_at }} · {{ "{:,}".format(c.subscribers or 0) }} subs · {{ "{:,}".format(c.total_views) }} views{% if c.views_per_sub %} ({{ c.views_per_sub }}× per sub){% endif %}</span></div>
+      {% endfor %}
+      <div class="muted" style="margin-top:8px;">Top videos</div>
+      {% for e in n.examples %}
+        <div style="margin:3px 0;"><a href="https://www.youtube.com/watch?v={{ e.video }}" target="_blank" rel="noopener noreferrer">{{ e.title | truncate(70) }}</a> <span class="muted">· {{ "{:,}".format(e.views) }} views</span></div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endfor %}
+{% endif %}
+
+</div>
+</body>
+</html>

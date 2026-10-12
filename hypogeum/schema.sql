@@ -1285,6 +1285,50 @@ CREATE INDEX IF NOT EXISTS idx_rm_channel ON retention_moments(channel_id, video
 
 -- episode_timelines: the narration/script/scene timeline of an episode, cached the first time its folder was readable,
 -- so retention learning keeps working when the archive (NAS) is unreachable (episodes are moved there after release).
+-- Market intelligence (hypogeum/market_intel.py): recently created YouTube channels that already pulled millions of views,
+-- their videos, and the report the factory derives (niches, title/description/hashtag conventions, cadence, suggestions).
+CREATE TABLE IF NOT EXISTS market_channels (
+    channel_ref     TEXT NOT NULL PRIMARY KEY,         -- the YouTube channel id of the OBSERVED channel
+    title           TEXT,
+    created_at      TEXT,
+    country         TEXT,
+    subscribers     INTEGER,
+    total_views     INTEGER,
+    video_count     INTEGER,
+    keywords        TEXT,
+    topic_categories_json TEXT,
+    niche_seed      TEXT,                              -- the search seed that surfaced it
+    median_views    INTEGER,
+    shorts_share    REAL,
+    uploads_per_week REAL,
+    first_seen      TEXT NOT NULL,
+    fetched_at      TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS market_videos (
+    video_ref       TEXT NOT NULL PRIMARY KEY,
+    channel_ref     TEXT NOT NULL,
+    title           TEXT,
+    published_at    TEXT,
+    views           INTEGER,
+    likes           INTEGER,
+    comments        INTEGER,
+    duration_s      INTEGER,
+    is_short        INTEGER,
+    tags_json       TEXT,
+    hashtags_json   TEXT,
+    description_head TEXT,
+    language        TEXT,
+    fetched_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mv_channel ON market_videos(channel_ref);
+CREATE TABLE IF NOT EXISTS market_reports (
+    report_id       TEXT NOT NULL PRIMARY KEY,
+    created_at      TEXT NOT NULL,
+    units_used      INTEGER,
+    channels_found  INTEGER,
+    report_json     TEXT NOT NULL
+);
+
 -- post_timeline: how each post's numbers grew day by day on every platform (Zernio /analytics/post-timeline), and
 -- post_retention: the per-second watch curve the platform reports (Facebook gives one; the factory learns from it like
 -- from YouTube's). Written by hypogeum/platform_timeline_sync.py.

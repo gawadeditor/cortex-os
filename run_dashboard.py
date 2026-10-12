@@ -1450,6 +1450,20 @@ def channel_builder_page():
             "Kids' learning (numbers, letters, animals)", "Folklore & mythology",
         ],
     }
+    # What the market scan found working for NEW channels right now (hypogeum/market_intel.py): proven niches first.
+    defaults["market"] = []
+    try:
+        from hypogeum.market_intel import latest_report
+        rep = latest_report(_db_path())
+        if rep:
+            by_niche = {n["niche"]: n for n in rep.get("niches", [])}
+            for sg in (rep.get("suggestions") or [])[:5]:
+                n = by_niche.get(sg["niche"], {})
+                defaults["market"].append({"name": sg["niche"].title(), "why": sg["why"], "how": sg["how"][:3],
+                                           "hashtags": [h for h, _ in (n.get("hashtags") or [])[:6]],
+                                           "examples": [c["title"] for c in (n.get("channel_examples") or [])[:3]]})
+    except Exception:
+        defaults["market"] = []
     return render_template("channel_builder.html", defaults=defaults)
 
 
@@ -8507,6 +8521,21 @@ def intelligence_learning_page():
         changelog = []
     return render_template("learning.html", state=state, changelog=changelog,
                            flash=request.args.get("flash"))
+
+
+@app.route("/intelligence/market")
+def intelligence_market_page():
+    from hypogeum.market_intel import latest_report
+    rep = latest_report(_db_path())
+    return render_template("market.html", rep=rep, flash=request.args.get("flash"))
+
+
+@app.route("/intelligence/market/scan", methods=["POST"])
+def intelligence_market_scan():
+    """Operator pressed "Scan the market now": starts the scan in a background thread (it can take a minute or two)."""
+    from hypogeum.market_intel import maybe_run_weekly
+    started = maybe_run_weekly(_db_path(), force=True)
+    return redirect("/intelligence/market?flash=" + ("started" if started else "already-running"), 303)
 
 
 @app.route("/intelligence/monetization")

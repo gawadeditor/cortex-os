@@ -99,6 +99,11 @@ You will receive a JSON object with:
       episode, use those exact phrases (higher avg_view_pct = better) in the
       title, description and tags; never invent a measured term and never use
       one that does not truthfully describe this episode.
+      channel_context may also carry "market_conventions": measured title,
+      description and hashtag conventions of NEW channels in this niche that
+      already reached millions of views. Follow them where they fit this
+      episode truthfully (length, number/question/power-word habits, hashtag
+      count and the most used hashtags); never copy a title.
   "sources": a list of {{"title", "url"}} objects -- real, verified sources for
       this episode. You may reference these in a CTA or description, but you
       must NEVER invent a different source or URL.
@@ -683,6 +688,17 @@ def generate_canonical_platform_metadata_for_deliverable(
             channel_context["measured_viewer_search_terms"] = _measured
     except Exception as exc:  # noqa: BLE001
         log.warn("canonical_metadata_measured_terms_unavailable", deliverable_id=deliverable_id, error=str(exc))
+
+    # Conventions of NEW channels in this niche that already reached millions of views (hypogeum/market_intel.py).
+    try:
+        from hypogeum.channel_learning import directive_texts  # noqa: PLC0415
+        _mk = directive_texts(channel_id, "market_playbook") if channel_id else []
+        if _mk:
+            if channel_context is None:
+                channel_context = {"brand_is_unknown": True}
+            channel_context["market_conventions"] = _mk[0]
+    except Exception as exc:  # noqa: BLE001
+        log.warn("canonical_metadata_market_unavailable", deliverable_id=deliverable_id, error=str(exc))
 
     input_package = {
         "deliverable_class": deliverable_class,

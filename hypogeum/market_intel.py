@@ -302,15 +302,21 @@ def analyse(channels: List[dict], videos: List[dict]) -> dict:
     for ch in channels:
         vs_c = by_ch.get(ch["channel_ref"], [])
         toks = [w[:5] for w in re.findall(r"[a-z]+", (ch.get("niche_seed") or "").lower()) if w not in _STOP and len(w) > 3]
+        rel = 1.0
         if toks and vs_c:
             hit = sum(1 for v in vs_c if any(t in f"{v['title']} {' '.join(v.get('tags', []))} {' '.join(v['hashtags'])}".lower() for t in toks))
-            if hit / len(vs_c) < 0.35:
+            rel = hit / len(vs_c)
+            if rel < 0.35:
                 continue                      # surfaced by a seed it does not really belong to (e.g. anime under 'unsolved mysteries')
-        ch = {**ch, **_channel_stats(ch, vs_c)}
+        ch = {**ch, **_channel_stats(ch, vs_c), "relevance": rel}
         ch["views_per_sub"] = round(ch["total_views"] / ch["subscribers"], 1) if ch.get("subscribers") else None
         niches.setdefault(ch.get("niche_seed") or "other", []).append(ch)
     report_niches = []
     for seed, chs in niches.items():
+        if len(chs) <= 3:                     # thin evidence: only channels that clearly belong to the niche count
+            chs = [c for c in chs if c["relevance"] >= 0.5]
+            if not chs:
+                continue
         vs = [v for c in chs for v in by_ch.get(c["channel_ref"], [])]
         if not vs:
             continue

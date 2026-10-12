@@ -135,6 +135,8 @@ def _score(n: dict, answers: dict) -> float:
     s = {"income": rpm * (0.5 + reach) + evidence, "audience": 1.5 * reach + evidence, "business": rpm + evidence + (0.5 if fam else 0),
          "authority": evidence + rpm * 0.5, "specific": evidence + reach}.get(goal, evidence + reach)
     s += {"proven": 1.5 * evidence, "balanced": 0.5 * evidence + 0.5 * competition, "gap": 1.5 * competition + 0.5 * reach}.get(risk, 0)
+    if n["channels"] < 3:
+        s -= 1.5                                # two lucky channels are an anecdote, not a pattern
     fmt = answers.get("format")
     if fmt == "shorts" and n["shorts_share"] < 0.5:
         s -= 1.2

@@ -258,10 +258,15 @@ def sync_zernio_aggregates(*, provider=None, db_path: Optional[Path] = None) -> 
     for pid, cid in profile_map.items():
         scopes[cid] = pid
 
+    # PHASE 1: every HTTP fetch, with NO database connection open. (2026-10-12: the connection used to be opened first
+    # and the writes of one scope stayed uncommitted while the next scope's four requests ran, so this hourly sync held
+    # the database-wide write lock for 20-30s -- long enough to fail the worker's pipeline writes with 'database is locked'.)
+    fetched = {scope: _fetch_scope(provider, db_path, profile_id=pid, errors=out["errors"]) for scope, pid in scopes.items()}
+
+    # PHASE 2: one short write transaction.
     conn = get_connection(Path(db_path) if db_path else None)
     try:
-        for scope, pid in scopes.items():
-            payloads = _fetch_scope(provider, db_path, profile_id=pid, errors=out["errors"])
+        for scope, payloads in fetched.items():
             wrote_any = False
             for kind, payload in payloads.items():
                 if payload is None:

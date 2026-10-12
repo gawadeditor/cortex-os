@@ -240,3 +240,33 @@ def test_empty_curve_videos_do_not_starve_videos_with_data(db_path, monkeypatch)
     prov = _FakeProvider(retention_BIG={"retentionCurve": curve, "durationSeconds": 30})
     out = zns.sync_zernio_native_analytics(provider=prov, db_path=db_path)
     assert out["retention_videos"] == 1
+
+
+def test_aggregate_sync_holds_no_database_connection_while_fetching(db_path):
+    """Regression (2026-10-12): the hourly aggregate sync kept an uncommitted write open while the next scope's HTTP
+    requests ran, holding the database write lock for 20-30s."""
+    import sqlite3
+    import hypogeum.publishing.zernio_aggregate_sync as agg
+
+    fetched = {"n": 0}
+
+    def _fake_fetch(provider, db, *, profile_id, errors):
+        other = sqlite3.connect(str(db_path), timeout=0.2)        # would raise 'database is locked' if a write were open
+        try:
+            other.execute("CREATE TABLE IF NOT EXISTS _probe (x)")
+            other.execute("INSERT INTO _probe VALUES (1)")
+            other.commit()
+        finally:
+            other.close()
+        fetched["n"] += 1
+        return {"best_time": {"slots": []}}
+
+    orig = (agg._fetch_scope, agg._cortex_channels, agg._zernio_profile_channel_map)
+    agg._fetch_scope = _fake_fetch
+    agg._cortex_channels = lambda db: ["hypogeum", "twinkle_mini_tales"]
+    agg._zernio_profile_channel_map = lambda prov, db, ch: {"p1": "hypogeum", "p2": "twinkle_mini_tales"}
+    try:
+        out = agg.sync_zernio_aggregates(provider=object(), db_path=db_path)
+    finally:
+        agg._fetch_scope, agg._cortex_channels, agg._zernio_profile_channel_map = orig
+    assert fetched["n"] == 3 and out["ok"]

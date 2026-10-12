@@ -333,7 +333,7 @@ def analyse(channels: List[dict], videos: List[dict]) -> dict:
         first = Counter(f["first_word"] for f in feats if f["first_word"])
         toks_n = [w[:5] for w in re.findall(r"[a-z]+", seed.lower()) if w not in _STOP and len(w) > 3]
         on_topic = [v for v in vs if not toks_n or any(t in f"{v['title']} {' '.join(v.get('tags', []))} {' '.join(v['hashtags'])}".lower() for t in toks_n)]
-        top_videos = sorted(on_topic or vs, key=lambda v: -v["views"])[:5]
+        top_videos = sorted(on_topic, key=lambda v: -v["views"])[:5]          # only videos that are actually about the niche
         ch_titles = {c["channel_ref"]: c["title"] for c in chs}
         report_niches.append({
             "niche": seed, "channels": len(chs), "videos_read": n,

@@ -15,6 +15,10 @@ from hypogeum.youtube_traffic import _PRETTY, derive_findings
 FRAME_DIR_NAME = "retention_frames"
 
 
+def _device_label(key: str) -> str:
+    return {"TV": "TV", "GAME_CONSOLE": "Game console"}.get(key, key.replace("_", " ").title())
+
+
 def _frame_name(path: Optional[str]) -> Optional[str]:
     return Path(path).name if path else None
 
@@ -41,7 +45,7 @@ def get_discovery_panel(channel_id: str, db_path=None) -> dict:
                 out["subscribed"] = [{"label": r["key"].title(), "share": (r["views"] / tot if tot else 0), "views": r["views"],
                                       "avg_view_pct": r["avg_view_pct"]} for r in rows if r["dimension"] == "subscribed"]
                 dt = sum(r["views"] for r in rows if r["dimension"] == "device") or 0
-                out["devices"] = sorted(({"label": r["key"].title(), "share": (r["views"] / dt if dt else 0), "views": r["views"],
+                out["devices"] = sorted(({"label": _device_label(r["key"]), "share": (r["views"] / dt if dt else 0), "views": r["views"],
                                           "avg_view_pct": r["avg_view_pct"]} for r in rows if r["dimension"] == "device"),
                                         key=lambda d: -d["share"])
             ex = [dict(r) for r in conn.execute(

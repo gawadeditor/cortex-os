@@ -919,6 +919,27 @@ def _schedule_retry_queue_item(
 # States that are permanently non-runnable — fail item instead of releasing
 _PERMANENT_BLOCK_STATES = frozenset({"archived", "error"})
 
+# How long a not-runnable channel's queued item is parked before re-checking.
+_NOT_RUNNABLE_DEFER_SECONDS = 600
+
+
+def _defer_queue_item(
+    queue_id: str, seconds: int, db_path: Optional[Path] = None
+) -> None:
+    """Gate a still-'queued' item behind next_attempt_at so it is not
+    re-claimed (and re-skipped) on every poll."""
+    when = _iso(_now_utc() + timedelta(seconds=seconds))
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "UPDATE run_queue SET next_attempt_at = ? "
+            "WHERE queue_id = ? AND status = 'queued'",
+            (when, queue_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
 # Guard string — must never reach run_pipeline as topic_input.
 # If it does, something bypassed the topic backlog check.
 _PLACEHOLDER_TOPIC = "pending_topic_assignment"
@@ -1154,6 +1175,13 @@ def process_next(
                 )
             else:
                 release(queue_id, worker_id, db_path=db_path)
+                # Park it: a released item keeps its place at the head of the
+                # FIFO, so one not-runnable channel (e.g. a draft one) would
+                # be re-claimed every poll and starve every runnable channel
+                # behind it.
+                _defer_queue_item(
+                    queue_id, _NOT_RUNNABLE_DEFER_SECONDS, db_path=db_path
+                )
 
             return ProcessResult(
                 status="skipped",

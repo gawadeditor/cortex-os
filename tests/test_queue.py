@@ -1212,6 +1212,20 @@ class TestConsumer:
         assert result.status == "skipped"
         assert _queue_row(db_path, qid)["status"] == "queued"
 
+    def test_draft_channel_item_does_not_starve_a_runnable_channel(self, db_path):
+        # A released draft-channel item used to stay at the head of the FIFO
+        # and be re-claimed every poll, so a runnable channel queued behind it
+        # never ran.
+        draft_qid = enqueue(db_path=db_path, channel_id="ch_draft")
+        self._active_channel(db_path)
+        run_qid = enqueue(db_path=db_path, channel_id="ch_run")
+        with patch("hypogeum.ois.is_channel_blocked", return_value=False):
+            first = process_next(worker_id=_worker(), db_path=db_path, dry_run=True)
+            second = process_next(worker_id=_worker(), db_path=db_path, dry_run=True)
+        assert first.status == "skipped" and first.queue_id == draft_qid
+        assert second.status == "completed" and second.queue_id == run_qid
+        assert _queue_row(db_path, draft_qid)["status"] == "queued"
+
     def test_no_channel_id_skips_calog_check(self, db_path):
         """Items with no channel_id bypass CALOG entirely."""
         qid = enqueue(db_path=db_path, channel_id=None)
@@ -2142,11 +2156,12 @@ class TestPollerStallGuard:
                 sleep_interval=0.0,
             )
 
-        assert result.stop_reason == "stalled", (
-            f"expected 'stalled', got {result.stop_reason!r}"
+        # The not-runnable item is parked (next_attempt_at) after one skip,
+        # so the poll finds nothing claimable instead of re-skipping it.
+        assert result.stop_reason == "empty", (
+            f"expected 'empty', got {result.stop_reason!r}"
         )
-        assert result.skipped >= 1
-        assert result.iterations == 5
+        assert result.skipped == 1
 
     def test_stall_guard_fires_on_blocked_channel(self, db_path):
         # Blocked channel → skipped every iteration; item released back to queued.
@@ -2164,19 +2179,16 @@ class TestPollerStallGuard:
                 sleep_interval=0.0,
             )
 
-        assert result.stop_reason == "stalled", (
-            f"expected 'stalled', got {result.stop_reason!r}"
+        # The not-runnable item is parked (next_attempt_at) after one skip,
+        # so the poll finds nothing claimable instead of re-skipping it.
+        assert result.stop_reason == "empty", (
+            f"expected 'empty', got {result.stop_reason!r}"
         )
-        assert result.skipped >= 1
-        assert result.iterations == 5
+        assert result.skipped == 1
 
     def test_stall_streak_resets_on_completed(self, db_path):
-        # Paused channel item → skipped every pass (stall++).
-        # No-channel item → completed in dry_run=True (stall resets to 0).
-        #
-        # Without reset: stall fires at iteration 2 (skip+complete = stall 1+1=2).
-        # With reset:    stall fires at iteration 4 (skip→reset→skip→skip = stall 2).
-        # Asserting iterations > 2 proves the reset happened.
+        # Paused channel item is skipped once and parked; the no-channel item
+        # still completes — the skip must not stop the poll from reaching it.
         from hypogeum.calog import set_channel_state, pause_channel
         set_channel_state("ch_stall_mix", "active", db_path=db_path)
         pause_channel("ch_stall_mix", db_path=db_path)
@@ -2194,10 +2206,8 @@ class TestPollerStallGuard:
             )
 
         assert result.completed >= 1, "no-channel item must complete"
-        assert result.iterations > 2, (
-            f"stall streak reset should delay stall to iteration 4+; "
-            f"got {result.iterations} (stop={result.stop_reason!r})"
-        )
+        assert result.skipped == 1
+        assert result.stop_reason == "empty"
 
     def test_stall_guard_default_is_finite_positive_int(self, db_path):
         from inspect import signature

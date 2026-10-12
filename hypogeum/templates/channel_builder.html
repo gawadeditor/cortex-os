@@ -466,6 +466,8 @@ function bind(){
 
   if (S.step===2){
     p.querySelector("#f-namerun").onclick = suggestNames;
+    // coming from a researched plan: the concept and niche are already known, so offer names straight away
+    if (PREFILL && !S._namesAuto && !S.nameList.length) { S._namesAuto = true; suggestNames(); }
     p.querySelectorAll(".cb-opt[data-name]").forEach(o=> o.onclick=()=>{
       S.name = o.dataset.name;
       if (o.dataset.handle) S.handle = handleize(o.dataset.handle);
@@ -694,7 +696,8 @@ async function create(){
   try{
     const description = S.concept + (S.genre ? ("\n\nNiche / genre: " + S.genre) : "");
     const brand = Object.assign({}, S.brand);
-    if (S.handle) brand.hashtags = ["@" + S.handle];
+    brand.hashtags = (S.handle ? ["@" + S.handle] : []).concat((PREFILL && PREFILL.brand && PREFILL.brand.hashtags) || []);
+    if (!brand.hashtags.length) delete brand.hashtags;
     const payload = {
       channel_id:S.channel_id, name:S.name, description, language:S.language, timezone:S.timezone,
       format:S.format, shorts_per_week:S.shorts_per_week, videos_per_week:S.videos_per_week,
@@ -702,6 +705,7 @@ async function create(){
       weekly_video_budget_usd:S.weekly_video_budget_usd, cost_ceiling_usd_per_episode:S.cost_ceiling_usd_per_episode,
       brand, models:(S.advancedModels?S.models:{}), publishing:S.publishing,
     };
+    if (PREFILL && PREFILL.plan_id) { payload.plan_id = PREFILL.plan_id; payload.plan_option = PREFILL.option || 0; }
     const r = await fetch("/api/channels/create",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
     const d = await r.json();
     if(!d.ok){ toast(d.error||"create failed", false); $("#cb-next").disabled=false; $("#cb-next").textContent="Create channel"; return; }

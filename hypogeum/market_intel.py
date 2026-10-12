@@ -331,7 +331,9 @@ def analyse(channels: List[dict], videos: List[dict]) -> dict:
         hashtags = Counter(h for v in vs for h in v["hashtags"] if h in multi)
         tags = Counter(t.lower() for v in vs for t in v.get("tags", []))
         first = Counter(f["first_word"] for f in feats if f["first_word"])
-        top_videos = sorted(vs, key=lambda v: -v["views"])[:5]
+        toks_n = [w[:5] for w in re.findall(r"[a-z]+", seed.lower()) if w not in _STOP and len(w) > 3]
+        on_topic = [v for v in vs if not toks_n or any(t in f"{v['title']} {' '.join(v.get('tags', []))} {' '.join(v['hashtags'])}".lower() for t in toks_n)]
+        top_videos = sorted(on_topic or vs, key=lambda v: -v["views"])[:5]
         ch_titles = {c["channel_ref"]: c["title"] for c in chs}
         report_niches.append({
             "niche": seed, "channels": len(chs), "videos_read": n,
@@ -353,7 +355,7 @@ def analyse(channels: List[dict], videos: List[dict]) -> dict:
                             "with_link_pct": round(100 * sum(1 for v in vs if "http" in v["description_head"]) / n)},
             "how": _how_they_work(chs, vs),
             "hashtags": hashtags.most_common(12), "tags": tags.most_common(12), "tags_per_video": round(statistics.mean(len(v.get("tags", [])) for v in vs), 1),
-            "examples": [{"title": v["title"], "views": v["views"], "channel": ch_titles.get(v["channel_ref"], ""), "video": v["video_ref"]} for v in top_videos],
+            "examples": [{"title": re.sub(r"\s*#\w+", "", v["title"]).strip() or v["title"], "views": v["views"], "channel": ch_titles.get(v["channel_ref"], ""), "video": v["video_ref"]} for v in top_videos],
             "channel_examples": [{"title": c["title"], "ref": c["channel_ref"], "created_at": (c.get("created_at") or "")[:10], "subscribers": c.get("subscribers"),
                                   "total_views": c["total_views"], "views_per_sub": c["views_per_sub"], "shorts_share": c["shorts_share"]}
                                  for c in sorted(chs, key=lambda c: -c["total_views"])[:6]],

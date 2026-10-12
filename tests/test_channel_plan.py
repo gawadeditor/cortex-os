@@ -112,3 +112,56 @@ def test_routes_page_api_and_wizard_prefill(tmp_path):
         assert "const PREFILL = null" in c.get("/channels/new").get_data(as_text=True)
     finally:
         server.app.config["DB_PATH"] = old
+
+
+def _option(niche="history facts"):
+    return {"niche": niche, "niche_stats": {"niche": niche, "channels": 5, "title": {"avg_len": 70, "number_pct": 33, "question_pct": 19, "power_word_pct": 73,
+                                                                                    "top_openers": [("the", 5)]},
+                                           "description": {"avg_len": 480, "with_hashtags_pct": 83, "avg_hashtags": 6.3}, "hashtags": [("#history", 9)],
+                                           "uploads_per_week": 6.0, "shorts_share": 0.6},
+            "blueprint": {"proven_topics": [{"title": "Why Rome Fell", "views": 900_000, "channel": "X"}]}, "prefill": {"concept": "C", "genre": "History Facts",
+            "language": "en", "format": "shorts", "shorts_per_week": 7, "videos_per_week": 1, "brand": {"hashtags": ["#history"]}, "weekly_video_budget_usd": 150}}
+
+
+def test_seed_channel_from_plan_writes_conventions_and_proven_topics_as_directives(tmp_path):
+    from hypogeum.channel_learning import get_active_directives
+    from hypogeum.db import get_connection
+    db = tmp_path / "t.db"
+    initialize_schema(db)
+    conn = get_connection(db)
+    conn.execute("INSERT INTO channel_plans (plan_id, created_at, status, answers_json, plan_json) VALUES ('cp_x','2026-10-13T00:00:00+00:00','done','{}',?)",
+                 (json.dumps({"options": [_option()], "caveats": []}),))
+    conn.commit()
+    conn.close()
+    out = cpn.seed_channel_from_plan("newch", "cp_x", 0, db_path=db)
+    assert out["seeded"] == ["market_playbook", "topic"] and out["error"] is None
+    mk = get_active_directives("newch", dimension="market_playbook", db_path=db)[0]
+    tp = get_active_directives("newch", dimension="topic", db_path=db)[0]
+    assert "history facts" in mk["directive_text"] and mk["source_action_id"] == "cp_x"
+    assert "Why Rome Fell" in tp["directive_text"] and "never reuse or paraphrase" in tp["directive_text"]
+    assert cpn.get_plan("cp_x", db)["plan"]["created_channel_id"] == "newch"
+    assert cpn.seed_channel_from_plan("newch", "cp_x", 5, db_path=db)["error"] == "plan option not found"
+
+
+def test_create_route_seeds_the_channel_from_its_plan(tmp_path, monkeypatch):
+    import run_dashboard as server
+    from hypogeum.channel_learning import get_active_directives
+    from hypogeum.db import get_connection
+    db = tmp_path / "t.db"
+    initialize_schema(db)
+    conn = get_connection(db)
+    conn.execute("INSERT INTO channel_plans (plan_id, created_at, status, answers_json, plan_json) VALUES ('cp_y','2026-10-13T00:00:00+00:00','done','{}',?)",
+                 (json.dumps({"options": [_option()], "caveats": []}),))
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr("hypogeum.dashboard_control.create_channel", lambda **kw: {"ok": True, "channel_id": kw["channel_id"]})
+    old = server.app.config.get("DB_PATH")
+    server.app.config["DB_PATH"] = str(db)
+    try:
+        r = server.app.test_client().post("/api/channels/create", json={"channel_id": "newch2", "name": "N", "plan_id": "cp_y", "plan_option": 0})
+        assert r.status_code == 200 and r.get_json()["plan_seed"]["seeded"] == ["market_playbook", "topic"]
+        assert get_active_directives("newch2", dimension="topic", db_path=db)
+        r2 = server.app.test_client().post("/api/channels/create", json={"channel_id": "newch3", "name": "N"})
+        assert "plan_seed" not in r2.get_json()                              # a manual channel is unaffected
+    finally:
+        server.app.config["DB_PATH"] = old

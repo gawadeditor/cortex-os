@@ -201,7 +201,7 @@ def _prefill(n: dict, answers: dict, bp: dict) -> dict:
                f"{bp['format']} format, titles of about {bp['titles']['length']} characters, {bp['uploads_per_week']} uploads a week.")
     return {"concept": concept, "genre": n["niche"].title(), "language": answers.get("language", "en"), "format": "shorts" if bp["format"] != "long" else "longform",
             "shorts_per_week": bp["uploads_per_week"], "videos_per_week": 1,
-            "brand": {"tone": tone, "target_audience": aud, "content_pillars": bp["titles"]["terms"][:5],
+            "brand": {"tone": tone, "target_audience": aud, "content_pillars": bp["titles"]["terms"][:5], "hashtags": bp["hashtags"][:6],
                       "voice_guidelines": "Write titles like the proven channels: " + ", ".join(bp["titles"]["openers"][:3]) + " openers; hook in the first line."},
             "weekly_video_budget_usd": max(60, round(bp["cost"]["per_month_usd"] / 4.3 * 1.3))}
 
@@ -220,6 +220,7 @@ def build_plan(answers: dict, report: dict, cost_per_episode: float = 20.0) -> d
         if fam:
             why.append(f"Money: {_RPM_TEXT[FAMILIES[fam]['rpm']]}." + (" Kids' content is limited by YouTube's made-for-kids rules (no comments, fewer ad types)." if FAMILIES[fam]["kids"] else ""))
         options.append({"niche": n["niche"], "family": fam, "competition": _competition_level(n), "why": why, "blueprint": bp,
+                        "niche_stats": {k: n[k] for k in ("niche", "channels", "title", "description", "hashtags", "uploads_per_week", "shorts_share")},
                         "competitors": n.get("channel_examples", []), "how_they_work": n.get("how") or {}, "prefill": _prefill(n, answers, bp), "score": round(_score(n, answers), 2)})
     caveats = ["This shows what worked for channels that already won; many similar channels failed and are not in the data.",
                "Revenue figures are estimates from public numbers, not promises."]
@@ -327,3 +328,48 @@ def get_plan(plan_id: str, db_path=None) -> Optional[dict]:
     return {"plan_id": r["plan_id"], "status": r["status"], "created_at": r["created_at"], "error": r["error"],
             "progress": json.loads(r["progress_json"] or "{}"), "answers": json.loads(r["answers_json"]),
             "plan": json.loads(r["plan_json"]) if r["plan_json"] else None}
+
+
+# ---------------------------------------------------------------------------
+# plan -> the new channel
+# ---------------------------------------------------------------------------
+
+def topics_directive_text(option: dict) -> Optional[str]:
+    topics = (option.get("blueprint") or {}).get("proven_topics") or []
+    if not topics:
+        return None
+    listing = "; ".join(f'"{t["title"][:90]}" ({t["views"]:,} views)' for t in topics[:6])
+    return (f"PROVEN TOPICS IN THIS CHANNEL'S NICHE ({option['niche']}): recent videos from brand-new channels that pulled the most views — {listing}. "
+            f"Use them as proof of what this audience wants. Propose NEW subjects and angles in the same territory; never reuse or paraphrase one of these titles.")
+
+
+def seed_channel_from_plan(channel_id: str, plan_id: str, option_index: int, *, db_path=None) -> dict:
+    """The research does not stay in a report: the new channel starts with it. Writes the niche's measured conventions
+    (market_playbook, read by the metadata agent) and its proven topics (topic, read by the Topic Ideator) as the channel's
+    first learning directives, and links the plan to the channel. Never raises."""
+    out = {"seeded": [], "error": None}
+    try:
+        from hypogeum.channel_learning import record_directive
+        from hypogeum.market_intel import market_directive_text
+        g = get_plan(plan_id, db_path)
+        opts = ((g or {}).get("plan") or {}).get("options") or []
+        if not (0 <= option_index < len(opts)):
+            out["error"] = "plan option not found"
+            return out
+        o = opts[option_index]
+        stats = o.get("niche_stats")
+        if stats:
+            record_directive(channel_id, "market_playbook", "prefer", market_directive_text(stats), source_action_id=plan_id, db_path=db_path)
+            out["seeded"].append("market_playbook")
+        topics = topics_directive_text(o)
+        if topics:
+            record_directive(channel_id, "topic", "prefer", topics, source_action_id=plan_id, db_path=db_path)
+            out["seeded"].append("topic")
+        plan = g["plan"]
+        plan["created_channel_id"] = channel_id
+        plan["created_option"] = option_index
+        _save(plan_id, db_path, plan_json=json.dumps(plan, ensure_ascii=False))
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = str(exc)[:200]
+        log.error("seed_channel_from_plan_failed", channel_id=channel_id, plan_id=plan_id, error=out["error"])
+    return out

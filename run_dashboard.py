@@ -1035,6 +1035,16 @@ def api_channel_create():
         publishing=_dict("publishing"),
         db_path=_db_path(),
     )
+    # Created from a researched plan: the channel starts with what the research found (its niche conventions and proven topics
+    # become its first learning directives, read by the metadata agent and the Topic Ideator).
+    plan_id = _f("plan_id")
+    if result.get("ok") and plan_id:
+        try:
+            from hypogeum.channel_plan import seed_channel_from_plan
+            result["plan_seed"] = seed_channel_from_plan(result.get("channel_id") or str(_f("channel_id", "")).strip(), str(plan_id),
+                                                         int(_f("plan_option", 0) or 0), db_path=_db_path())
+        except Exception as exc:  # noqa: BLE001
+            result["plan_seed"] = {"seeded": [], "error": str(exc)[:160]}
     status = 200 if result.get("ok") else (422 if result.get("code") in ("invalid", "duplicate") else 500)
     return jsonify(result), status
 
@@ -1495,7 +1505,7 @@ def channel_builder_page():
             from hypogeum.channel_plan import get_plan
             gp = get_plan(pid, _db_path())
             if gp and gp.get("plan") and 0 <= opt < len(gp["plan"]["options"]):
-                prefill = gp["plan"]["options"][opt]["prefill"]
+                prefill = dict(gp["plan"]["options"][opt]["prefill"], plan_id=pid, option=opt)
     except Exception:
         prefill = None
     return render_template("channel_builder.html", defaults=defaults, prefill=prefill)

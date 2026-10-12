@@ -1422,9 +1422,33 @@ def api_channel_set_operator(channel_id: str):
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+@app.route("/channels/plan")
+def channel_plan_page():
+    """First page of starting a channel: pick a goal and answer a few choices; the factory researches the market and builds a plan."""
+    from hypogeum.channel_plan import QUESTIONS
+    return render_template("channel_plan.html", questions=QUESTIONS)
+
+
+@app.route("/api/channel-plan/start", methods=["POST"])
+def api_channel_plan_start():
+    from hypogeum.channel_plan import start_plan
+    data = request.get_json(silent=True) or {}
+    out = start_plan(data.get("answers") or {}, _db_path())
+    return jsonify(out), (200 if out.get("ok") else 400)
+
+
+@app.route("/api/channel-plan/<plan_id>")
+def api_channel_plan_get(plan_id: str):
+    from hypogeum.channel_plan import get_plan
+    p = get_plan(plan_id, _db_path())
+    if p is None:
+        return jsonify({"ok": False, "error": "plan not found"}), 404
+    return jsonify({"ok": True, **p})
+
+
 @app.route("/channels/new")
 def channel_builder_page():
-    """The guided Channel Builder wizard."""
+    """The guided Channel Builder wizard (pre-filled from a plan when ?plan=<id>&option=<n> is given)."""
     from hypogeum.config import Config
     _cfg = Config()
     defaults = {
@@ -1464,7 +1488,17 @@ def channel_builder_page():
                                            "examples": [c["title"] for c in (n.get("channel_examples") or [])[:3]]})
     except Exception:
         defaults["market"] = []
-    return render_template("channel_builder.html", defaults=defaults)
+    prefill = None
+    try:
+        pid, opt = request.args.get("plan"), int(request.args.get("option", "0") or 0)
+        if pid:
+            from hypogeum.channel_plan import get_plan
+            gp = get_plan(pid, _db_path())
+            if gp and gp.get("plan") and 0 <= opt < len(gp["plan"]["options"]):
+                prefill = gp["plan"]["options"][opt]["prefill"]
+    except Exception:
+        prefill = None
+    return render_template("channel_builder.html", defaults=defaults, prefill=prefill)
 
 
 @app.route("/api/channels/<channel_id>/runtime")

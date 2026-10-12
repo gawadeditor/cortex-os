@@ -154,6 +154,14 @@ const S = {
   created: null, readiness: null, profiles: null, operatorOn: false, activated: false,
 };
 
+// A plan from the guided research pre-fills the idea, niche, format, cadence and brand, so the person starts at "Name & handles".
+const PREFILL = {{ (prefill or none) | tojson }};
+if (PREFILL) {
+  S.concept = PREFILL.concept || S.concept; S.genre = PREFILL.genre || S.genre; S.language = PREFILL.language || S.language;
+  S.format = PREFILL.format || S.format; S.shorts_per_week = PREFILL.shorts_per_week || S.shorts_per_week;
+  S.videos_per_week = PREFILL.videos_per_week || S.videos_per_week; S.weekly_video_budget_usd = PREFILL.weekly_video_budget_usd || S.weekly_video_budget_usd;
+  Object.assign(S.brand, PREFILL.brand || {}); S.step = 2;
+}
 const STEPS = ["Concept","Niche","Name & handles","Visual identity","Content & cadence",
                "Narration","Models","Publishing & budget","Review"];
 const REVIEW_STEP = STEPS.length - 1;

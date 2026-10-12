@@ -44,6 +44,7 @@ SEARCH_WINDOW_DAYS = 180            # videos published within this window are se
 SHORT_MAX_S = 180
 REPORT_EVERY_DAYS = 7
 MIN_CHANNELS_PER_NICHE = 2
+READ_RESERVE = 250                  # units kept back for reading channels and uploads after the searches
 
 # Niches a faceless, AI-assisted channel can realistically build; each is a search seed. Rotated so a weekly scan covers all.
 SEEDS = [
@@ -65,6 +66,33 @@ _POWER = ("secret", "mystery", "shocking", "never", "truth", "hidden", "unbeliev
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+_LANG_STOP = {
+    "es": set("el la los las de del y en un una que por con para es se no su al lo como más pero sus le ya o este sí porque esta".split()),
+    "fr": set("le la les de des du et en un une que pour avec est pas qui dans sur au ce se ne plus par mais son sa ses il elle".split()),
+    "pt": set("o a os as de do da dos das e em um uma que para com é não se por mais mas como foi ao ele ela seu sua".split()),
+}
+_REGION = {"en": "US", "ar": "SA", "es": "MX", "fr": "FR", "pt": "BR", "hi": "IN"}
+
+
+def _script_ratio(title: str, lo: int, hi: int) -> float:
+    letters = [ch for ch in (title or "") if ch.isalpha()]
+    return (sum(lo <= ord(ch) <= hi for ch in letters) / len(letters)) if letters else 0.0
+
+
+def _lang_ok(title: str, lang: str = "en", declared: Optional[str] = None) -> bool:
+    """Does this video belong to the requested language? Declared audio/default language first, else script/stop-word heuristics."""
+    if declared:
+        return declared.lower().startswith(lang)
+    if lang == "ar":
+        return _script_ratio(title, 0x0600, 0x06FF) >= 0.5
+    if lang == "hi":
+        return _script_ratio(title, 0x0900, 0x097F) >= 0.5
+    if lang in _LANG_STOP:
+        toks = re.findall(r"[a-zà-ÿ']+", (title or "").lower())
+        return len(toks) >= 2 and sum(t in _LANG_STOP[lang] for t in toks) / len(toks) >= 0.12
+    return _is_english(title, None)
 
 
 def _is_english(title: str, lang: Optional[str] = None) -> bool:
@@ -134,21 +162,28 @@ def _video_row(it: dict) -> dict:
 
 
 def fetch(api: _Api, seeds: List[str], *, searches_per_seed: int = 1, max_age_days: int = MAX_CHANNEL_AGE_DAYS,
-          min_views: int = MIN_CHANNEL_VIEWS) -> dict:
+          min_views: int = MIN_CHANNEL_VIEWS, language: str = "en", progress=None) -> dict:
     """Search by recent view count for each seed, keep new channels with millions of views, read their recent uploads."""
     after = (_now() - timedelta(days=SEARCH_WINDOW_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
     seed_of_video: Dict[str, str] = {}
     stopped = None
     try:
-        for seed in seeds:
+        for si, seed in enumerate(seeds):
+            if api.units + 100 > api.max_units - READ_RESERVE:
+                stopped = "search budget reached (kept what was found)"       # leave units to read the channels found so far
+                break
+            if progress:
+                progress("searching", si, len(seeds), seed)
             for dur in (["short", "medium"] if searches_per_seed > 1 else ["any"]):
                 params = {"part": "snippet", "type": "video", "q": seed, "publishedAfter": after, "order": "viewCount", "maxResults": 50,
-                          "relevanceLanguage": "en", "regionCode": "US"}
+                          "relevanceLanguage": language, "regionCode": _REGION.get(language, "US")}
                 if dur != "any":
                     params["videoDuration"] = dur
                 res = api.get("search", params, cost=100)
                 for it in (res or {}).get("items", []):
                     seed_of_video.setdefault(it["id"]["videoId"], seed)
+        if progress:
+            progress("reading channels", len(seeds), len(seeds), "")
         # channels behind the winning videos
         vids: Dict[str, dict] = {}
         for ids in _chunks(list(seed_of_video), 50):
@@ -174,7 +209,9 @@ def fetch(api: _Api, seeds: List[str], *, searches_per_seed: int = 1, max_age_da
             seed_by_channel.setdefault(it["snippet"]["channelId"], seed_of_video[vid])
         # their recent uploads (1 unit for the playlist page + 1 per 50 videos)
         uploads: Dict[str, dict] = {}
-        for cid in keep:
+        for ci, cid in enumerate(keep):
+            if progress:
+                progress("reading competitors", ci, len(keep), (keep[cid].get("snippet", {}) or {}).get("title", ""))
             pl = api.get("playlistItems", {"part": "contentDetails", "playlistId": "UU" + cid[2:], "maxResults": 50}) or {}
             vid_ids = [i["contentDetails"]["videoId"] for i in pl.get("items", [])]
             for it in (api.get("videos", {"part": "snippet,statistics,contentDetails", "id": ",".join(vid_ids)}) or {}).get("items", []) if vid_ids else []:
@@ -219,6 +256,43 @@ def _channel_stats(ch: dict, vids: List[dict]) -> dict:
             "uploads_per_week": round(len(dates) / span_days * 7, 1) if span_days else 0.0, "videos_read": len(vids)}
 
 
+def _template_of(title: str) -> str:
+    """A title's skeleton: numbers -> N, the first three words kept, the rest elided ('Why N Facts ...')."""
+    t = re.sub(r"\d+", "N", title or "")
+    t = re.sub(r"#\w+", "", t)
+    ws = re.findall(r"[A-Za-z'N]+", t)
+    head = " ".join(ws[:3])
+    return (head + " …") if len(ws) > 3 else head
+
+
+def _how_they_work(chs: List[dict], vs: List[dict]) -> dict:
+    """The way the proven channels operate: when they publish, how long videos are, the title skeletons they reuse, how
+    the description closes, and how fast they got to millions."""
+    hours, days = Counter(), Counter()
+    for v in vs:
+        try:
+            d = datetime.fromisoformat((v.get("published_at") or "").replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        hours[d.hour] += 1
+        days[d.weekday()] += 1
+    durs = [v["duration_s"] for v in vs if v.get("duration_s")]
+    templ = Counter(_template_of(v["title"]) for v in vs if v["title"])
+    ctas = sum(1 for v in vs if re.search(r"subscribe|follow|like and|comment|link in|check out|watch more", v["description_head"], re.I))
+    ages = [(_now() - datetime.fromisoformat(c["created_at"].replace("Z", "+00:00"))).days for c in chs if c.get("created_at")]
+    names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    ex_by_t: Dict[str, str] = {}
+    for v in sorted(vs, key=lambda v: -v["views"]):
+        ex_by_t.setdefault(_template_of(v["title"]), v["title"])
+    return {"best_hours_utc": [h for h, _ in hours.most_common(3)], "best_days": [names[d] for d, _ in days.most_common(3)],
+            "median_length_s": int(statistics.median(durs)) if durs else None,
+            "under_60s_pct": round(100 * sum(1 for d in durs if d <= 60) / len(durs)) if durs else None,
+            "title_templates": [{"pattern": t, "count": c, "example": ex_by_t.get(t, "")} for t, c in templ.most_common(12) if c >= 2 and len(t) >= 6][:5],
+            "cta_pct": round(100 * ctas / len(vs)) if vs else 0,
+            "median_days_old": int(statistics.median(ages)) if ages else None,
+            "views_per_video_top25_pct": int(statistics.quantiles([v["views"] for v in vs], n=4)[2]) if len(vs) >= 8 else None}
+
+
 def analyse(channels: List[dict], videos: List[dict]) -> dict:
     """channels: [{channel_ref, title, created_at, subscribers, total_views, video_count, niche_seed, keywords, country}], videos: rows with tags/hashtags lists."""
     by_ch: Dict[str, List[dict]] = {}
@@ -230,7 +304,7 @@ def analyse(channels: List[dict], videos: List[dict]) -> dict:
         toks = [w[:5] for w in re.findall(r"[a-z]+", (ch.get("niche_seed") or "").lower()) if w not in _STOP and len(w) > 3]
         if toks and vs_c:
             hit = sum(1 for v in vs_c if any(t in f"{v['title']} {' '.join(v.get('tags', []))} {' '.join(v['hashtags'])}".lower() for t in toks))
-            if hit / len(vs_c) < 0.2:
+            if hit / len(vs_c) < 0.35:
                 continue                      # surfaced by a seed it does not really belong to (e.g. anime under 'unsolved mysteries')
         ch = {**ch, **_channel_stats(ch, vs_c)}
         ch["views_per_sub"] = round(ch["total_views"] / ch["subscribers"], 1) if ch.get("subscribers") else None
@@ -242,7 +316,13 @@ def analyse(channels: List[dict], videos: List[dict]) -> dict:
             continue
         feats = [_title_features(v["title"]) for v in vs]
         n = len(feats)
-        hashtags = Counter(h for v in vs for h in v["hashtags"])
+        # hashtags that several DIFFERENT channels use (one channel spamming a tag is not a convention)
+        ch_of_tag: Dict[str, set] = {}
+        for v in vs:
+            for h in v["hashtags"]:
+                ch_of_tag.setdefault(h, set()).add(v["channel_ref"])
+        multi = {h for h, cs in ch_of_tag.items() if len(cs) >= 2} if len(chs) >= 3 else set(ch_of_tag)
+        hashtags = Counter(h for v in vs for h in v["hashtags"] if h in multi)
         tags = Counter(t.lower() for v in vs for t in v.get("tags", []))
         first = Counter(f["first_word"] for f in feats if f["first_word"])
         top_videos = sorted(vs, key=lambda v: -v["views"])[:5]
@@ -265,6 +345,7 @@ def analyse(channels: List[dict], videos: List[dict]) -> dict:
                             "with_hashtags_pct": round(100 * sum(1 for v in vs if v["hashtags"]) / n),
                             "avg_hashtags": round(statistics.mean(len(v["hashtags"]) for v in vs), 1),
                             "with_link_pct": round(100 * sum(1 for v in vs if "http" in v["description_head"]) / n)},
+            "how": _how_they_work(chs, vs),
             "hashtags": hashtags.most_common(12), "tags": tags.most_common(12), "tags_per_video": round(statistics.mean(len(v.get("tags", [])) for v in vs), 1),
             "examples": [{"title": v["title"], "views": v["views"], "channel": ch_titles.get(v["channel_ref"], ""), "video": v["video_ref"]} for v in top_videos],
             "channel_examples": [{"title": c["title"], "ref": c["channel_ref"], "created_at": (c.get("created_at") or "")[:10], "subscribers": c.get("subscribers"),
@@ -303,7 +384,7 @@ def _suggestions(niches: List[dict]) -> List[dict]:
 # store / orchestrate
 # ---------------------------------------------------------------------------
 
-def _rows_from_fetch(fx: dict) -> tuple:
+def _rows_from_fetch(fx: dict, language: str = "en") -> tuple:
     channels, videos = [], []
     for cid, it in fx["channels"].items():
         sn, st = it.get("snippet", {}), it.get("statistics", {})
@@ -316,7 +397,7 @@ def _rows_from_fetch(fx: dict) -> tuple:
     # English-language niches only: drop channels whose recent uploads are mostly not English
     en_share: Dict[str, List[bool]] = {}
     for v in videos:
-        en_share.setdefault(v["channel_ref"], []).append(_is_english(v["title"], v["language"]))
+        en_share.setdefault(v["channel_ref"], []).append(_lang_ok(v["title"], language, v["language"]))
     keep_refs = {c for c, xs in en_share.items() if xs and sum(xs) / len(xs) >= 0.5}
     channels = [c for c in channels if c["channel_ref"] in keep_refs]
     videos = [v for v in videos if v["channel_ref"] in keep_refs]
@@ -370,6 +451,19 @@ def pick_seeds(db_path=None, n: int = 20) -> List[str]:
     k = week % len(SEEDS)
     rotated = SEEDS[k:] + SEEDS[:k]
     return list(dict.fromkeys(_channel_seeds(db_path) + rotated))[:n]
+
+
+def get_token(db_path=None) -> tuple:
+    """(access_token, error) from the first factory channel with a working YouTube authorization."""
+    from hypogeum.channel_config import list_channel_profiles
+    from hypogeum.publishing.youtube_privacy import _access_token
+    last = None
+    for cp in list_channel_profiles(db_path=db_path):
+        try:
+            return _access_token(getattr(cp, "channel_id"), db_path), None
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+    return None, f"no YouTube authorization available: {str(last)[:120]}"
 
 
 def run_scan(db_path=None, *, token: Optional[str] = None, max_units: int = 2500, seeds: Optional[List[str]] = None) -> dict:

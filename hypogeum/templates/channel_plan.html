@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Start a channel — Cortex</title>
+  {% include '_base_style.html' %}
+  <style>
+    .cp-wrap { max-width: 980px; margin: 0 auto; }
+    .cp-steps { display:flex; gap:6px; margin:6px 0 22px; flex-wrap:wrap; }
+    .cp-dot { height:4px; flex:1; min-width:24px; border-radius:2px; background: var(--border); }
+    .cp-dot.on { background: var(--accent); }
+    .cp-q { font-size:22px; font-weight:700; margin:0 0 6px; }
+    .cp-sub { color: var(--muted); font-size:13.5px; margin:0 0 16px; max-width:680px; }
+    .cp-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:12px; }
+    .cp-opt { text-align:left; background: var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px 16px; cursor:pointer;
+              color:inherit; font:inherit; transition: border-color .15s, background .15s; }
+    .cp-opt:hover { border-color: var(--accent); }
+    .cp-opt:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+    .cp-opt.sel { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface)); }
+    .cp-opt b { display:block; font-size:14.5px; margin-bottom:3px; }
+    .cp-opt span { color: var(--muted); font-size:12.5px; }
+    .cp-nav { display:flex; gap:10px; margin-top:22px; align-items:center; }
+    .cp-bar { height:8px; background: var(--border); border-radius:4px; overflow:hidden; margin:14px 0 8px; }
+    .cp-bar i { display:block; height:100%; background: var(--accent); transition: width .4s; }
+    .cp-tabs { display:flex; gap:8px; margin:6px 0 16px; flex-wrap:wrap; }
+    .cp-sec { margin:18px 0 6px; font-size:12px; letter-spacing:.06em; text-transform:uppercase; color: var(--muted); font-weight:700; }
+    .cp-list { margin:6px 0; padding-left:18px; font-size:13.5px; line-height:1.65; }
+    .cp-two { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:16px; }
+    .cp-chip { display:inline-block; padding:2px 9px; border-radius:999px; border:1px solid var(--border); font-size:12px; margin:2px 4px 2px 0; }
+    .cp-muted { color: var(--muted); font-size:12.5px; }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+<div class="container"><div class="cp-wrap">
+
+<div id="cp-root"></div>
+
+</div></div>
+
+<script>
+const QUESTIONS = {{ questions | tojson }};
+const A = {};
+let step = 0, planId = null, timer = null, planData = null, optIdx = 0;
+const root = document.getElementById("cp-root");
+const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function dots(){ return `<div class="cp-steps">${QUESTIONS.map((q,i)=>`<i class="cp-dot ${i<=step?'on':''}"></i>`).join("")}</div>`; }
+
+function renderQuestion(){
+  const q = QUESTIONS[step];
+  const cur = A[q.id];
+  const sel = id => q.type === "multi" ? (cur||[]).includes(id) : cur === id;
+  root.innerHTML = `
+    <div class="sec-head"><h1 style="margin:0;font-size:24px;">Start a channel</h1></div>
+    ${dots()}
+    <h2 class="cp-q">${esc(q.title)}</h2>
+    ${q.hint ? `<p class="cp-sub">${esc(q.hint)}</p>` : `<p class="cp-sub">Question ${step+1} of ${QUESTIONS.length}. You can change any answer before the research starts.</p>`}
+    <div class="cp-grid" role="${q.type==='multi'?'group':'radiogroup'}">
+      ${q.options.map(o=>`<button type="button" class="cp-opt ${sel(o.id)?'sel':''}" data-id="${esc(o.id)}" aria-pressed="${sel(o.id)}">
+        <b>${esc(o.label)}</b>${o.hint?`<span>${esc(o.hint)}</span>`:''}</button>`).join("")}
+    </div>
+    <div class="cp-nav">
+      ${step>0?'<button class="btn" id="cp-back" type="button">Back</button>':''}
+      <button class="btn btn-primary" id="cp-next" type="button">${step===QUESTIONS.length-1?'Research the market →':'Next'}</button>
+      <span class="cp-muted" id="cp-err" role="alert"></span>
+      <a href="/channels/new" class="cp-muted" style="margin-left:auto;">I already know exactly what I want — skip the research</a>
+    </div>`;
+  root.querySelectorAll(".cp-opt").forEach(b => b.onclick = () => {
+    const id = b.dataset.id;
+    if (q.type === "multi") { A[q.id] = A[q.id] || []; A[q.id] = A[q.id].includes(id) ? A[q.id].filter(x=>x!==id) : A[q.id].concat([id]); }
+    else { A[q.id] = id; }
+    renderQuestion();
+  });
+  const back = document.getElementById("cp-back"); if (back) back.onclick = () => { step--; renderQuestion(); };
+  document.getElementById("cp-next").onclick = () => {
+    if (q.type === "single" && !A[q.id]) { document.getElementById("cp-err").textContent = "Pick one to continue."; return; }
+    if (step < QUESTIONS.length - 1) { step++; renderQuestion(); } else { startResearch(); }
+  };
+}
+
+async function startResearch(){
+  const payload = Object.assign({}, A); if (!payload.families) payload.families = [];
+  root.innerHTML = `<div class="sec-head"><h1 style="margin:0;font-size:24px;">Researching the market…</h1></div><p class="cp-sub">Starting.</p>`;
+  const r = await fetch("/api/channel-plan/start", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({answers: payload})});
+  const d = await r.json();
+  if (!d.ok) { root.innerHTML = `<div class="card"><p>${esc(d.error||"Could not start")}</p><button class="btn" onclick="step=0;renderQuestion()">Back</button></div>`; return; }
+  planId = d.plan_id; poll();
+}
+
+function pct(p){ if (!p || !p.n) return 5; const base = {starting:2, searching:5, "reading channels":55, "reading competitors":60, analysing:92, done:100}[p.stage] || 5;
+  const span = {searching:50, "reading competitors":30}[p.stage] || 0; return Math.min(99, Math.round(base + span * (p.i / Math.max(p.n,1)))); }
+
+async function poll(){
+  const r = await fetch("/api/channel-plan/" + planId); const d = await r.json();
+  if (d.status === "done") { planData = d.plan; optIdx = 0; renderPlan(); return; }
+  if (d.status === "failed") { root.innerHTML = `<div class="card"><h2 style="margin-top:0;">The research could not finish</h2><p>${esc(d.error||"")}</p><button class="btn" id="cp-retry">Try again</button></div>`;
+    document.getElementById("cp-retry").onclick = () => { step = QUESTIONS.length-1; renderQuestion(); }; return; }
+  const p = d.progress || {}; const labels = {starting:"Getting ready", searching:"Searching YouTube for what is winning right now", "reading channels":"Finding the channels behind the winners",
+    "reading competitors":"Reading each competitor's recent videos", analysing:"Working out how they do it"};
+  root.innerHTML = `<div class="sec-head"><h1 style="margin:0;font-size:24px;">Researching the market…</h1></div>
+    <p class="cp-sub">Looking for channels created in the last year that already pulled millions of views in the areas you chose, then studying how they work. About two to four minutes.</p>
+    <div class="card"><div style="font-size:15px;font-weight:600;">${esc(labels[p.stage]||p.stage||"Working")}</div>
+      <div class="cp-muted">${esc(p.label||"")}${p.n>1?` · ${p.i} of ${p.n}`:""}</div>
+      <div class="cp-bar"><i style="width:${pct(p)}%"></i></div></div>`;
+  timer = setTimeout(poll, 2500);
+}
+
+const fmtN = n => (n == null ? "—" : Number(n).toLocaleString("en-US"));
+function renderPlan(){
+  const P = planData, o = P.options[optIdx];
+  if (!o) { root.innerHTML = `<div class="sec-head"><h1 style="margin:0;font-size:24px;">No clear winner found</h1></div><div class="card">${P.caveats.map(c=>`<p>${esc(c)}</p>`).join("")}<button class="btn btn-primary" onclick="step=0;renderQuestion()">Change my answers</button></div>`; return; }
+  const b = o.blueprint, h = o.how_they_work || {};
+  root.innerHTML = `
+    <div class="sec-head"><h1 style="margin:0;font-size:24px;">Your plan</h1></div>
+    <p class="cp-sub">The factory studied <b>${fmtN(P.channels_researched)}</b> channels created in the last year that already hold millions of views and read <b>${fmtN(P.videos_read)}</b> of their videos.
+      These are the ${P.options.length} best fits for your answers.</p>
+    <div class="cp-tabs" role="tablist">${P.options.map((x,i)=>`<button class="btn ${i===optIdx?'btn-primary':''}" role="tab" aria-selected="${i===optIdx}" data-i="${i}">${i===0?'Best fit · ':''}${esc(x.niche)}</button>`).join("")}</div>
+
+    <div class="card accent">
+      <div class="card-title">Why ${esc(o.niche)}</div>
+      <ul class="cp-list">${o.why.map(w=>`<li>${esc(w)}</li>`).join("")}</ul>
+    </div>
+
+    <div class="cp-sec">Who is already winning here</div>
+    <div class="card" style="padding:0;"><div class="table-wrap" style="border:none;"><table style="width:100%;font-size:12.5px;">
+      <thead><tr><th style="text-align:left;">Channel</th><th style="text-align:left;">Created</th><th style="text-align:right;">Subscribers</th><th style="text-align:right;">Total views</th><th style="text-align:right;">Views per subscriber</th><th style="text-align:right;">Shorts</th></tr></thead>
+      <tbody>${o.competitors.map(c=>`<tr><td><a href="https://www.youtube.com/channel/${esc(c.ref)}" target="_blank" rel="noopener noreferrer">${esc(c.title)}</a></td><td>${esc(c.created_at)}</td>
+        <td style="text-align:right;">${fmtN(c.subscribers)}</td><td style="text-align:right;">${fmtN(c.total_views)}</td><td style="text-align:right;">${c.views_per_sub!=null?c.views_per_sub+"×":"—"}</td>
+        <td style="text-align:right;">${Math.round((c.shorts_share||0)*100)}%</td></tr>`).join("")}</tbody></table></div></div>
+
+    <div class="cp-sec">How they work</div>
+    <div class="cp-two">
+      <div class="card">
+        <div class="card-title">Rhythm</div>
+        <div>${b.proven_uploads_per_week} uploads a week${b.video_length_s?` · videos about ${b.video_length_s}s long`:''}</div>
+        ${b.post_at_utc.length?`<div class="cp-muted" style="margin-top:6px;">They publish mostly around ${b.post_at_utc.join(", ")} UTC (${b.post_at_uae.join(", ")} UAE)${b.best_days.length?` on ${b.best_days.join(", ")}`:''}.</div>`:''}
+        <div class="card-title" style="margin-top:12px;">Titles</div>
+        <div>About ${b.titles.length} characters · ${b.titles.numbers_pct}% have a number · ${b.titles.questions_pct}% are questions · ${b.titles.power_words_pct}% use a power word</div>
+        <div class="cp-muted" style="margin-top:6px;">They open with: ${b.titles.openers.map(esc).join(", ")}</div>
+        ${b.titles.templates.length?`<div class="cp-muted" style="margin-top:6px;">Skeletons they reuse:</div>${b.titles.templates.map(t=>`<div style="font-size:12.5px;margin:2px 0;"><b>${esc(t.pattern)}</b> <span class="cp-muted">×${t.count} — “${esc(t.example)}”</span></div>`).join("")}`:''}
+      </div>
+      <div class="card">
+        <div class="card-title">Description and tags</div>
+        <div>About ${b.description.length} characters · ${b.description.with_hashtags_pct}% carry hashtags (about ${b.description.hashtags_each} each)${b.description.cta_pct!=null?` · ${b.description.cta_pct}% end with a call to action`:''}</div>
+        <div class="cp-muted" style="margin-top:8px;">Hashtags they use most</div>
+        <div>${b.hashtags.map(x=>`<span class="cp-chip">${esc(x)}</span>`).join("")}</div>
+        <div class="cp-muted" style="margin-top:8px;">Tags</div>
+        <div>${b.tags.map(x=>`<span class="cp-chip">${esc(x)}</span>`).join("")}</div>
+        <div class="cp-muted" style="margin-top:8px;">Words that keep coming up in their titles</div>
+        <div>${b.titles.terms.map(x=>`<span class="cp-chip">${esc(x)}</span>`).join("")}</div>
+      </div>
+    </div>
+
+    <div class="cp-sec">Topics already proven to pull views (use the idea, not the title)</div>
+    <div class="card">${b.proven_topics.map(t=>`<div style="margin:5px 0;font-size:13px;">${esc(t.title)} <span class="cp-muted">· ${fmtN(t.views)} views · ${esc(t.channel)}</span></div>`).join("")}</div>
+
+    <div class="cp-sec">Your first 30 days</div>
+    <div class="card"><ul class="cp-list">${b.first_30_days.map(x=>`<li>${esc(x)}</li>`).join("")}</ul></div>
+
+    <div class="cp-sec">What it costs and whether it can pay</div>
+    <div class="cp-two">
+      <div class="card"><div class="card-title">Cost to run</div>
+        <div>About <b>$${b.cost.per_month_usd}</b> a month at ${b.uploads_per_week} videos a week (≈ $${b.cost.per_episode_usd} per video).</div>
+        <div class="cp-muted" style="margin-top:6px;">${esc(b.cost.note)}.</div></div>
+      <div class="card"><div class="card-title">Monetisation reality</div>
+        <div>At the proven pace you can expect around <b>${fmtN(b.monetisation.projected_views_90d)}</b> Shorts views in 90 days. YouTube's ad programme asks for ${fmtN(b.monetisation.ypp_shorts_views_needed)} (plus 1,000 subscribers).</div>
+        <div class="cp-muted" style="margin-top:6px;">Verdict: ${esc(b.monetisation.verdict)}.</div></div>
+    </div>
+
+    <div class="cp-sec">Read this too</div>
+    <div class="card">${P.caveats.map(c=>`<div class="cp-muted" style="margin:3px 0;">• ${esc(c)}</div>`).join("")}</div>
+
+    <div class="cp-nav">
+      <a class="btn btn-primary" href="/channels/new?plan=${encodeURIComponent(planId)}&option=${optIdx}">Build this channel →</a>
+      <button class="btn" id="cp-redo" type="button">Change my answers</button>
+      <span class="cp-muted">The builder opens with the niche, format, cadence and brand already filled in — you only choose a name.</span>
+    </div>`;
+  root.querySelectorAll(".cp-tabs button").forEach(t => t.onclick = () => { optIdx = Number(t.dataset.i); renderPlan(); });
+  document.getElementById("cp-redo").onclick = () => { step = 0; renderQuestion(); };
+}
+
+renderQuestion();
+</script>
+</body>
+</html>

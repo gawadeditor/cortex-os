@@ -42,7 +42,7 @@
      figure_label='channel' ~ ('' if channels|length == 1 else 's'),
      pill=(ns.ready ~ ' running on their own') if ns.ready else 'none fully autonomous yet',
      pill_class='is-good' if (ns.ready == channels|length and channels) else 'is-warn') %}
-  <a href="/channels/new" class="btn btn-primary">{{ icon('plus') }} Build a channel</a>
+  <a href="/channels/plan" class="btn btn-primary">{{ icon('plus') }} Build a channel</a>
 {% endcall %}
 
 {% if channels %}
@@ -128,7 +128,7 @@
     Build your first channel — the wizard takes you from a rough idea to a
     monetisable niche, a name with checked handles, and a full brand identity.
   </div>
-  <a href="/channels/new" class="btn btn-primary" style="margin-top:6px;">{{ icon('plus') }} Build a channel</a>
+  <a href="/channels/plan" class="btn btn-primary" style="margin-top:6px;">{{ icon('plus') }} Build a channel</a>
 </div>
 {% endif %}
 </div><!-- /.container -->

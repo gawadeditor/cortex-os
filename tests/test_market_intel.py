@@ -68,7 +68,7 @@ def test_fetch_filters_to_new_channels_with_millions_and_stops_cleanly_on_budget
         g.return_value.status_code = 200
         g.return_value.json.return_value = {"items": []}
         fx2 = mi.fetch(api, ["a", "b", "c"])
-    assert fx2["stopped"] == "scan budget reached"
+    assert fx2["stopped"].startswith("search budget reached")
 
 
 def test_run_scan_stores_and_latest_report_roundtrips(tmp_path):

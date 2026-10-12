@@ -1329,6 +1329,18 @@ CREATE TABLE IF NOT EXISTS market_reports (
     report_json     TEXT NOT NULL
 );
 
+-- channel_plans: a guided "what should I build" session (hypogeum/channel_plan.py): the answers, the live progress of the market
+-- research it triggered, and the resulting plan(s).
+CREATE TABLE IF NOT EXISTS channel_plans (
+    plan_id       TEXT NOT NULL PRIMARY KEY,
+    created_at    TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'running',      -- running | done | failed
+    progress_json TEXT,
+    answers_json  TEXT NOT NULL,
+    plan_json     TEXT,
+    error         TEXT
+);
+
 -- post_timeline: how each post's numbers grew day by day on every platform (Zernio /analytics/post-timeline), and
 -- post_retention: the per-second watch curve the platform reports (Facebook gives one; the factory learns from it like
 -- from YouTube's). Written by hypogeum/platform_timeline_sync.py.

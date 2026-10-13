@@ -1219,3 +1219,23 @@ class TestNextUnusedRecoveryGeneration:
         monkeypatch.setattr(pr.WriteAheadReceiptStore, "read_events", lambda self, eid, key: [])
         assert m._next_unused_recovery_generation(
             episode_id="ep_t", scene_id="s01", output_dir=tmp_path, at_least=1) == 1
+
+
+class TestOnlyIdentityFailuresGetAFreshIdentity:
+    def test_classifier(self):
+        import hypogeum.muapi as m
+        assert m._failure_is_a_used_or_rejected_identity("gate_denied[None]: provider explicitly rejected")
+        assert m._failure_is_a_used_or_rejected_identity("gate_denied[03_authorization_active_and_unconsumed]: x")
+        assert not m._failure_is_a_used_or_rejected_identity("model_mismatch: 'a' does not match the plan's declared model 'b'")
+        assert not m._failure_is_a_used_or_rejected_identity("gate_denied[17_budget_scope_configuration]: ceiling")
+        assert not m._failure_is_a_used_or_rejected_identity(None)
+
+    def test_a_plan_mismatch_is_not_retried_even_after_an_old_transient_rejection(self, monkeypatch):
+        import hypogeum.muapi as m
+        monkeypatch.setattr(m, "scene_rejected_for_transient_provider_error", lambda **kw: True)
+        t = TestPerSceneRetryLoop()
+        cfg = make_config()
+        cfg.MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE = 3
+        res, calls = t._run(monkeypatch, cfg, [(None, "model_mismatch: 'a' != plan 'b'")], reconcile="not_applicable")
+        assert res["generation_status"] == "generation_failed"
+        assert len(calls) == 1

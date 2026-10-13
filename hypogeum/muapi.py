@@ -1446,6 +1446,25 @@ _TRANSIENT_PROVIDER_MARKERS = (
 )
 
 
+_USED_IDENTITY_MARKERS = (
+    "provider explicitly rejected",
+    "03_authorization_active_and_unconsumed",
+    "authorization state is 'submitting'",
+    "05_idempotency_key_unconsumed",
+    "already has attempt evidence",
+    "does not reference this envelope_id",
+)
+
+
+def _failure_is_a_used_or_rejected_identity(reason: Optional[str]) -> bool:
+    """True when the failure is the transient provider rejection itself, or the gate refusing to
+    reuse the identity that rejection spent — the only failures a fresh ':recovery{n}' identity
+    can cure. A plan/model/price/budget denial would fail identically on a new identity, so
+    those must not burn recovery numbers (or paid attempts)."""
+    t = str(reason or "")
+    return any(m in t for m in _USED_IDENTITY_MARKERS)
+
+
 def _next_unused_recovery_generation(
     *, episode_id: str, scene_id: str, output_dir: Path, at_least: int,
 ) -> int:
@@ -1955,7 +1974,9 @@ def submit_scene(
                     "failure_reason": None,
                 }
             if _outcome != "released":
-                if _outcome == "not_applicable" and scene_rejected_for_transient_provider_error(
+                if _outcome == "not_applicable" and _failure_is_a_used_or_rejected_identity(
+                    failure_reason
+                ) and scene_rejected_for_transient_provider_error(
                     episode_id=eid, scene_id=scene_id, is_fallback=False, output_dir=output_dir,
                 ):
                     # The provider failed the job with a server fault (no output, nothing
@@ -2028,7 +2049,8 @@ def submit_scene(
                     "failure_reason": None,
                 }
             if _o != "released" and not (
-                _o == "not_applicable" and scene_rejected_for_transient_provider_error(
+                _o == "not_applicable" and _failure_is_a_used_or_rejected_identity(failure_reason)
+                and scene_rejected_for_transient_provider_error(
                     episode_id=eid, scene_id=scene_id, is_fallback=False, output_dir=output_dir,
                 )
             ):

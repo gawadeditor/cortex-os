@@ -1201,3 +1201,21 @@ class TestTransientRejectionClassifier:
     def test_no_evidence_is_not(self, tmp_path, monkeypatch):
         self._patch_events(monkeypatch, None)
         assert not self._call(tmp_path)
+
+
+class TestNextUnusedRecoveryGeneration:
+    def test_skips_identities_an_earlier_run_already_spent(self, tmp_path, monkeypatch):
+        import hypogeum.muapi as m
+        import hypogeum.provider_receipt as pr
+        used = {"ep_t:s01:recovery1", "ep_t:s01:recovery2"}
+        monkeypatch.setattr(pr.WriteAheadReceiptStore, "read_events",
+                            lambda self, eid, key: [object()] if key in used else [])
+        assert m._next_unused_recovery_generation(
+            episode_id="ep_t", scene_id="s01", output_dir=tmp_path, at_least=1) == 3
+
+    def test_returns_the_floor_when_nothing_is_used(self, tmp_path, monkeypatch):
+        import hypogeum.muapi as m
+        import hypogeum.provider_receipt as pr
+        monkeypatch.setattr(pr.WriteAheadReceiptStore, "read_events", lambda self, eid, key: [])
+        assert m._next_unused_recovery_generation(
+            episode_id="ep_t", scene_id="s01", output_dir=tmp_path, at_least=1) == 1

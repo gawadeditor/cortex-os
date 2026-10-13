@@ -5410,9 +5410,15 @@ def api_run_rerun(run_id: str):
     # proceeds as before and the weekly gate denies the paid step.
     if episode_id:
         try:
-            from hypogeum.episode_salvage import _rebind_stale_admission, _reinstate_plan_weekly_reservation
+            from hypogeum.episode_salvage import (
+                _rebind_stale_admission, _reinstate_plan_weekly_reservation,
+                _restore_shrunk_plan_weekly_hold,
+            )
             _rebind_stale_admission(channel_id, episode_id, db_path=_db_path())
             _reinstate_plan_weekly_reservation(channel_id, episode_id, db_path=_db_path())
+            # the reaper may instead have SHRUNK the hold to the real spend (ep_b2bf517d 2026-10-13:
+            # "weekly reservation amount 12.57 != verified plan maximum 44.59" denied every paid step)
+            _restore_shrunk_plan_weekly_hold(channel_id, episode_id, db_path=_db_path())
         except Exception:
             pass
 

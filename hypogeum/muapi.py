@@ -1446,6 +1446,26 @@ _TRANSIENT_PROVIDER_MARKERS = (
 )
 
 
+def _next_unused_recovery_generation(
+    *, episode_id: str, scene_id: str, output_dir: Path, at_least: int,
+) -> int:
+    """Smallest ':recovery{n}' generation >= at_least with no receipt evidence yet.
+
+    An earlier run of the same episode may already have spent recovery{n} identities
+    (even only to be denied before the provider); reusing one is refused forever
+    ("already has attempt evidence"), so a retry must pick a number nobody used."""
+    try:
+        from hypogeum.provider_receipt import WriteAheadReceiptStore  # noqa: PLC0415
+
+        store = WriteAheadReceiptStore(output_dir)
+        n = max(1, at_least)
+        while store.read_events(episode_id, f"{episode_id}:{scene_id}:recovery{n}"):
+            n += 1
+        return n
+    except Exception:  # noqa: BLE001
+        return max(1, at_least)
+
+
 def scene_rejected_for_transient_provider_error(
     *,
     episode_id: str,
@@ -1940,7 +1960,10 @@ def submit_scene(
                 ):
                     # The provider failed the job with a server fault (no output, nothing
                     # charged): retry under a fresh identity instead of giving the scene up.
-                    _retry_recovery_generation = _attempt + 1
+                    _retry_recovery_generation = _next_unused_recovery_generation(
+                        episode_id=eid, scene_id=scene_id, output_dir=output_dir,
+                        at_least=_attempt + 1,
+                    )
                     log.info(
                         "muapi_gate_path_transient_provider_retry",
                         scene_id=scene_id, recovery_generation=_retry_recovery_generation,
@@ -2011,7 +2034,10 @@ def submit_scene(
             ):
                 break
             _stranded_recoveries += 1
-            _recovery_generation = _max_attempts + _stranded_recoveries  # always a fresh :recovery{n}
+            _recovery_generation = _next_unused_recovery_generation(
+                episode_id=eid, scene_id=scene_id, output_dir=output_dir,
+                at_least=_max_attempts + _stranded_recoveries,
+            )  # always a fresh, never-used :recovery{n}
             log.info(
                 "muapi_gate_path_stranded_auth_recovery",
                 scene_id=scene_id, recovery_generation=_recovery_generation,

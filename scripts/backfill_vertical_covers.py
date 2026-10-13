@@ -115,45 +115,8 @@ def _episode_meta(conn, episode_id: str):
 
 def _synth_concept_brief(episode_id: str, channel_id: str, title: str, topic: str,
                          work_dir: Path, config: Config) -> bool:
-    """Run the real Thumbnail Strategy from a minimal title/topic-derived
-    topic_brief + empty script_package, INSIDE the channel-identity context so
-    the strategist works from this channel's genre/tone (a bedtime channel
-    given an 'ancient_mystery' framing refuses to generate). Writes
-    thumbnail_concept_brief_<ep>.json into work_dir. Returns True on success."""
-    from hypogeum.agents.thumbnail_strategy import run_thumbnail_strategy
-    from hypogeum.brand.channel_identity import active_channel
-
-    _cat = "ancient_mystery"
-    try:
-        from hypogeum.channel_creative_brief import channel_brief_for
-        _genre = (channel_brief_for(channel_id) or {}).get("genre", "").lower()
-        if "bedtime" in _genre or "children" in _genre or "cartoon" in _genre:
-            _cat = "childrens_bedtime_story"
-    except Exception:  # noqa: BLE001
-        pass
-
-    topic_brief = {
-        "topic_id": episode_id,
-        "episode_id": episode_id,
-        "episode_title": title,
-        "topic_category": _cat,
-        "logline": topic or title,
-        "curiosity_hook": topic or title,
-        "mystery_anchor": topic or title,
-        "differentiation_hypothesis": "",
-        "audience_demand_signal": "",
-    }
-    script_package = {"episode_id": episode_id, "sections": []}
-    try:
-        with active_channel(channel_id):
-            run_thumbnail_strategy(
-                topic_brief=topic_brief, script_package=script_package,
-                config=config, episode_id=episode_id, output_dir=work_dir,
-            )
-        return (work_dir / f"thumbnail_concept_brief_{episode_id}.json").exists()
-    except Exception as exc:  # noqa: BLE001
-        log.warn("backfill_concept_synth_failed", episode_id=episode_id, error=str(exc))
-        return False
+    from hypogeum.agents.vertical_thumbnail import synthesize_concept_brief
+    return synthesize_concept_brief(episode_id, channel_id, title, topic, work_dir, config)
 
 
 def _stage_cover(cover_path: Path, channel_id: str, episode_id: str, db_path):

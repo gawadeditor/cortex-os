@@ -33,6 +33,7 @@
   {{ hero(eyebrow=channel.name, title='Where the audience is being lost',
           lede='Each stage a viewer passes through, measured from real platform data. A stage shows "blind" when the platform does not give us that number — never a guess.') }}
 
+  {% if msg %}<div class="rv-gem" role="status">{{ msg }}</div>{% endif %}
   {% if not report.ok %}
   <div class="dv-empty">{{ icon('chart') }}
     <div class="dv-empty-title">Nothing to diagnose yet</div>
@@ -64,8 +65,29 @@
         <form method="post" action="/channel/{{ channel_id }}/revival/action/{{ a.action_id }}"><input type="hidden" name="do" value="approve"><button class="btn">Approve</button></form>
         <form method="post" action="/channel/{{ channel_id }}/revival/action/{{ a.action_id }}"><input type="hidden" name="do" value="reject"><button class="btn">Not now</button></form>
       {% elif a.status == 'approved' %}
+        {% if a.kind in ('repackage_post', 'new_thumbnail_title') %}
+          {% set d = a.draft %}
+          {% if d and d.status == 'ready' %}
+            <div><a href="/channel/{{ channel_id }}/revival/draft/{{ a.action_id }}" target="_blank"><img src="/channel/{{ channel_id }}/revival/draft/{{ a.action_id }}" alt="Draft cover" style="height:220px;border-radius:8px;border:1px solid var(--border)"></a></div>
+            <span class="rv-conf">Draft cover. Upload it by hand: YouTube Studio → the video → Thumbnail (use Test &amp; Compare to A/B it); for Instagram/TikTok replace the cover in the app.</span><br>
+          {% elif d and d.status == 'running' %}
+            <span class="rv-conf">Generating the cover draft… refresh in a minute.</span><br>
+          {% else %}
+            {% if d and d.status == 'failed' %}<span class="rv-conf">Last attempt failed: {{ d.reason }}</span><br>{% endif %}
+            <form method="post" action="/channel/{{ channel_id }}/revival/action/{{ a.action_id }}"><input type="hidden" name="do" value="draft_cover"><button class="btn">Generate a draft cover (≈ $0.10)</button></form>
+          {% endif %}
+        {% elif a.kind in ('audience_topic', 'search_led_topic') %}
+          <form method="post" action="/channel/{{ channel_id }}/revival/action/{{ a.action_id }}" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+            <input type="hidden" name="do" value="queue_topic">
+            <input name="topic_text" value="{{ (a.evidence.text if a.evidence and a.evidence.text else '') }}" placeholder="Write the topic as an episode title" style="flex:1;min-width:240px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:inherit">
+            <button class="btn">Add to the production queue</button>
+          </form>
+          <span class="rv-conf">Joins the normal backlog and waits its turn — the scheduler decides when it is produced.</span><br>
+        {% endif %}
+        {% if a.kind not in ('audience_topic', 'search_led_topic') %}
         <form method="post" action="/channel/{{ channel_id }}/revival/action/{{ a.action_id }}"><input type="hidden" name="do" value="applied"><button class="btn">I made this change</button></form>
         <span class="rv-conf">press once you have done it — the 14-day measurement starts from that moment</span>
+        {% endif %}
       {% elif a.status == 'applied' %}
         <span class="rv-conf">measuring — result in 14 days from {{ a.applied_at[:10] }}</span>
       {% elif a.status == 'measured' and a.result %}

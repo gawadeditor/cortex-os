@@ -8101,20 +8101,47 @@ def channel_revival_page(channel_id):
     except Exception as exc:  # noqa: BLE001 -- the diagnosis must still render
         app.logger.warning("revival propose failed (channel=%s): %s", channel_id, exc, exc_info=True)
     return render_template("channel_revival.html", channel=channel, channel_id=channel_id, report=report,
-                           actions=list_actions(channel_id, db_path=db))
+                           actions=list_actions(channel_id, db_path=db), msg=request.args.get("msg", ""))
 
 
 @app.route("/channel/<channel_id>/revival/action/<action_id>", methods=["POST"])
 def channel_revival_action(channel_id, action_id):
-    """Operator decision on a proposed revival action. Changes only our own record; the live post is never touched."""
+    """Operator decision / execution on a revival action. Never touches a live post: a cover draft is saved locally and a
+    topic only joins the normal backlog (hypogeum/revival_executor.py)."""
     from hypogeum.revival_actions import decide, mark_applied
+    from hypogeum.revival_executor import generate_cover_draft, queue_topic, reserve_cover_draft
     do = request.form.get("do")
     db = _db_path()
+    msg = ""
     if do in ("approve", "reject"):
         decide(action_id, do == "approve", db_path=db)
     elif do == "applied":
         mark_applied(action_id, db_path=db)
-    return redirect(f"/channel/{channel_id}/revival?scope={channel_id}")
+    elif do == "queue_topic":
+        res = queue_topic(action_id, request.form.get("topic_text", ""), db_path=db)
+        msg = "Topic added to the queue." if res["ok"] else res["reason"]
+    elif do == "draft_cover":
+        res = reserve_cover_draft(action_id, db_path=db)
+        if res["ok"]:
+            import threading
+            threading.Thread(target=generate_cover_draft, args=(action_id,), kwargs={"db_path": db}, daemon=True).start()
+            msg = "Generating the cover draft — refresh in about a minute."
+        else:
+            msg = res["reason"]
+    from urllib.parse import quote
+    return redirect(f"/channel/{channel_id}/revival?scope={channel_id}" + (f"&msg={quote(msg)}" if msg else ""))
+
+
+@app.route("/channel/<channel_id>/revival/draft/<action_id>")
+def channel_revival_draft(channel_id, action_id):
+    """The generated cover draft image for an action of this channel."""
+    from flask import send_file
+    from hypogeum.revival_actions import list_actions
+    a = next((x for x in list_actions(channel_id, db_path=_db_path()) if x["action_id"] == action_id), None)
+    path = ((a or {}).get("draft") or {}).get("path")
+    if not path or not Path(path).exists():
+        return render_template("not_found.html", kind="Cover draft", id=action_id), 404
+    return send_file(path)
 
 
 @app.route("/channel/<channel_id>/video-compare")

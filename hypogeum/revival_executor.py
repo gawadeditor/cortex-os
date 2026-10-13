@@ -1,0 +1,167 @@
+"""
+hypogeum/revival_executor.py — carry out an APPROVED revival action, within hard limits.
+
+Two executors, both opt-in per action (the operator presses a button for each) and neither publishes anything:
+
+    generate_cover_draft(action_id)   a designed 9:16 cover draft for a post, saved locally for the operator to upload
+                                      by hand (YouTube accepts a Short's cover only through Studio). Costs about
+                                      DRAFT_COST_USD; at most DRAFTS_PER_DAY_CAP drafts a day factory-wide; one draft
+                                      per action; refuses while MUAPI_DRY_RUN is on.
+    queue_topic(action_id, text)      puts the operator-edited topic into the channel's normal backlog (source
+                                      'revival', default priority — it waits its turn like any other topic). The
+                                      scheduler alone decides when it is produced. At most REVIVAL_QUEUE_CAP revival
+                                      topics may be open (queued/claimed) per channel.
+"""
+from __future__ import annotations
+
+import json
+import shutil
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+from hypogeum.logger import get_logger
+
+log = get_logger(agent="revival_executor")
+
+REVIVAL_QUEUE_CAP = 2
+DRAFT_COST_USD = 0.10            # one gpt-image-2 generation + one Sonnet call (measured by the 2026-09 vertical-cover backfill)
+DRAFTS_PER_DAY_CAP = 5
+_STALE_RUN_S = 15 * 60          # a 'running' draft this old died with its process; allow a retry
+DRAFT_DIR = Path(__file__).resolve().parent.parent / ".hypogeum-assets" / "revival_drafts"
+_COVER_KINDS = ("repackage_post", "new_thumbnail_title")
+_TOPIC_KINDS = ("audience_topic", "search_led_topic")
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _dry_run() -> bool:
+    from hypogeum.config import Config
+    return bool(getattr(Config(), "MUAPI_DRY_RUN", False))
+
+
+def _get(conn, action_id: str) -> Optional[dict]:
+    row = conn.execute("SELECT * FROM revival_actions WHERE action_id=?", (action_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def _set_draft(conn, action_id: str, draft: dict) -> None:
+    conn.execute("UPDATE revival_actions SET draft_json=? WHERE action_id=?", (json.dumps(draft), action_id))
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# topics
+# ---------------------------------------------------------------------------
+
+def queue_topic(action_id: str, topic_text: str, *, db_path: Optional[Path] = None) -> dict:
+    from hypogeum.db import get_connection
+    from hypogeum.topics import DuplicateTopicError, enqueue_topic
+
+    topic_text = (topic_text or "").strip()
+    with get_connection(db_path) as conn:
+        a = _get(conn, action_id)
+        if not a or a["status"] != "approved" or a["kind"] not in _TOPIC_KINDS:
+            return {"ok": False, "reason": "this action is not an approved topic proposal"}
+        if len(topic_text) < 8:
+            return {"ok": False, "reason": "write the topic as a real title (at least a few words)"}
+        open_n = conn.execute("SELECT COUNT(*) FROM episode_topics WHERE channel_id=? AND source='revival' "
+                              "AND status IN ('queued','claimed')", (a["channel_id"],)).fetchone()[0]
+        if open_n >= REVIVAL_QUEUE_CAP:
+            return {"ok": False, "reason": f"{open_n} revival topics are already waiting for this channel "
+                                           f"(limit {REVIVAL_QUEUE_CAP}) — let them be produced first"}
+    try:
+        topic_id = enqueue_topic(a["channel_id"], topic_text, source="revival", db_path=db_path)
+    except DuplicateTopicError:
+        return {"ok": False, "reason": "this topic is already in the queue"}
+    with get_connection(db_path) as conn:
+        conn.execute("UPDATE revival_actions SET status='applied', applied_at=?, baseline_json=? WHERE action_id=?",
+                     (_now(), json.dumps({"topic_id": topic_id, "topic_text": topic_text}), action_id))
+        conn.commit()
+    log.info("revival_topic_queued", action_id=action_id, channel_id=a["channel_id"], topic_id=topic_id)
+    return {"ok": True, "topic_id": topic_id}
+
+
+# ---------------------------------------------------------------------------
+# cover drafts
+# ---------------------------------------------------------------------------
+
+def _episode_of(a: dict) -> Optional[str]:
+    ev = json.loads(a["evidence_json"]) if a.get("evidence_json") else {}
+    return ev.get("episode_id") or (a["target_ref"] if str(a["target_ref"]).startswith("ep_") else None)
+
+
+def reserve_cover_draft(action_id: str, *, db_path: Optional[Path] = None) -> dict:
+    """Check every limit and mark the draft 'running'. Returns {ok, reason, episode_id}."""
+    from hypogeum.db import get_connection
+
+    if _dry_run():
+        return {"ok": False, "reason": "MUAPI_DRY_RUN is on — a real image would not be generated"}
+    with get_connection(db_path) as conn:
+        a = _get(conn, action_id)
+        if not a or a["status"] != "approved" or a["kind"] not in _COVER_KINDS:
+            return {"ok": False, "reason": "this action is not an approved cover proposal"}
+        draft = json.loads(a["draft_json"]) if a.get("draft_json") else None
+        stale = bool(draft and draft.get("status") == "running"
+                     and (datetime.now(timezone.utc) - datetime.fromisoformat(draft["started_at"])).total_seconds() > _STALE_RUN_S)
+        if draft and draft.get("status") in ("running", "ready") and not stale:
+            return {"ok": False, "reason": f"a draft is already {draft['status']}"}
+        today = _now()[:10]
+        used = sum(1 for r in conn.execute("SELECT draft_json FROM revival_actions WHERE draft_json IS NOT NULL")
+                   if (json.loads(r[0]).get("started_at") or "")[:10] == today)
+        if used >= DRAFTS_PER_DAY_CAP:
+            return {"ok": False, "reason": f"daily limit of {DRAFTS_PER_DAY_CAP} cover drafts reached"}
+        ep = _episode_of(a)
+        if not ep:
+            return {"ok": False, "reason": "cannot tell which episode this cover is for"}
+        _set_draft(conn, action_id, {"status": "running", "started_at": _now(), "cost_usd": DRAFT_COST_USD})
+    return {"ok": True, "episode_id": ep}
+
+
+def generate_cover_draft(action_id: str, *, db_path: Optional[Path] = None) -> dict:
+    """Generate the draft (blocking, ~1 minute). Call reserve_cover_draft first. Never raises."""
+    from hypogeum.agents.vertical_thumbnail import build_vertical_thumbnail_package, synthesize_concept_brief
+    from hypogeum.config import Config
+    from hypogeum.db import get_connection
+
+    started = _now()
+    reason = "unknown error"
+    try:
+        with get_connection(db_path) as conn:
+            a = _get(conn, action_id)
+            ep = _episode_of(a)
+            row = conn.execute("SELECT title, topic FROM episodes WHERE episode_id=?", (ep,)).fetchone()
+        title, topic = (row["title"] or "", row["topic"] or "") if row else ("", "")
+        config = Config()
+        with tempfile.TemporaryDirectory(prefix=f"revival_{action_id}_") as td:
+            work = Path(td)
+            if not synthesize_concept_brief(ep, a["channel_id"], title, topic, work, config):
+                reason = "could not build a thumbnail concept for this episode"
+            else:
+                pkg = build_vertical_thumbnail_package(episode_id=ep, output_dir=work, config=config,
+                                                       channel_id=a["channel_id"], authorize_via_channel=False)
+                if not pkg.get("generation_metadata", {}).get("vertical_cover"):
+                    reason = "the cover generator fell back to its stub (generation or quality check failed)"
+                else:
+                    asset = Path(pkg["main_thumbnail"]["asset_id"]).name
+                    found = next((p for suf in (".png", ".jpg", ".jpeg", ".webp")
+                                  for p in (work / f"{asset}{suf}", work / "thumbnails" / f"{asset}{suf}") if p.exists()), None)
+                    if found is None:
+                        reason = "the generated cover file was not found"
+                    else:
+                        DRAFT_DIR.mkdir(parents=True, exist_ok=True)
+                        dest = DRAFT_DIR / f"{action_id}{found.suffix.lower()}"
+                        shutil.copyfile(found, dest)
+                        with get_connection(db_path) as conn:
+                            _set_draft(conn, action_id, {"status": "ready", "path": str(dest), "started_at": started,
+                                                         "finished_at": _now(), "cost_usd": DRAFT_COST_USD})
+                        return {"ok": True, "path": str(dest)}
+    except Exception as exc:  # noqa: BLE001 -- a failed draft must never break the dashboard or the worker
+        reason = str(exc)[:200]
+        log.error("revival_cover_draft_failed", action_id=action_id, error=reason)
+    with get_connection(db_path) as conn:
+        _set_draft(conn, action_id, {"status": "failed", "reason": reason, "started_at": started, "finished_at": _now()})
+    return {"ok": False, "reason": reason}

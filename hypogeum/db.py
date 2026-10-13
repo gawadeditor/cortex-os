@@ -324,6 +324,10 @@ _V2_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "publish_calendar": [
         ("release_id", "TEXT"),   # P12-22: FK → releases.release_id
     ],
+    "revival_actions": [
+        # hypogeum/revival_executor.py — draft cover state {status: running|ready|failed, path, cost_usd, ...}
+        ("draft_json", "TEXT"),
+    ],
     "platform_analytics": [
         # 2026-09-06: real Zernio per-post fields we were dropping on the
         # floor. reach/skip_rate come from Zernio for FB+IG / IG-Reels only

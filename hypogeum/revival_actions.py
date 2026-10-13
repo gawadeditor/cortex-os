@@ -97,7 +97,7 @@ def list_actions(channel_id: str, *, db_path: Optional[Path] = None) -> List[dic
     out = []
     for r in rows:
         d = dict(r)
-        for k in ("evidence_json", "baseline_json", "result_json"):
+        for k in ("evidence_json", "baseline_json", "result_json", "draft_json"):
             d[k[:-5]] = json.loads(d[k]) if d.get(k) else None
         out.append(d)
     return out

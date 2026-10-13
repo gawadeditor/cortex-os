@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Revival — {{ channel.name }}</title>
+  {% include '_base_style.html' %}
+  {% from '_icons.html' import icon %}
+  <style>
+    .rv-plat { border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); margin-bottom:var(--gap); }
+    .rv-plat h3 { margin:0; padding:12px 14px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; text-transform:capitalize; font-size:14px; }
+    .rv-layer { display:grid; grid-template-columns:110px 80px 1fr; gap:12px; padding:10px 14px; border-bottom:1px solid var(--border); font-size:13px; align-items:baseline; }
+    .rv-layer:last-child { border-bottom:none; }
+    .rv-layer .name { color:var(--faint); text-transform:uppercase; font-size:11px; letter-spacing:.06em; }
+    .rv-st { font-size:10px; text-transform:uppercase; letter-spacing:.08em; padding:2px 7px; border-radius:4px; border:1px solid var(--border); text-align:center; }
+    .rv-st.ok { color:var(--good); } .rv-st.weak { color:var(--critical); border-color:var(--critical); }
+    .rv-st.blind, .rv-st.insufficient { color:var(--muted); }
+    .rv-conf { color:var(--faint); font-size:11px; }
+    .rv-act { padding:12px 14px; border-bottom:1px solid var(--border); font-size:13px; }
+    .rv-act form { display:inline; margin-right:6px; }
+    .rv-act .why { color:var(--muted); font-size:12px; margin:2px 0 8px; }
+    .rv-gem { padding:10px 14px; border-bottom:1px solid var(--border); font-size:13px; }
+    @media (max-width:640px){ .rv-layer { grid-template-columns:1fr; gap:4px; } }
+  </style>
+</head>
+<body>
+{% include '_nav.html' %}
+{% from '_hero.html' import hero %}
+<div class="container">
+  <div class="breadcrumb">
+    <a href="/channel/{{ channel_id }}?scope={{ channel_id }}">{{ channel.name }}</a>
+    <span class="breadcrumb-sep">›</span><span>Revival</span>
+  </div>
+  {{ hero(eyebrow=channel.name, title='Where the audience is being lost',
+          lede='Each stage a viewer passes through, measured from real platform data. A stage shows "blind" when the platform does not give us that number — never a guess.') }}
+
+  {% if not report.ok %}
+  <div class="dv-empty">{{ icon('chart') }}
+    <div class="dv-empty-title">Nothing to diagnose yet</div>
+    <div class="dv-empty-sub">{{ report.reason }}</div>
+  </div>
+  {% else %}
+    {% for platform, p in report.platforms.items() %}
+    <div class="rv-plat">
+      <h3><span>{{ platform }}</span>
+        <span class="rv-conf">{{ p.videos }} posts{% if p.primary_leak %} · biggest leak: {{ p.primary_leak }}{% endif %}</span></h3>
+      {% for l in p.layers %}
+      <div class="rv-layer">
+        <span class="name">{{ l.layer }}</span>
+        <span class="rv-st {{ l.status }}">{{ l.status }}</span>
+        <span>{{ l.finding }} <span class="rv-conf">· {{ l.confidence }} confidence</span></span>
+      </div>
+      {% endfor %}
+    </div>
+    {% endfor %}
+
+
+  {% if actions %}
+  <div class="rv-plat"><h3><span>Proposed changes</span><span class="rv-conf">nothing is changed on a live post until you do it yourself</span></h3>
+    {% for a in actions %}
+    <div class="rv-act">
+      <strong>{{ a.title }}</strong> <span class="rv-st {{ 'weak' if a.status == 'rejected' else 'ok' if a.status in ('applied','measured') else 'blind' }}">{{ a.status }}</span>
+      <div class="why">{{ a.rationale }}</div>
+      {% if a.status == 'proposed' %}
+        <form method="post" action="/channel/{{ channel_id }}/revival/action/{{ a.action_id }}"><input type="hidden" name="do" value="approve"><button class="btn">Approve</button></form>
+        <form method="post" action="/channel/{{ channel_id }}/revival/action/{{ a.action_id }}"><input type="hidden" name="do" value="reject"><button class="btn">Not now</button></form>
+      {% elif a.status == 'approved' %}
+        <form method="post" action="/channel/{{ channel_id }}/revival/action/{{ a.action_id }}"><input type="hidden" name="do" value="applied"><button class="btn">I made this change</button></form>
+        <span class="rv-conf">press once you have done it — the 14-day measurement starts from that moment</span>
+      {% elif a.status == 'applied' %}
+        <span class="rv-conf">measuring — result in 14 days from {{ a.applied_at[:10] }}</span>
+      {% elif a.status == 'measured' and a.result %}
+        <span class="rv-conf">{{ a.result.verdict }}{% if a.result.net_lift_pct is defined %} · {{ a.result.metric }} {{ a.result.lift_pct }}% vs channel {{ a.result.control_lift_pct if a.result.control_lift_pct is not none else 'n/a' }}%{% endif %}</span>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+    {% if report.source_contrast %}
+    <div class="rv-plat"><h3><span>Untapped intent</span></h3>
+      {% for c in report.source_contrast %}<div class="rv-gem">{{ c.finding }}.</div>{% endfor %}
+    </div>
+    {% endif %}
+
+    {% if report.packaging_candidates %}
+    <div class="rv-plat"><h3><span>Seen but not clicked</span><span class="rv-conf">{{ report.packaging_candidates | length }}</span></h3>
+      {% for c in report.packaging_candidates %}
+      <div class="rv-gem">{{ c.episode_id or c.video_id }} — {{ '{:,}'.format(c.impressions) }} impressions, clicked {{ '%.1f' % (c.ctr * 100) }}% vs channel average {{ '%.1f' % (c.channel_ctr * 100) }}%.
+        <br><span class="rv-conf">{{ c.suggested_action }}</span></div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    <div class="rv-plat"><h3><span>Posts worth a second chance</span><span class="rv-conf">{{ report.buried_gems | length }}</span></h3>
+      {% for g in report.buried_gems %}
+      <div class="rv-gem"><a href="/episode/{{ g.episode_id }}?scope={{ channel_id }}">{{ g.episode_id }}</a> · {{ g.platform }} —
+        {{ g.why }} (reach {{ '%d' % g.reach }}, retention top {{ ((1 - g.retention_percentile) * 100) | round | int }}%).
+        <br><span class="rv-conf">{{ g.suggested_action }}</span></div>
+      {% else %}
+      <div class="rv-gem rv-conf">None found — either no post is under-distributed, or there are too few posts to rank.</div>
+      {% endfor %}
+    </div>
+
+    {% if report.blind_spots %}
+    <div class="rv-plat"><h3><span>What we cannot see yet</span></h3>
+      {% for b in report.blind_spots %}<div class="rv-gem">{{ b }}</div>{% endfor %}
+    </div>
+    {% endif %}
+  {% endif %}
+</div>
+</body>
+</html>

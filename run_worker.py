@@ -467,6 +467,36 @@ def _run_learning_cycle(db_path: Path) -> dict:
         except Exception as exc:
             log.error("learning_cycle_youtube_traffic_error error=%s", exc)
 
+        # Thumbnail impressions + click-through per video (YouTube Reporting API, asynchronous report job;
+        # hypogeum/youtube_reach.py). Feeds the packaging layer of hypogeum/revival_engine.py.
+        try:
+            from hypogeum.channel_config import list_channel_profiles
+            from hypogeum.youtube_reach import sync_channel_reach
+            for cp in list_channel_profiles(db_path=db_path):
+                cid = getattr(cp, "channel_id", None)
+                if cid:
+                    yr = sync_channel_reach(cid, db_path=db_path)
+                    if yr.get("rows"):
+                        log.info("youtube_reach channel=%s rows=%s", cid, yr["rows"])
+                    elif yr.get("status") in ("error",):
+                        log.debug("youtube_reach_skip channel=%s reason=%s", cid, yr.get("error"))
+        except Exception as exc:
+            log.error("learning_cycle_youtube_reach_error error=%s", exc)
+
+        # Revival Engine: propose actions from the diagnosis and close the loop on applied ones (14-day, control-adjusted).
+        try:
+            from hypogeum.channel_config import list_channel_profiles
+            from hypogeum.revival_actions import measure_due, propose_actions
+            for cp in list_channel_profiles(db_path=db_path):
+                cid = getattr(cp, "channel_id", None)
+                if cid:
+                    new_actions = propose_actions(cid, db_path=db_path)
+                    measured = measure_due(cid, db_path=db_path)
+                    if new_actions or measured:
+                        log.info("revival channel=%s proposed=%s measured=%s", cid, len(new_actions), measured)
+        except Exception as exc:
+            log.error("learning_cycle_revival_error error=%s", exc)
+
         # Market scan: what recently created YouTube channels with millions of views have in common (weekly, background thread,
         # started just after Google's quota reset; hypogeum/market_intel.py).
         try:

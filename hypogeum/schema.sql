@@ -2726,3 +2726,40 @@ CREATE TABLE IF NOT EXISTS client_linkedin_snapshots (
     UNIQUE(client_id, period_end)
 );
 CREATE INDEX IF NOT EXISTS idx_cli_li_snap ON client_linkedin_snapshots(client_id, period_end DESC);
+
+-- youtube_reach_daily: how often each video's thumbnail was SHOWN and how often it was clicked, from the YouTube
+-- Reporting API report channel_reach_basic_a1 (hypogeum/youtube_reach.py). The Analytics API does not expose these
+-- per video. Idempotent per (channel, day, video). ctr is a 0-1 fraction.
+CREATE TABLE IF NOT EXISTS youtube_reach_daily (
+    channel_id   TEXT NOT NULL,
+    day          TEXT NOT NULL,
+    video_id     TEXT NOT NULL,
+    impressions  INTEGER,
+    ctr          REAL,
+    fetched_at   TEXT NOT NULL,
+    PRIMARY KEY (channel_id, day, video_id)
+);
+CREATE INDEX IF NOT EXISTS idx_yrd_channel_video ON youtube_reach_daily(channel_id, video_id);
+
+-- revival_actions: a concrete change proposed by the Revival Engine (hypogeum/revival_actions.py), the operator's
+-- decision on it, and the measured result. Nothing here changes a live asset by itself: status moves
+-- proposed -> approved | rejected, approved -> applied (operator confirms they made the change) -> measured.
+CREATE TABLE IF NOT EXISTS revival_actions (
+    action_id     TEXT NOT NULL PRIMARY KEY,
+    channel_id    TEXT NOT NULL,
+    kind          TEXT NOT NULL,        -- repackage_post | new_thumbnail_title | search_led_topic | conversion_cta
+    platform      TEXT,
+    target_ref    TEXT NOT NULL,        -- episode_id / video_id / traffic source the action is about
+    status        TEXT NOT NULL DEFAULT 'proposed'
+                  CHECK(status IN ('proposed','approved','rejected','applied','measured')),
+    title         TEXT NOT NULL,
+    rationale     TEXT NOT NULL,
+    evidence_json TEXT,
+    baseline_json TEXT,                 -- {metric, value, control_value} captured when applied
+    result_json   TEXT,                 -- {metric, value, control_value, lift_pct, control_lift_pct, net_lift_pct}
+    created_at    TEXT NOT NULL,
+    decided_at    TEXT,
+    applied_at    TEXT,
+    measured_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_revival_actions_channel ON revival_actions(channel_id, status);

@@ -8085,6 +8085,38 @@ def channel_keyword_research_refresh(channel_id):
                             scope=channel_id, kw="started"))
 
 
+@app.route("/channel/<channel_id>/revival")
+def channel_revival_page(channel_id):
+    """Where this channel is leaking viewers, which posts deserve a second chance,
+    and which data the platforms do not give us yet (hypogeum.revival_engine)."""
+    db = _db_path()
+    channel = get_channel_detail(channel_id, db_path=db)
+    if channel is None:
+        return render_template("not_found.html", kind="Channel", id=channel_id), 404
+    from hypogeum.revival_actions import list_actions, propose_actions
+    from hypogeum.revival_engine import diagnose_channel
+    report = diagnose_channel(channel_id, db_path=db)
+    try:
+        propose_actions(channel_id, db_path=db)
+    except Exception as exc:  # noqa: BLE001 -- the diagnosis must still render
+        app.logger.warning("revival propose failed (channel=%s): %s", channel_id, exc, exc_info=True)
+    return render_template("channel_revival.html", channel=channel, channel_id=channel_id, report=report,
+                           actions=list_actions(channel_id, db_path=db))
+
+
+@app.route("/channel/<channel_id>/revival/action/<action_id>", methods=["POST"])
+def channel_revival_action(channel_id, action_id):
+    """Operator decision on a proposed revival action. Changes only our own record; the live post is never touched."""
+    from hypogeum.revival_actions import decide, mark_applied
+    do = request.form.get("do")
+    db = _db_path()
+    if do in ("approve", "reject"):
+        decide(action_id, do == "approve", db_path=db)
+    elif do == "applied":
+        mark_applied(action_id, db_path=db)
+    return redirect(f"/channel/{channel_id}/revival?scope={channel_id}")
+
+
 @app.route("/channel/<channel_id>/video-compare")
 def channel_video_compare_page(channel_id):
     """Head-to-head: this channel's current video model vs one alternative,

@@ -2777,3 +2777,13 @@ CREATE TABLE IF NOT EXISTS audience_comments (
     PRIMARY KEY (channel_id, comment_id)
 );
 CREATE INDEX IF NOT EXISTS idx_audience_comments_channel ON audience_comments(channel_id, video_id);
+
+-- revival_policy: how much the Revival Engine may do on its own for a channel (hypogeum/revival_autopilot.py).
+--   off      nothing runs
+--   observe  diagnoses and proposes only
+--   auto     decides, executes within hard limits (covers via API, learning directives), measures, alerts when only a human hand can finish
+CREATE TABLE IF NOT EXISTS revival_policy (
+    channel_id TEXT NOT NULL PRIMARY KEY,
+    autonomy   TEXT NOT NULL DEFAULT 'off' CHECK(autonomy IN ('off','observe','auto')),
+    updated_at TEXT NOT NULL
+);

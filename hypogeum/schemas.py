@@ -608,6 +608,15 @@ def _validate_vertical_thumbnail_plan(p: dict) -> None:
     _req_str(p, s, "rationale")
 
 
+def _validate_revival_cover_check(p: dict) -> None:
+    """Verdict of the Revival Engine's fact-consistency check on a replacement cover (hypogeum/revival_executor.py)."""
+    s = "revival_cover_check"
+    v = _req_str(p, s, "verdict")
+    if v not in ("pass", "fail"):
+        raise SchemaError(s, "verdict", "must be 'pass' or 'fail'")
+    _req_str(p, s, "reason")
+
+
 def _validate_narration_package(p: dict) -> None:
     s = "narration_package"
     _req_dict(p, s, "package_metadata")
@@ -1410,6 +1419,7 @@ _VALIDATORS = {
     "thumbnail_generation_plan":     _validate_thumbnail_generation_plan,
     "thumbnail_package":             _validate_thumbnail_package,
     "vertical_thumbnail_plan":       _validate_vertical_thumbnail_plan,
+    "revival_cover_check":           _validate_revival_cover_check,
     "narration_package":         _validate_narration_package,
     "final_render_package":      _validate_final_render_package,
     "publishing_record":         _validate_publishing_record,

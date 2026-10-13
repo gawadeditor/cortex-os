@@ -121,6 +121,34 @@ def reserve_cover_draft(action_id: str, *, db_path: Optional[Path] = None) -> di
     return {"ok": True, "episode_id": ep}
 
 
+_JUDGE_PROMPT = Path(__file__).resolve().parent / "prompts" / "revival_cover_check.txt"
+
+
+def judge_cover(hook_text: str, title: str, description: str, ep: str, config, work: Path) -> dict:
+    """Model check that the cover text is faithful to the video it will sit on. Fails CLOSED: any error = not approved."""
+    try:
+        from hypogeum.agent import run_agent
+        from hypogeum.prompt_loader import load_prompt
+        out = run_agent(
+            agent_name="revival_cover_check",
+            model_slug=getattr(config, "OPENROUTER_SONNET_MODEL_ID", "anthropic/claude-sonnet-4.6") or "anthropic/claude-sonnet-4.6",
+            system_prompt=load_prompt(_JUDGE_PROMPT),
+            input_package={"cover_text": hook_text, "video_title": title, "video_description": description[:900]},
+            output_schema="revival_cover_check", episode_id=ep, max_tokens=300, config=config, output_dir=work, channel_id=None)
+        return {"verdict": out["verdict"], "reason": out["reason"]}
+    except Exception as exc:  # noqa: BLE001
+        return {"verdict": "fail", "reason": f"consistency check unavailable: {str(exc)[:100]}"}
+
+
+def _hook_text_from(work: Path) -> Optional[str]:
+    for p in sorted(work.glob("**/*vertical_thumbnail_plan*.json")):
+        try:
+            return json.loads(p.read_text())["hook_text"]
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
 def _published_copy(a: dict, ep: str, db_path) -> Optional[tuple]:
     """(title, description) of the post as it is LIVE on YouTube, so the cover is grounded in what the video actually says
     (the episode row holds only a working title; a cover written from it alone once contradicted the video's thesis)."""
@@ -176,15 +204,21 @@ def generate_cover_draft(action_id: str, *, db_path: Optional[Path] = None) -> d
                     asset = Path(pkg["main_thumbnail"]["asset_id"]).name
                     found = next((p for suf in (".png", ".jpg", ".jpeg", ".webp")
                                   for p in (work / f"{asset}{suf}", work / "thumbnails" / f"{asset}{suf}") if p.exists()), None)
+                    hook = _hook_text_from(work)
+                    verdict = judge_cover(hook or "", title, topic, ep, config, work) if hook else \
+                        {"verdict": "fail", "reason": "could not read the cover text to check it"}
                     if found is None:
                         reason = "the generated cover file was not found"
+                    elif verdict["verdict"] != "pass":
+                        reason = f"rejected by the consistency check ({hook!r}): {verdict['reason']}"
                     else:
                         DRAFT_DIR.mkdir(parents=True, exist_ok=True)
                         dest = DRAFT_DIR / f"{action_id}{found.suffix.lower()}"
                         shutil.copyfile(found, dest)
                         with get_connection(db_path) as conn:
                             _set_draft(conn, action_id, {"status": "ready", "path": str(dest), "started_at": started,
-                                                         "finished_at": _now(), "cost_usd": DRAFT_COST_USD})
+                                                         "finished_at": _now(), "cost_usd": DRAFT_COST_USD,
+                                                         "hook_text": hook, "check": verdict["reason"]})
                         return {"ok": True, "path": str(dest)}
     except Exception as exc:  # noqa: BLE001 -- a failed draft must never break the dashboard or the worker
         reason = str(exc)[:200]
@@ -192,3 +226,50 @@ def generate_cover_draft(action_id: str, *, db_path: Optional[Path] = None) -> d
     with get_connection(db_path) as conn:
         _set_draft(conn, action_id, {"status": "failed", "reason": reason, "started_at": started, "finished_at": _now()})
     return {"ok": False, "reason": reason}
+
+
+def apply_youtube_cover(action_id: str, *, db_path: Optional[Path] = None) -> dict:
+    """Set the checked, ready draft as the live cover through the YouTube API (verified 2026-10-13: it changes a Short's
+    served image). What viewers saw before is saved next to the draft. Marks the action applied (baseline captured now)."""
+    import io
+    import requests
+    from hypogeum.db import get_connection
+    from hypogeum.publishing.youtube_privacy import _access_token
+    from hypogeum.revival_actions import mark_applied
+
+    with get_connection(db_path) as conn:
+        a = _get(conn, action_id)
+        if not a or a["status"] != "approved" or a["platform"] != "youtube" or a["kind"] not in _COVER_KINDS:
+            return {"ok": False, "reason": "not an approved YouTube cover action"}
+        draft = json.loads(a["draft_json"]) if a.get("draft_json") else {}
+        if draft.get("status") != "ready" or not draft.get("check"):
+            return {"ok": False, "reason": "no consistency-checked draft is ready"}
+        ep = _episode_of(a)
+        row = conn.execute("SELECT platform_video_id FROM platform_analytics WHERE episode_id=? AND platform='youtube' "
+                           "AND platform_video_id IS NOT NULL LIMIT 1", (ep,)).fetchone()
+    if not row:
+        return {"ok": False, "reason": "cannot find the YouTube video for this episode"}
+    vid = row[0]
+    try:
+        token = _access_token(a["channel_id"], db_path)
+        data = Path(draft["path"]).read_bytes()
+        if len(data) > 2_000_000:                      # YouTube's thumbnail size limit
+            from PIL import Image
+            buf = io.BytesIO()
+            Image.open(io.BytesIO(data)).convert("RGB").save(buf, "JPEG", quality=85)
+            data = buf.getvalue()
+        try:                                           # keep what viewers saw before, for the record
+            (DRAFT_DIR / f"{action_id}.before.jpg").write_bytes(
+                requests.get(f"https://i.ytimg.com/vi/{vid}/maxresdefault.jpg", timeout=30).content)
+        except Exception:  # noqa: BLE001
+            pass
+        r = requests.post("https://www.googleapis.com/upload/youtube/v3/thumbnails/set",
+                          params={"videoId": vid, "uploadType": "media"},
+                          headers={"Authorization": f"Bearer {token}", "Content-Type": "image/jpeg"}, data=data, timeout=60)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": str(exc)[:160]}
+    if r.status_code != 200:
+        return {"ok": False, "reason": f"YouTube refused the cover ({r.status_code}): {r.text[:140]}"}
+    mark_applied(action_id, db_path=db_path)
+    log.info("revival_youtube_cover_applied", action_id=action_id, video_id=vid)
+    return {"ok": True, "video_id": vid}

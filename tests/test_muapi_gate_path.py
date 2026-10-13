@@ -720,6 +720,37 @@ class TestPerSceneRetryLoop:
         assert res["generation_status"] == "generation_failed"
         assert len(calls) == 1
 
+    def test_a_transient_provider_fault_is_retried_under_a_fresh_identity(self, monkeypatch):
+        # ep_b2bf517d 2026-10-13: MUAPI failed three scenes with "Internal Error, Please try
+        # again later". That is recorded as a REJECTED job (reservation released, nothing
+        # charged); the scene used to be given up on instead of being bought again.
+        import hypogeum.muapi as m
+        monkeypatch.setattr(m, "scene_rejected_for_transient_provider_error", lambda **kw: True)
+        cfg = make_config()
+        cfg.MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE = 2
+        ok = {"scene_id": "s01b01", "asset_id": "a", "generation_status": "generated"}
+        res, calls = self._run(
+            monkeypatch, cfg,
+            [(None, "gate_denied[None]: provider explicitly rejected"), (ok, None)],
+            reconcile="not_applicable",
+        )
+        assert res["generation_status"] == "generated"
+        assert calls == [("PRIMARY", False, 0), ("PRIMARY", False, 1)]  # fresh :recovery1 key
+
+    def test_a_content_refusal_is_still_never_auto_retried(self, monkeypatch):
+        import hypogeum.muapi as m
+        monkeypatch.setattr(m, "scene_rejected_for_transient_provider_error", lambda **kw: False)
+        cfg = make_config()
+        cfg.MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE = 3
+        ok = {"scene_id": "s01b01", "asset_id": "a", "generation_status": "generated"}
+        res, calls = self._run(
+            monkeypatch, cfg,
+            [(None, "gate_denied[None]: provider explicitly rejected"), (ok, None)],
+            reconcile="not_applicable",
+        )
+        assert res["generation_status"] == "generation_failed"
+        assert len(calls) == 1
+
     def test_systemic_billing_failure_stops_immediately(self, monkeypatch):
         cfg = make_config()
         cfg.MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE = 5
@@ -1142,3 +1173,31 @@ class TestPromptDriftUsesPlanDeclaredPrompt:
             assert mock_post.called is False
         assert result["generation_status"] == "generation_failed"
         assert "prompt_mismatch" in result["failure_reason"]
+
+
+class TestTransientRejectionClassifier:
+    def _patch_events(self, monkeypatch, failure_reason):
+        from types import SimpleNamespace
+        import hypogeum.provider_receipt as pr
+        ev = [] if failure_reason is None else [SimpleNamespace(
+            event_type=SimpleNamespace(value="rejected"),
+            evidence={"failure_reason": failure_reason},
+        )]
+        monkeypatch.setattr(pr.WriteAheadReceiptStore, "read_events", lambda self, eid, key: ev)
+
+    def _call(self, tmp_path):
+        import hypogeum.muapi as m
+        return m.scene_rejected_for_transient_provider_error(
+            episode_id="ep_t", scene_id="s01", is_fallback=False, output_dir=tmp_path)
+
+    def test_server_fault_is_transient(self, tmp_path, monkeypatch):
+        self._patch_events(monkeypatch, "job_status_failed: Internal Error, Please try again later.")
+        assert self._call(tmp_path)
+
+    def test_content_refusal_is_not(self, tmp_path, monkeypatch):
+        self._patch_events(monkeypatch, "job_status_failed: Prompt violates content policy.")
+        assert not self._call(tmp_path)
+
+    def test_no_evidence_is_not(self, tmp_path, monkeypatch):
+        self._patch_events(monkeypatch, None)
+        assert not self._call(tmp_path)

@@ -1439,6 +1439,45 @@ def _recover_completed_scene_clip(
         return "still_unresolved"
 
 
+_TRANSIENT_PROVIDER_MARKERS = (
+    "internal error", "try again later", "temporarily", "temporary",
+    "service unavailable", "overloaded", "bad gateway", "gateway timeout",
+    "server error",
+)
+
+
+def scene_rejected_for_transient_provider_error(
+    *,
+    episode_id: str,
+    scene_id: str,
+    is_fallback: bool,
+    output_dir: Path,
+) -> bool:
+    """True when this scene's latest recorded attempt ended as a REJECTED job whose
+    provider-side reason is a transient server fault ("Internal Error, Please try
+    again later"), not a refusal of the content.
+
+    A rejected job produced no output and its reservation was released by the gate
+    (a confirmed rejection is a definite non-charge outcome), so buying the scene
+    again under a FRESH ':recovery{n}' identity cannot pay twice. A content/safety
+    refusal never matches the markers and stays never-auto-retried. Never raises.
+    """
+    try:
+        from hypogeum.provider_receipt import WriteAheadReceiptStore  # noqa: PLC0415
+
+        key = f"{episode_id}:{scene_id}:{'fallback' if is_fallback else 'primary'}"
+        events = WriteAheadReceiptStore(output_dir).read_events(episode_id, key)
+        last = events[-1] if events else None
+        if last is None or last.event_type.value != "rejected":
+            return False
+        reason = str(dict(last.evidence).get("failure_reason") or "").lower()
+        return reason.startswith("job_status_failed") and any(
+            m in reason for m in _TRANSIENT_PROVIDER_MARKERS
+        )
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def reconcile_stuck_scene_authorization(
     *,
     episode_id: str,
@@ -1839,6 +1878,7 @@ def submit_scene(
         # it would recur identically on every attempt.
         _max_attempts = max(1, int(getattr(config, "MUAPI_MAX_PAID_ATTEMPTS_PER_SCENE", 1) or 1))
         failure_reason = None
+        _retry_recovery_generation = 0
         for _attempt in range(_max_attempts):
             # 2026-10-11 (ep_48391bc5): a retry re-sends the PRIMARY prompt. The authorized
             # Production Plan declares only the primary prompt's fingerprint for each asset,
@@ -1847,7 +1887,7 @@ def submit_scene(
             # reason, so the stranded-authorization recovery below never fired. A scene whose
             # first attempt merely TIMED OUT was therefore lost for good even though the job
             # finished at the provider (already paid).
-            _p, _fb, _rec = primary_prompt, False, 0
+            _p, _fb, _rec = primary_prompt, False, _retry_recovery_generation
             manifest, failure_reason = _submit_scene_via_gate(
                 channel_id=channel_id, grant=grant, prompt=_p, tier=primary_tier,
                 reference_image_url=reference_image_url, scene_id=scene_id, short_id=short_id,
@@ -1895,6 +1935,18 @@ def submit_scene(
                     "failure_reason": None,
                 }
             if _outcome != "released":
+                if _outcome == "not_applicable" and scene_rejected_for_transient_provider_error(
+                    episode_id=eid, scene_id=scene_id, is_fallback=False, output_dir=output_dir,
+                ):
+                    # The provider failed the job with a server fault (no output, nothing
+                    # charged): retry under a fresh identity instead of giving the scene up.
+                    _retry_recovery_generation = _attempt + 1
+                    log.info(
+                        "muapi_gate_path_transient_provider_retry",
+                        scene_id=scene_id, recovery_generation=_retry_recovery_generation,
+                        prior_reason=failure_reason,
+                    )
+                    continue
                 log.warn("muapi_gate_path_no_automatic_retry", scene_id=scene_id, reconcile=_outcome)
                 break
 
@@ -1924,6 +1976,8 @@ def submit_scene(
             # — a fresh ':recovery{n}' key has none and is eligible.
             "05_idempotency_key_unconsumed",
             "already has attempt evidence",
+            # only reachable for a transient-rejected identity (see the guard below)
+            "does not reference this envelope_id",
         )
         _MAX_STRANDED_AUTH_RECOVERIES = 1
         _stranded_recoveries = 0
@@ -1950,7 +2004,11 @@ def submit_scene(
                     "model_used": "cached", "prompt_used": None, "fallback_used": False,
                     "failure_reason": None,
                 }
-            if _o != "released":
+            if _o != "released" and not (
+                _o == "not_applicable" and scene_rejected_for_transient_provider_error(
+                    episode_id=eid, scene_id=scene_id, is_fallback=False, output_dir=output_dir,
+                )
+            ):
                 break
             _stranded_recoveries += 1
             _recovery_generation = _max_attempts + _stranded_recoveries  # always a fresh :recovery{n}

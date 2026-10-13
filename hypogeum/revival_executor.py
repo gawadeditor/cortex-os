@@ -121,6 +121,30 @@ def reserve_cover_draft(action_id: str, *, db_path: Optional[Path] = None) -> di
     return {"ok": True, "episode_id": ep}
 
 
+def _published_copy(a: dict, ep: str, db_path) -> Optional[tuple]:
+    """(title, description) of the post as it is LIVE on YouTube, so the cover is grounded in what the video actually says
+    (the episode row holds only a working title; a cover written from it alone once contradicted the video's thesis)."""
+    if a.get("platform") != "youtube":
+        return None
+    try:
+        import requests
+        from hypogeum.db import get_connection
+        from hypogeum.publishing.youtube_privacy import _access_token
+        with get_connection(db_path) as conn:
+            row = conn.execute("SELECT platform_video_id FROM platform_analytics WHERE episode_id=? AND platform='youtube' "
+                               "AND platform_video_id IS NOT NULL LIMIT 1", (ep,)).fetchone()
+        if not row:
+            return None
+        r = requests.get("https://www.googleapis.com/youtube/v3/videos", timeout=30,
+                         headers={"Authorization": f"Bearer {_access_token(a['channel_id'], db_path)}"},
+                         params={"part": "snippet", "id": row[0]})
+        sn = r.json()["items"][0]["snippet"]
+        return sn["title"], sn.get("description", "")[:900]
+    except Exception as exc:  # noqa: BLE001 -- fall back to the episode row
+        log.warn("revival_published_copy_unavailable", episode_id=ep, error=str(exc)[:120])
+        return None
+
+
 def generate_cover_draft(action_id: str, *, db_path: Optional[Path] = None) -> dict:
     """Generate the draft (blocking, ~1 minute). Call reserve_cover_draft first. Never raises."""
     from hypogeum.agents.vertical_thumbnail import build_vertical_thumbnail_package, synthesize_concept_brief
@@ -135,6 +159,9 @@ def generate_cover_draft(action_id: str, *, db_path: Optional[Path] = None) -> d
             ep = _episode_of(a)
             row = conn.execute("SELECT title, topic FROM episodes WHERE episode_id=?", (ep,)).fetchone()
         title, topic = (row["title"] or "", row["topic"] or "") if row else ("", "")
+        live = _published_copy(a, ep, db_path)
+        if live:
+            title, topic = live[0], (live[1] or topic)
         config = Config()
         with tempfile.TemporaryDirectory(prefix=f"revival_{action_id}_") as td:
             work = Path(td)

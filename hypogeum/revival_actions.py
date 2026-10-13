@@ -47,6 +47,10 @@ def _proposals(report: dict) -> List[dict]:
         out.append({"kind": "search_led_topic", "platform": "youtube", "target_ref": s["source"],
                     "title": "Make search-led topics for this channel",
                     "rationale": s["finding"], "evidence": s})
+    for q in ((report.get("audience_voice") or {}).get("requests") or [])[:3]:
+        out.append({"kind": "audience_topic", "platform": "youtube", "target_ref": q["text"][:80],
+                    "title": "Make the topic the audience asked for",
+                    "rationale": f"a viewer wrote: \u201c{q['text']}\u201d ({q['likes']} likes)", "evidence": q})
     for platform, p in report.get("platforms", {}).items():
         conv = next((l for l in p["layers"] if l["layer"] == "conversion" and l["status"] == "weak"), None)
         if conv:

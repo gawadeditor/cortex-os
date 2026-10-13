@@ -76,6 +76,14 @@
   </div>
   {% endif %}
 
+    {% if report.audience_voice %}
+    <div class="rv-plat"><h3><span>What the audience asks for</span><span class="rv-conf">{{ report.audience_voice.comments }} comments · {{ report.audience_voice.questions }} questions</span></h3>
+      {% for q in report.audience_voice.requests %}<div class="rv-gem">“{{ q.text }}” <span class="rv-conf">· {{ q.likes }} likes</span></div>
+      {% else %}<div class="rv-gem rv-conf">No explicit requests yet.</div>{% endfor %}
+      {% if report.audience_voice.top_terms %}<div class="rv-gem rv-conf">Most repeated: {% for t in report.audience_voice.top_terms %}{{ t.term }} ({{ t.comments }}){{ ', ' if not loop.last }}{% endfor %}</div>{% endif %}
+    </div>
+    {% endif %}
+
     {% if report.source_contrast %}
     <div class="rv-plat"><h3><span>Untapped intent</span></h3>
       {% for c in report.source_contrast %}<div class="rv-gem">{{ c.finding }}.</div>{% endfor %}

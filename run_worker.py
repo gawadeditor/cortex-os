@@ -483,6 +483,19 @@ def _run_learning_cycle(db_path: Path) -> dict:
         except Exception as exc:
             log.error("learning_cycle_youtube_reach_error error=%s", exc)
 
+        # Public comments on each channel's own YouTube videos -> what the audience asks for (hypogeum/audience_comments.py).
+        try:
+            from hypogeum.audience_comments import fetch_channel_comments
+            from hypogeum.channel_config import list_channel_profiles
+            for cp in list_channel_profiles(db_path=db_path):
+                cid = getattr(cp, "channel_id", None)
+                if cid:
+                    ac = fetch_channel_comments(cid, db_path=db_path)
+                    if ac.get("fetched"):
+                        log.info("audience_comments channel=%s fetched=%s videos=%s", cid, ac["fetched"], ac["videos"])
+        except Exception as exc:
+            log.error("learning_cycle_audience_comments_error error=%s", exc)
+
         # Revival Engine: propose actions from the diagnosis and close the loop on applied ones (14-day, control-adjusted).
         try:
             from hypogeum.channel_config import list_channel_profiles

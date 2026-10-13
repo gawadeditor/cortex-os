@@ -33,6 +33,7 @@ from hypogeum.logger import get_logger
 
 log = get_logger(agent="revival_engine")
 
+_CUMULATIVE = ('views', 'reach', 'shares', 'saves', 'follows')  # counts only grow; a later 0 must not erase an earlier total
 _MIN_VIDEOS = 6              # below this a ranking says nothing
 _GEM_RETENTION_PCTL = 0.70   # top 30% retention ...
 _GEM_REACH_PCTL = 0.40       # ... but bottom 40% reach
@@ -115,11 +116,11 @@ def _load_units(conn, channel_id: str) -> Dict[str, List[dict]]:
             "episode_id": r[0], "platform": r[1], "published_at": pub.get(r[0]),
             **{k: None for k in fresh}})
         # rows ascend by date: a newer snapshot that lacks a field (a 7-day row often has no
-        # retention) must not erase an older one that has it. Cumulative counts keep their max.
+        # retention) must not erase an older one that has it. Cumulative counts keep their max (_CUMULATIVE).
         for k, v in fresh.items():
             if v is None:
                 continue
-            u[k] = max(u[k], v) if k in ("views", "reach") and u[k] is not None else v
+            u[k] = max(u[k], v) if k in _CUMULATIVE and u[k] is not None else v
     by_platform: Dict[str, List[dict]] = {}
     for u in latest.values():
         by_platform.setdefault(u["platform"], []).append(u)
@@ -218,6 +219,29 @@ def _retention_layer(units: List[dict]) -> dict:
             return _layer("retention", "weak", "more than half of the audience that stays past the opening still leaves before the end",
                           ev, len(pcts))
     return _layer("retention", "ok", "viewers who start mostly keep watching", ev, len(pcts))
+
+
+_REPORTS_SHARES = ('instagram', 'tiktok')
+_SHARE_WEAK = 0.005        # (shares + saves) per reached account — heuristic: below this nobody passes it on
+
+
+def _sharing_layer(platform: str, units: List[dict]) -> dict:
+    """Do viewers pass it on? Shares + saves per reached account (Instagram 'sends' are the strongest reach signal)."""
+    reach = sum(_reach_of(u) or 0 for u in units)
+    # Instagram and TikTok do report shares/saves, so a run of zeros there is a real finding, not missing data
+    reported = platform in _REPORTS_SHARES or any((u["shares"] or u["saves"]) for u in units)
+    if not reported:
+        return _layer("sharing", "blind", "this platform does not report shares/saves per post",
+                      {"reach": reach}, len(units))
+    if reach < 500:
+        return _layer("sharing", "insufficient", "not enough reach yet to judge sharing", {"reach": reach}, len(units))
+    passed = sum((u["shares"] or 0) + (u["saves"] or 0) for u in units)
+    rate = passed / reach
+    ev = {"shares_plus_saves": passed, "per_reached_account": round(rate, 5), "reach": reach}
+    if rate < _SHARE_WEAK:
+        return _layer("sharing", "weak", f"only {passed:,.0f} shares/saves from {reach:,.0f} people reached — little is worth passing on",
+                      ev, len(units))
+    return _layer("sharing", "ok", "viewers are passing posts on", ev, len(units))
 
 
 def _conversion_layer(units: List[dict], gained: Optional[float]) -> dict:
@@ -338,6 +362,8 @@ def diagnose_channel(channel_id: str, *, db_path: Optional[Path] = None) -> dict
             contrast = _source_contrast(conn, channel_id)
             gained = _followers_gained(conn, channel_id)
             yt_hook, packaging = _youtube_packaging(conn, channel_id)
+            from hypogeum.audience_comments import audience_voice
+            voice = audience_voice(conn, channel_id)
     except Exception as exc:  # noqa: BLE001
         log.warning("revival diagnose failed", extra={"channel_id": channel_id, "error": str(exc)})
         return {"ok": False, "reason": f"could not read analytics: {exc}", "channel_id": channel_id}
@@ -351,6 +377,7 @@ def diagnose_channel(channel_id: str, *, db_path: Optional[Path] = None) -> dict
             _distribution_layer(units, now),
             _hook_layer(platform, units),
             _retention_layer(units),
+            _sharing_layer(platform, units),
             _conversion_layer(units, gained.get(platform)),
         ]
         if platform == "youtube" and yt_hook:
@@ -365,4 +392,4 @@ def diagnose_channel(channel_id: str, *, db_path: Optional[Path] = None) -> dict
             blinds.append(_PLATFORM_BLINDS[platform])
 
     return {"ok": True, "reason": "", "channel_id": channel_id, "platforms": platforms,
-            "buried_gems": gems, "packaging_candidates": packaging, "source_contrast": contrast, "blind_spots": blinds}
+            "buried_gems": gems, "packaging_candidates": packaging, "audience_voice": voice, "source_contrast": contrast, "blind_spots": blinds}

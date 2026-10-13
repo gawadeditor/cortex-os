@@ -53,7 +53,8 @@ def test_conversion_leak_and_buried_gem(db):
     assert r["ok"]
     ig = r["platforms"]["instagram"]
     conv = next(l for l in ig["layers"] if l["layer"] == "conversion")
-    assert conv["status"] == "weak" and ig["primary_leak"] == "conversion"
+    assert conv["status"] == "weak"
+    assert ig["primary_leak"] in ("sharing", "conversion")  # seeded posts have zero shares, so sharing is flagged first
     assert [g["episode_id"] for g in r["buried_gems"]] == ["ep_5"]
 
 
@@ -111,3 +112,35 @@ def test_parse_reach_csv_and_store_roundtrip(db):
         _store(c, CH, rows)  # idempotent
         d = channel_ctr(c, CH)
     assert d["impressions"] == 4000 and round(d["ctr"], 4) == 0.04
+
+
+def test_sharing_layer_and_audience_voice(db):
+    _seed(db, [(1000, 0.3, 40.0, None)] * 7)
+    with get_connection(db) as c:
+        c.execute("UPDATE platform_analytics SET shares=1, saves=0")           # 7 per 7000 reach = 0.1%
+        for i in range(12):
+            text = "Please make a video about the Roman aqueducts?" if i < 3 else f"great video number {i} amazing history"
+            c.execute("INSERT INTO audience_comments VALUES (?,?,?,?,?,?,?)", (CH, f"c{i}", "v", text, i, None, "2026-10-10"))
+        c.commit()
+    r = diagnose_channel(CH, db_path=db)
+    sharing = next(l for l in r["platforms"]["instagram"]["layers"] if l["layer"] == "sharing")
+    assert sharing["status"] == "weak"
+    assert r["audience_voice"]["comments"] == 12 and len(r["audience_voice"]["requests"]) == 3
+    from hypogeum.revival_actions import _proposals
+    assert [p["kind"] for p in _proposals(r) if p["kind"] == "audience_topic"] == ["audience_topic"] * 3
+
+
+def test_audience_voice_needs_enough_comments(db):
+    _seed(db, [(1000, 0.3, 40.0, None)] * 7)
+    assert diagnose_channel(CH, db_path=db)["audience_voice"] is None
+
+
+def test_later_zero_does_not_erase_earlier_cumulative_count(db):
+    _seed(db, [(1000, 0.3, 40.0, None)] * 7)
+    with get_connection(db) as c:
+        c.execute("UPDATE platform_analytics SET shares=5")
+        c.execute("INSERT INTO platform_analytics(record_id, episode_id, platform, snapshot_date, window_days, views, reach, shares, source, imported_at) "
+                  "SELECT 'z'||record_id, episode_id, platform, '2026-10-12', 7, 900, 900, 0, 'api', '2026-10-12' FROM platform_analytics")
+        c.commit()
+    sharing = next(l for l in diagnose_channel(CH, db_path=db)["platforms"]["instagram"]["layers"] if l["layer"] == "sharing")
+    assert sharing["evidence"].get("shares_plus_saves") == 35

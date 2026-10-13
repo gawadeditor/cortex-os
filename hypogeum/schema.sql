@@ -2747,7 +2747,7 @@ CREATE INDEX IF NOT EXISTS idx_yrd_channel_video ON youtube_reach_daily(channel_
 CREATE TABLE IF NOT EXISTS revival_actions (
     action_id     TEXT NOT NULL PRIMARY KEY,
     channel_id    TEXT NOT NULL,
-    kind          TEXT NOT NULL,        -- repackage_post | new_thumbnail_title | search_led_topic | conversion_cta
+    kind          TEXT NOT NULL,        -- repackage_post | new_thumbnail_title | search_led_topic | conversion_cta | audience_topic
     platform      TEXT,
     target_ref    TEXT NOT NULL,        -- episode_id / video_id / traffic source the action is about
     status        TEXT NOT NULL DEFAULT 'proposed'
@@ -2763,3 +2763,17 @@ CREATE TABLE IF NOT EXISTS revival_actions (
     measured_at   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_revival_actions_channel ON revival_actions(channel_id, status);
+
+-- audience_comments: public YouTube comments on a channel's own videos (hypogeum/audience_comments.py), the raw
+-- material for "what does the audience ask for". Idempotent per comment.
+CREATE TABLE IF NOT EXISTS audience_comments (
+    channel_id   TEXT NOT NULL,
+    comment_id   TEXT NOT NULL,
+    video_id     TEXT NOT NULL,
+    text         TEXT NOT NULL,
+    likes        INTEGER NOT NULL DEFAULT 0,
+    published_at TEXT,
+    fetched_at   TEXT NOT NULL,
+    PRIMARY KEY (channel_id, comment_id)
+);
+CREATE INDEX IF NOT EXISTS idx_audience_comments_channel ON audience_comments(channel_id, video_id);

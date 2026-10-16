@@ -500,13 +500,17 @@ def _run_learning_cycle(db_path: Path) -> dict:
         try:
             from hypogeum.channel_config import list_channel_profiles
             from hypogeum.revival_actions import measure_due, propose_actions
+            from hypogeum.revival_autopilot import run_channel as revival_autopilot
             for cp in list_channel_profiles(db_path=db_path):
                 cid = getattr(cp, "channel_id", None)
                 if cid:
-                    new_actions = propose_actions(cid, db_path=db_path)
+                    ap = revival_autopilot(cid, db_path=db_path)        # per-channel policy: off | observe | auto
+                    if ap["mode"] == "off":
+                        propose_actions(cid, db_path=db_path)           # unchanged behaviour for channels without a policy
                     measured = measure_due(cid, db_path=db_path)
-                    if new_actions or measured:
-                        log.info("revival channel=%s proposed=%s measured=%s", cid, len(new_actions), measured)
+                    if any(ap.get(k) for k in ("proposed", "directives", "covers", "live", "alerts")) or measured:
+                        log.info("revival channel=%s mode=%s proposed=%s directives=%s covers=%s live=%s alerts=%s measured=%s",
+                                 cid, ap["mode"], ap["proposed"], ap["directives"], ap["covers"], ap["live"], ap["alerts"], measured)
         except Exception as exc:
             log.error("learning_cycle_revival_error error=%s", exc)
 

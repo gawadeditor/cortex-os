@@ -369,3 +369,28 @@ class TestLocalLeftoversOfArchivedEpisode:
         shutil.rmtree(ep_dir)
         assert rl.find_pending_published_episodes(db_path=dbp) == []
 
+
+
+def test_episode_waiting_for_its_youtube_cover_stays_local_until_the_cover_is_confirmed(dbp, tmp_path):
+    # 2026-10-16: two published Shorts still needed their cover uploaded in Studio, but their folders had
+    # already been moved to a NAS that was offline -- the designed covers were unreachable.
+    from hypogeum import archive_relocation as rl
+    from hypogeum.dashboard_content_grid import mark_youtube_cover_done
+
+    work = tmp_path / "episodes"
+    work.mkdir()
+    ep_dir = _seed_episode_dir(work, "ep_cover_wait")
+    set_factory_setting("archive_root", str(tmp_path / "server-archive"), db_path=dbp)
+    _mark_published(dbp, "ep_cover_wait")
+    conn = get_connection(dbp)
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("INSERT INTO youtube_cover_holds (post_id, channel_id, episode_id, release_at, upload_at, status, held_at) "
+                 "VALUES ('p1','hypogeum','ep_cover_wait','2026-10-17T10:00:00Z','2026-10-16T10:00:00Z','held','2026-10-16T00:00:00Z')")
+    conn.commit()
+    conn.close()
+    assert rl.pending_cover_upload("ep_cover_wait", dbp) is True
+    rec = rl.relocate_episode_assets("ep_cover_wait", db_path=dbp, output_dir=ep_dir, catalog_dir=tmp_path / "c")
+    assert rec["verdict"] == "SKIPPED" and "cover" in " ".join(rec["warnings"])
+    assert (ep_dir / "thumbnails" / "main.jpg").exists()
+    mark_youtube_cover_done("p1", "hypogeum", db_path=dbp)
+    assert rl.pending_cover_upload("ep_cover_wait", dbp) is False

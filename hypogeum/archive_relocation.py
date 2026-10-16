@@ -100,6 +100,29 @@ def _episode_is_published(episode_id: str, db_path: Optional[Path]) -> bool:
         return False
 
 
+def pending_cover_upload(episode_id: str, db_path: Optional[Path]) -> bool:
+    """True while a YouTube Short of this episode is held for its cover (private on YouTube, cover not yet
+    uploaded in Studio / confirmed). The designed cover lives in the episode's working folder, so the
+    folder must stay put until the operator is done with it -- archiving it first leaves the cover on a
+    NAS that may be offline (2026-10-16: two overdue covers were stranded that way). Fails open (False)
+    so a read error never blocks archiving forever."""
+    try:
+        from hypogeum.db import get_connection
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM youtube_cover_holds h WHERE h.episode_id = ? "
+                "AND h.status IN ('held','late','release_failed') "
+                "AND h.post_id NOT IN (SELECT post_id FROM youtube_cover_confirmations) LIMIT 1",
+                (episode_id,),
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _published_at(episode_id: str, db_path: Optional[Path]) -> Optional[str]:
     try:
         from hypogeum.db import get_connection
@@ -534,6 +557,12 @@ def relocate_episode_assets(
         log.info("archive_relocation_skipped", episode_id=episode_id, reason="not_published")
         return rec
 
+    if not dry_run and pending_cover_upload(episode_id, db_path):
+        rec["verdict"] = "SKIPPED"
+        rec["warnings"].append("a YouTube cover is still waiting to be uploaded -- keeping the files local")
+        log.info("archive_relocation_skipped", episode_id=episode_id, reason="cover_upload_pending")
+        return rec
+
     already = _rows_already_relocated(episode_id, db_path)
     src_has_files = src.exists() and any(p.is_file() for p in src.rglob("*"))
 
@@ -720,6 +749,8 @@ def find_pending_published_episodes(db_path: Optional[Path] = None) -> list[tupl
             from hypogeum.release_completeness import incomplete_release
             inc = incomplete_release(r["episode_id"], r["channel_id"] or "hypogeum", db_path=db_path)
             if inc and inc["age_s"] < _RELEASE_GRACE_SECONDS:
+                continue
+            if pending_cover_upload(r["episode_id"], db_path):
                 continue
             out.append((r["episode_id"], r["channel_id"] or "hypogeum"))
     return out

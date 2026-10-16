@@ -124,3 +124,19 @@ def test_dashboard_accepts_the_zip_and_shows_what_it_knows(env):
         assert b"2 facts" in page and b"Senior Editor at Channel X" in page
     finally:
         rd.app.config["DB_PATH"] = old
+
+
+def test_a_broken_json_answer_is_asked_again_then_fails_without_changing_anything(env):
+    ci.save_archive("me", _zip(ARCHIVE), db_path=env)
+    calls = []
+
+    def flaky(system, user, max_tokens, *, agent, client_id):
+        calls.append(user)
+        return ('{"facts": [{"text": "He said "hi" once", "source": "x"}]}', 0.01) if len(calls) == 1 else llm(system, user, max_tokens, agent=agent, client_id=client_id)
+    assert ci.analyze("me", db_path=env, llm=flaky)["state"] == "updated" and len(calls) == 2 and "single quotes" in calls[1]
+    ci.save_archive("me", _zip(ARCHIVE), db_path=env)
+    bad = lambda *a, **k: ("not json at all", 0.0)
+    before = cm.get_client("me", db_path=env)["brief"]["brand_profile"]["verified_facts"]
+    with pytest.raises(ci.IntakeError):
+        ci.analyze("me", db_path=env, llm=bad, force=True)
+    assert cm.get_client("me", db_path=env)["brief"]["brand_profile"]["verified_facts"] == before

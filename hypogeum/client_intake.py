@@ -182,9 +182,19 @@ def analyze(client_id: str, *, db_path=None, llm: Optional[Callable] = None, for
     body = ""
     for k in sorted(src):
         body += f"\n=== SOURCE: {k} ===\n{src[k]}\n"
-    raw, cost = llm(load_prompt(Path(__file__).resolve().parent / "prompts" / "client_intake.txt"), "Input:" + body[:MAX_SOURCE_CHARS],
-                    3000, agent="client_intake", client_id=client_id)
-    data = bsa._parse(raw)
+    system = load_prompt(Path(__file__).resolve().parent / "prompts" / "client_intake.txt")
+    user, cost, data = "Input:" + body[:MAX_SOURCE_CHARS], 0.0, None
+    for attempt in range(2):          # a quote inside a fact can break the JSON: ask once more, stricter
+        raw, c = llm(system, user if attempt == 0 else user + "\n\nYour previous answer was not valid JSON. Answer again; "
+                     "inside a fact use single quotes only, never a double quote.", 6000, agent="client_intake", client_id=client_id)
+        cost += c or 0.0
+        try:
+            data = bsa._parse(raw)
+            break
+        except ValueError as exc:
+            log.warn("client_intake_bad_json", client_id=client_id, attempt=attempt, error=str(exc)[:80])
+    if data is None:
+        raise IntakeError("the analysis answer could not be read (twice); nothing was changed")
     facts = [f for f in (data.get("facts") or []) if isinstance(f, dict) and str(f.get("text") or "").strip()]
     if not facts:
         raise IntakeError("the analysis returned no facts; nothing was changed")

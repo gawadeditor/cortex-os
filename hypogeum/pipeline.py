@@ -1031,9 +1031,11 @@ def run_pipeline(
     # -----------------------------------------------------------------------
     if channel_id is not None:
         from hypogeum.production_preflight import (
+            assert_provider_billing_ok,
             assert_video_model_qualified,
             assert_topic_not_already_produced,
         )
+        assert_provider_billing_ok(db_path=db_path)
         assert_video_model_qualified(channel_id, db_path=db_path)
         assert_topic_not_already_produced(
             channel_id, topic_input, episode_id=episode_id, db_path=db_path

@@ -399,6 +399,12 @@ def _retry_muapi_quota_exhausted(
             "muapi_quota_exhausted", scene_id=scene_id, http_status=402,
             attempts_made=attempt + 1, max_attempts=max_attempts,
         )
+        # A persistent 402 is an account-level wall: every later scene and
+        # every later episode hits it too. Pause new production now (and tell
+        # the operator the real cause) instead of letting each episode burn
+        # its pre-video spend and die at QA.
+        from hypogeum.muapi_spend_breaker import trip_provider_billing
+        trip_provider_billing("MUAPI", "HTTP 402", log=log)
         return False
     log.warn(
         "muapi_quota_exhausted_retry", scene_id=scene_id, http_status=402,

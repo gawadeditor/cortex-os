@@ -38,6 +38,8 @@ __all__ = [
     "ProductionPreflightError",
     "VideoModelNotQualifiedError",
     "DuplicateTopicError",
+    "ProviderBillingBlockedError",
+    "assert_provider_billing_ok",
     "channel_deliverable_resolution",
     "evaluate_candidate_video_model",
     "evaluate_channel_video_model",
@@ -60,6 +62,12 @@ class VideoModelNotQualifiedError(ProductionPreflightError):
 class DuplicateTopicError(ProductionPreflightError):
     """A non-superseded episode for this channel already exists under the
     same canonical subject."""
+
+
+class ProviderBillingBlockedError(ProductionPreflightError):
+    """A provider account is known to have no funds (a 402 already survived
+    every bounded retry), so starting an episode would only burn the
+    pre-video spend and die at assembly."""
 
 
 # ---------------------------------------------------------------------------
@@ -284,3 +292,29 @@ def assert_topic_not_already_produced(
                 f"different topic."
             )
     log.info("preflight_topic_unique_ok", channel_id=channel_id, canonical_subject=subject)
+
+
+# ---------------------------------------------------------------------------
+# Gate 3 — no known-dry provider account
+# ---------------------------------------------------------------------------
+
+def assert_provider_billing_ok(*, db_path: Optional[Path] = None) -> None:
+    """Raise ProviderBillingBlockedError while production is paused because a
+    provider account ran out of funds (see
+    muapi_spend_breaker.trip_provider_billing). The worker already stops
+    claiming in that state; this closes the manual path (run_pipeline.py,
+    dashboard Start). Cleared by the operator's resume after topping up."""
+    from hypogeum.db import get_worker_control
+    from hypogeum.muapi_spend_breaker import PROVIDER_BILLING_PREFIX
+
+    try:
+        reason = get_worker_control("queue_paused_reason", "", db_path=db_path) or ""
+        paused = str(get_worker_control("queue_paused", "0", db_path=db_path)) == "1"
+    except Exception:  # noqa: BLE001 — an unreadable flag must not block production
+        return
+    if reason.startswith(PROVIDER_BILLING_PREFIX) and paused:
+        log.error("preflight_provider_billing_denied", reason=reason)
+        raise ProviderBillingBlockedError(
+            f"{reason.removeprefix(PROVIDER_BILLING_PREFIX).strip()} — top up the account, "
+            f"then resume production from the dashboard."
+        )

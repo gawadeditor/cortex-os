@@ -349,6 +349,8 @@ def _plain_error(err: str) -> str:
         return "ميعاد النشر قريب أوي على وقت الإنتاج المطلوب (الخطة مش بتكفي)"
     if "already registered with implementation checksum" in e:
         return "كود الـ adapters اتغير ومتسجلش"
+    if "muapi" in e.lower() and ("402" in e or "quota" in e.lower()):
+        return "رصيد MUAPI خلص"
     if "credits exhausted" in e.lower() or "402" in e:
         return "رصيد OpenRouter خلص"
     if "lease unavailable" in e:

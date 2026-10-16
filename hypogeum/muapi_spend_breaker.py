@@ -48,7 +48,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-__all__ = ["check_muapi_spend_breaker", "clear_breaker"]
+__all__ = ["check_muapi_spend_breaker", "clear_breaker", "trip_provider_billing",
+           "PROVIDER_BILLING_PREFIX"]
+
+PROVIDER_BILLING_PREFIX = "provider_billing:"
 
 _TERMINAL_FAIL = ("failed", "error")
 _RUNNING = ("running", "claimed", "queued")
@@ -87,6 +90,42 @@ def clear_breaker(*, db_path: Optional[object] = None,
         "breaker_cleared_at", (now or datetime.now(timezone.utc)).isoformat(),
         db_path=db_path,
     )
+
+
+def trip_provider_billing(
+    provider: str, detail: str, *, db_path: Optional[object] = None, log=None,
+) -> bool:
+    """A provider account has no funds (a REAL HTTP 402 that survived every
+    bounded retry). Pause new production at once, with the real cause as the
+    pause reason, so the operator is told "MUAPI balance is out" instead of
+    the downstream symptom (2026-10-14..15: three episodes burned ~100 min of
+    EP/RD/NA/SE/audio spend and were reported only as "QA rejected").
+
+    Reuses the spend breaker's pause (worker stops claiming, publishing keeps
+    running) and its resume (clear_breaker / dashboard "resume"). Never
+    overwrites an existing pause reason. No-raise: a failure to record is
+    logged, never propagated into the generation call that hit the 402.
+    Returns True when THIS call paused production."""
+    try:
+        from hypogeum.db import get_worker_control, set_worker_control
+        if str(get_worker_control("queue_paused", "0", db_path=db_path)) == "1":
+            return False
+        set_worker_control("queue_paused", "1", db_path=db_path)
+        set_worker_control(
+            "queue_paused_reason",
+            f"{PROVIDER_BILLING_PREFIX} رصيد {provider} خلص ({detail})",
+            db_path=db_path,
+        )
+        if log is not None:
+            log.error("provider_billing_production_paused", provider=provider, detail=detail)
+        return True
+    except Exception as exc:  # noqa: BLE001 — no-raise contract
+        if log is not None:
+            try:
+                log.warn("provider_billing_trip_failed", provider=provider, error=f"{type(exc).__name__}: {exc}"[:200])
+            except Exception:  # noqa: BLE001
+                pass
+        return False
 
 
 def check_muapi_spend_breaker(

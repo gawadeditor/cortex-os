@@ -814,6 +814,8 @@ def check_production_paused(db_path) -> dict:
         except Exception:  # noqa: BLE001
             pass
         short_reason = reason.split(" — ")[0].replace("muapi_spend_breaker: ", "")
+        if short_reason.startswith("provider_billing:"):
+            short_reason = short_reason.removeprefix("provider_billing:").strip() + " — اشحن الحساب الأول"
         out["production:paused"] = ("الإنتاج واقف",
                                     f"المصنع وقّف إنتاج الحلقات الجديدة (النشر شغال عادي).\n"
                                     f"ليه وقف: {short_reason}{causes}\n"

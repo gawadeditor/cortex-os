@@ -597,6 +597,27 @@ def test_production_stalled_alerts_with_the_days_and_the_reason(db, monkeypatch)
     assert "متوقف بأمر" in got["stalled:ch"][1] and "0 من 3" in got["stalled:ch"][1]
 
 
+def test_production_stalled_names_the_real_cause_when_nothing_is_recorded(db, monkeypatch):
+    monkeypatch.setenv("PRODUCTION_BUFFER_TARGET", "3")
+    _channel_with_slots(db, monkeypatch, filled_slots=[])
+    _queue_row(db, "ch", "ep_old", "completed", NOW - timedelta(days=3),
+               completed_at=(NOW - timedelta(days=3)).isoformat())
+    conn = get_connection(db)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+    data = {"run_id": "rs", "episode_id": "ep_x", "status": "failed", "channel_id": "ch",
+            "started_at": (NOW - timedelta(hours=5)).isoformat(), "error_message": "OpenRouter credits exhausted (HTTP 402)"}
+    if "created_at" in cols:
+        data["created_at"] = data["started_at"]
+    conn.execute(f"INSERT INTO runs ({','.join(data)}) VALUES ({','.join('?' * len(data))})", list(data.values()))
+    conn.commit()
+    conn.close()
+    body = oa.check_production_stalled(db, NOW)["stalled:ch"][1]
+    assert "آخر محاولة فشلت: رصيد OpenRouter خلص" in body
+    set_worker_control("queue_paused_reason", "provider_billing: رصيد MUAPI خلص (HTTP 402)", db_path=db)
+    set_worker_control("queue_paused", "1", db_path=db)
+    assert "الإنتاج موقوف" in oa.check_production_stalled(db, NOW)["stalled:ch"][1]
+
+
 def test_production_stalled_is_quiet_when_recent_full_or_never_produced(db, monkeypatch):
     monkeypatch.setenv("PRODUCTION_BUFFER_TARGET", "3")
     _channel_with_slots(db, monkeypatch, filled_slots=[])

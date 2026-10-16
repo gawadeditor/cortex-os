@@ -562,12 +562,38 @@ def _last_finished_by_channel(conn) -> dict:
     return out
 
 
-_STALL_ALERT_DAYS = 3   # no episode finished for this long while the buffer is below target
+_STALL_ALERT_DAYS = 2   # no episode finished for this long while the buffer is below target
+
+
+def _diagnose_stall(channel_id: str, db_path, dbp) -> str:
+    """Best-effort one-line REAL cause for a channel that stopped finishing
+    episodes with no stop/pause recorded: an empty provider balance, else the
+    channel's latest failed run in plain words. '' when nothing is found.
+    Never raises (2026-10-14..15: the operator saw only "episode failed")."""
+    try:
+        from hypogeum.operator_actions import _plain_error
+        billing = _active_billing_cause(db_path)
+        if billing:
+            return f"السبب: {billing}."
+        conn = _conn(db_path, ddl=False)
+        try:
+            row = conn.execute(
+                "SELECT status, error_message, started_at FROM runs WHERE channel_id = ? "
+                "ORDER BY started_at DESC LIMIT 1", (channel_id,)).fetchone()
+        finally:
+            conn.close()
+        if row and row["status"] in ("failed", "error"):
+            return f"آخر محاولة فشلت: {_plain_error(row['error_message'] or '')}."
+        if row and row["status"] in ("running", "in_progress"):
+            return "فيه حلقة شغالة دلوقتي (آخر بداية: " + str(row["started_at"])[:16] + " UTC) — ممكن تكون عالقة."
+        return ""
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def check_production_stalled(db_path, now: datetime) -> dict:
     """A channel whose buffer is below target and that has not FINISHED an
-    episode for 3+ days, whatever the reason (worker stopped on purpose, paused,
+    episode for 2+ days, whatever the reason (worker stopped on purpose, paused,
     failing, stuck). 2026-09-07..10-03: production sat stopped for 26 days and
     nothing said so. Failures and pauses have their own alerts; this one is the
     long-silence backstop, and says how long it has been. One alert per channel
@@ -612,7 +638,7 @@ def check_production_stalled(db_path, now: datetime) -> dict:
         elif paused:
             why = "الإنتاج موقوف (paused): " + (get_worker_control("queue_paused_reason", "", db_path=dbp) or "سبب غير مكتوب")
         else:
-            why = "مفيش إيقاف مسجّل. شوف تنبيهات فشل الإنتاج أو حالة الـ worker."
+            why = _diagnose_stall(ch, db_path, dbp) or "مفيش إيقاف مسجّل. شوف تنبيهات فشل الإنتاج أو حالة الـ worker."
         last_local = (datetime.fromisoformat(str(done).replace("Z", "+00:00")) + timedelta(hours=4)).strftime("%d %b")
         out[f"stalled:{ch}"] = (
             f"مفيش حلقات جديدة بتتنتج على {ch} من {days} يوم",

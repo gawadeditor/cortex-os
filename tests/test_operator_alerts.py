@@ -697,3 +697,33 @@ def test_an_episode_finished_by_a_salvage_run_counts_as_finished(db, monkeypatch
     conn.commit()
     conn.close()
     assert oa.check_production_stalled(db, NOW) == {}
+
+
+def test_billing_pause_tells_the_operator_when_credit_is_back_and_probes_at_most_every_15_min(db):
+    set_worker_control("queue_paused", "1", db_path=db)
+    set_worker_control("queue_paused_reason", "provider_billing: رصيد MUAPI خلص (HTTP 402)", db_path=db)
+    answers = iter([False, True, True])
+    calls = []
+
+    def probe():
+        calls.append(1)
+        return next(answers)
+
+    assert "production:recovered" not in oa.check_production_paused(db, probe=probe)     # still empty
+    assert "production:recovered" not in oa.check_production_paused(db, probe=probe)     # within 15 min: not asked again
+    assert len(calls) == 1
+    set_worker_control("muapi_probe_at", (oa._now() - timedelta(minutes=16)).isoformat(), db_path=db)
+    got = oa.check_production_paused(db, probe=probe)
+    assert "الرصيد رجع" in got["production:recovered"][0] and len(calls) == 2
+
+
+def test_probe_reads_402_as_empty_and_anything_else_definite_as_funded():
+    from hypogeum.muapi_spend_breaker import probe_muapi_credit
+
+    class R:
+        def __init__(self, c): self.status_code = c
+    cfg = type("C", (), {"MUAPI_BASE_URL": "http://x", "MUAPI_T2_MODEL": "m", "MUAPI_API_KEY": "k"})()
+    assert probe_muapi_credit(cfg, post=lambda *a, **k: R(402)) is False
+    assert probe_muapi_credit(cfg, post=lambda *a, **k: R(422)) is True
+    assert probe_muapi_credit(cfg, post=lambda *a, **k: R(503)) is None
+    assert probe_muapi_credit(cfg, post=lambda *a, **k: R(401)) is None

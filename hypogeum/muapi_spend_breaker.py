@@ -49,7 +49,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 __all__ = ["check_muapi_spend_breaker", "clear_breaker", "trip_provider_billing",
-           "PROVIDER_BILLING_PREFIX"]
+           "probe_muapi_credit", "PROVIDER_BILLING_PREFIX"]
 
 PROVIDER_BILLING_PREFIX = "provider_billing:"
 
@@ -111,6 +111,8 @@ def trip_provider_billing(
         if str(get_worker_control("queue_paused", "0", db_path=db_path)) == "1":
             return False
         set_worker_control("queue_paused", "1", db_path=db_path)
+        set_worker_control("muapi_probe_has_credit", "0", db_path=db_path)  # forget an older recovery
+        set_worker_control("muapi_probe_at", "", db_path=db_path)
         set_worker_control(
             "queue_paused_reason",
             f"{PROVIDER_BILLING_PREFIX} رصيد {provider} خلص ({detail})",
@@ -126,6 +128,35 @@ def trip_provider_billing(
             except Exception:  # noqa: BLE001
                 pass
         return False
+
+
+def probe_muapi_credit(config=None, *, post=None) -> Optional[bool]:
+    """Does the MUAPI account have credit again? MUAPI has no balance endpoint
+    (GET /user/balance is 404), but it checks credit BEFORE content rules and
+    AFTER schema rules: a schema-valid request with an empty prompt answers 402
+    INSUFFICIENT_CREDITS on an empty account (verified 2026-10-16), while any
+    schema-invalid body answers 422 regardless of balance (useless as a probe).
+    Returns False on 402, True on any other definite answer, None when unknown
+    (401, 5xx, network). Used ONLY while production is paused for an empty
+    balance. Caveat: on a funded account an empty prompt could, at worst, start
+    one 8s clip (~$0.39) -- accepted once, because the probe stops running as
+    soon as the operator resumes. No-raise."""
+    try:
+        import requests
+        from hypogeum.config import Config
+        from hypogeum.muapi import _get_headers
+        cfg = config or Config()
+        do_post = post or requests.post
+        r = do_post(f"{cfg.MUAPI_BASE_URL}/{cfg.MUAPI_T2_MODEL}", headers=_get_headers(cfg),
+                    json={"prompt": ""}, timeout=20)
+        code = int(r.status_code)
+        if code == 402:
+            return False
+        if code in (401, 403) or code >= 500:
+            return None
+        return True
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def check_muapi_spend_breaker(

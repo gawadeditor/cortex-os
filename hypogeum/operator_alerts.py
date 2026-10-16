@@ -844,7 +844,29 @@ def check_client_reviews(db_path, now: datetime) -> dict:
     return out
 
 
-def check_production_paused(db_path) -> dict:
+_BILLING_PROBE_EVERY = timedelta(minutes=15)
+
+
+def _billing_recovered(dbp, probe=None) -> bool:
+    """While production is paused for an empty MUAPI balance, ask MUAPI (at most
+    every 15 min) whether credit is back. The answer is remembered so the alert
+    stays up between probes. Never raises; unknown answers keep the old answer."""
+    try:
+        from hypogeum.db import get_worker_control, set_worker_control
+        from hypogeum.muapi_spend_breaker import probe_muapi_credit
+        last = get_worker_control("muapi_probe_at", "", db_path=dbp) or ""
+        now = _now()
+        if not last or now - datetime.fromisoformat(last) >= _BILLING_PROBE_EVERY:
+            ans = (probe or probe_muapi_credit)()
+            set_worker_control("muapi_probe_at", now.isoformat(), db_path=dbp)
+            if ans is not None:
+                set_worker_control("muapi_probe_has_credit", "1" if ans else "0", db_path=dbp)
+        return get_worker_control("muapi_probe_has_credit", "0", db_path=dbp) == "1"
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def check_production_paused(db_path, *, probe=None) -> dict:
     from hypogeum.db import get_worker_control
     dbp = Path(db_path) if db_path else None
     out = {}
@@ -867,6 +889,11 @@ def check_production_paused(db_path) -> dict:
                                     f"المصنع وقّف إنتاج الحلقات الجديدة (النشر شغال عادي).\n"
                                     f"ليه وقف: {short_reason}{causes}\n"
                                     "صلّح السبب، وبعدين اضغط «رجّع الإنتاج».")
+        if reason.startswith("provider_billing:") and _billing_recovered(dbp, probe):
+            out["production:recovered"] = (
+                "الرصيد رجع — رجّع الإنتاج",
+                "حساب MUAPI بقى فيه رصيد تاني، بس الإنتاج لسه واقف عشان مفيش حاجة بتشغّله لوحدها.\n"
+                "اضغط «رجّع الإنتاج» لما تبقى جاهز.")
     # multi-tenant: a workspace's own spend breaker pauses only that workspace
     try:
         from hypogeum.workspace_controls import paused_workspaces

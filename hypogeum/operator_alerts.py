@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS operator_alert_checks (
 # per-check minimum interval (seconds) — run_operator_checks is called from
 # every worker iteration (~60s); the network-backed checks run less often.
 _INTERVALS = {"adapters": 300, "run_failures": 60, "queue_failures": 120, "buffer_gap": 1800, "production_stalled": 1800, "partial_releases": 300, "public_youtube_shorts": 600, "postiz_post_errors": 600, "postiz_health": 120, "client_grants": 3600, "client_drafts": 600, "client_intake": 3600, "client_reviews": 900, "client_publishing_media": 600, "client_publishing_posts": 600, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
-              "youtube_covers": 300, "stuck_releases": 300, "youtube_flip_auth": 3600, "posts": 1800, "unpublished": 300, "accounts": 600, "archive": 300, "archive_backlog": 600, "disk": 1800}
+              "youtube_covers": 300, "stuck_releases": 300, "youtube_cover_seen": 1800, "youtube_flip_auth": 3600, "posts": 1800, "unpublished": 300, "accounts": 600, "archive": 300, "archive_backlog": 600, "disk": 1800}
 _DASHBOARD = "http://127.0.0.1:5001"
 _CREDIT_LOW_USD = 3.0
 _DISK_LOW_GB, _DISK_OK_GB = 30.0, 40.0
@@ -1088,6 +1088,39 @@ def check_stuck_releases(db_path, now: datetime) -> dict:
     return out
 
 
+_COVER_SEEN_AFTER_H = 12
+_COVER_SEEN_FROM = "2026-10-17T00:00:00"     # Shorts released before the Studio audit existed were all checked by eye that day
+
+
+def check_youtube_cover_seen(db_path, now: datetime) -> dict:
+    """A Short has been public for a while and nobody has LOOKED at its cover in Studio. "Done" is not proof
+    (Stonehenge stayed grey after its Done) and no API shows a Short's Studio cover, so this is the backstop
+    for when the daily Studio audit did not run."""
+    conn = _conn(db_path, ddl=False)
+    try:
+        rows = conn.execute(
+            "SELECT h.post_id, h.channel_id, h.episode_id, h.released_at, h.release_at FROM youtube_cover_holds h "
+            "WHERE h.status = 'released' AND COALESCE(h.released_at, h.release_at) >= ? "
+            "AND COALESCE(h.released_at, h.release_at) <= ? "
+            "AND h.post_id NOT IN (SELECT post_id FROM youtube_cover_studio_checks)",
+            (_COVER_SEEN_FROM, (now - timedelta(hours=_COVER_SEEN_AFTER_H)).strftime("%Y-%m-%dT%H:%M:%S"))).fetchall()
+    except Exception:  # noqa: BLE001 — table absent on a fresh DB
+        return {}
+    finally:
+        conn.close()
+    out = {}
+    for r in rows:
+        out[f"coverseen:{r['post_id']}"] = (
+            f"شورت {r['channel_id']} نزل ومحدش اتأكد من الغلاف في Studio",
+            f"الحلقة {r['episode_id'] or ''} بقالها أكتر من {_COVER_SEEN_AFTER_H} ساعة عامة، وعلامة Done لوحدها مش دليل."
+            f"\nافتح Studio ← Content ← Shorts وشوف إن الغلاف المصمّم ظاهر (مش صورة رمادية)."
+            f"\nالـ Content Grid: {_DASHBOARD}/channel/{r['channel_id']}/grid",
+            _ws_extra(r["channel_id"], db_path, (
+                f"{r['channel_id']}: nobody has checked this Short's cover in Studio",
+                "It has been public for a while; the Done button alone does not prove the designed cover is on YouTube.")))
+    return out
+
+
 _POSTIZ_DOWN_AFTER = 2          # consecutive failed probes before the operator is told
 _POSTIZ_PROBE_TIMEOUT_S = 15    # short: a dead server must not stall the whole alert loop
 
@@ -1530,6 +1563,7 @@ def run_operator_checks(*, db_path=None, config=None, now: Optional[datetime] = 
         ("blocking_signals", "signal:", lambda: check_blocking_signals(db_path)),
         ("youtube_covers", "cover:", lambda: check_youtube_covers(db_path, now)),
         ("stuck_releases", "stuckrelease:", lambda: check_stuck_releases(db_path, now)),
+        ("youtube_cover_seen", "coverseen:", lambda: check_youtube_cover_seen(db_path, now)),
         ("youtube_flip_auth", "ytauth:", lambda: check_youtube_flip_auth(db_path)),
         ("posts", "post", lambda: check_posts(db_path, now)),
         ("unpublished", "unpublished:", lambda: check_unpublished_episodes(db_path, now)),

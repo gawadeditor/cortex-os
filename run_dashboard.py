@@ -7876,6 +7876,16 @@ def channel_content_grid_page(channel_id):
                            refreshed=force_refresh)
 
 
+@app.route("/channel/<channel_id>/grid/youtube-cover-checked", methods=["POST"])
+def channel_content_grid_youtube_cover_checked(channel_id):
+    """Someone looked at the Short in YouTube Studio and its designed cover is there (not just 'Done')."""
+    post_id = (request.form.get("post_id") or "").strip()
+    if post_id:
+        from hypogeum.dashboard_content_grid import record_studio_cover_check
+        record_studio_cover_check(post_id, channel_id, request.form.get("note") or "", db_path=_db_path())
+    return redirect(f"/channel/{channel_id}/grid?scope={channel_id}", 303)
+
+
 @app.route("/channel/<channel_id>/grid/youtube-cover-done", methods=["POST"])
 def channel_content_grid_youtube_cover_done(channel_id):
     """Operator confirms they uploaded this post's cover in YouTube Studio

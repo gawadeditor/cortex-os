@@ -129,6 +129,20 @@ def mark_youtube_cover_done(post_id: str, channel_id: str, db_path=None) -> None
     log.info("youtube_cover_marked_done", post_id=post_id, channel_id=channel_id)
 
 
+def record_studio_cover_check(post_id: str, channel_id: str, note: str = "", db_path=None) -> None:
+    """Record that someone LOOKED at the Short in YouTube Studio and its designed cover was there.
+    Unlike mark_youtube_cover_done this is never written on a button press alone."""
+    initialize_schema(db_path)
+    conn = get_connection(db_path)
+    try:
+        conn.execute("INSERT OR REPLACE INTO youtube_cover_studio_checks (post_id, channel_id, checked_at, note) "
+                     "VALUES (?, ?, ?, ?)", (post_id, channel_id, _now_iso(), (note or "")[:200]))
+        conn.commit()
+    finally:
+        conn.close()
+    log.info("youtube_cover_studio_checked", post_id=post_id, channel_id=channel_id)
+
+
 def _live_confirmations(conn) -> set:
     return {(r["post_id"], r["platform"]) for r in conn.execute(
         "SELECT post_id, platform FROM grid_live_confirmations")}

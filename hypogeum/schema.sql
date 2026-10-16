@@ -2705,6 +2705,18 @@ CREATE TABLE IF NOT EXISTS youtube_cover_holds (
     last_error     TEXT
 );
 
+-- youtube_cover_studio_checks (2026-10-17)
+-- "Done" on the Content Grid only means someone pressed a button: Stonehenge sat public with a grey
+-- cover for two weeks after its Done. YouTube never exposes a Short's Studio cover to any API, so the
+-- only proof is a person (or Claude in the browser) LOOKING at Studio's Shorts list. A row here means
+-- exactly that: someone looked and the designed cover was there.
+CREATE TABLE IF NOT EXISTS youtube_cover_studio_checks (
+    post_id     TEXT NOT NULL PRIMARY KEY,
+    channel_id  TEXT NOT NULL,
+    checked_at  TEXT NOT NULL,
+    note        TEXT
+);
+
 -- Personal-branding plan (2026-10-03): LinkedIn personal profiles have no
 -- analytics API, so the account-level picture comes from LinkedIn's own
 -- creator-analytics Export (.xlsx) — see hypogeum.publishing.linkedin_export.

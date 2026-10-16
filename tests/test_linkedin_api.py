@@ -84,6 +84,12 @@ def test_sign_in_stores_token_and_status_never_leaks_it(env):
     assert li.token_status("me", now=datetime.now(timezone.utc) + timedelta(days=61), db_path=p)["connected"] is False
 
 
+def test_pasted_values_lose_stray_punctuation(env):
+    p, _, _ = env
+    li.store_app_credentials("78eand4adosxdi،\u200f ", " WPL_AP1.abc.def==، ", db_path=p)
+    assert li.app_credentials(p) == {"client_id": "78eand4adosxdi", "client_secret": "WPL_AP1.abc.def=="}
+
+
 def test_sign_in_without_app_is_a_plain_error(env):
     p, _, _ = env
     with pytest.raises(li.LinkedInError):

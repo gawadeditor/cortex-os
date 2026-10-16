@@ -96,7 +96,10 @@ def escape_commentary(text: str) -> str:
 # -- the developer app -----------------------------------------------------------------------------------------
 
 def store_app_credentials(client_id: str, client_secret: str, *, db_path: Optional[Path] = None) -> None:
-    data = json.dumps({"client_id": client_id.strip(), "client_secret": client_secret.strip()})
+    # a copied value often drags punctuation along ("78ea…،" with an Arabic comma): the ID is plain letters+digits
+    client_id = re.sub(r"[^A-Za-z0-9]", "", client_id or "")
+    client_secret = (client_secret or "").strip().strip("،,;:؛ \u200f\u200e\"'`")
+    data = json.dumps({"client_id": client_id, "client_secret": client_secret})
     if get_secret_profile(APP_PROFILE_ID, db_path=db_path) is None:
         create_secret_profile(provider=PROVIDER, label="LinkedIn developer app (Cortex Publisher)", credential_type="oauth2_token",
                               credential_data=data, scope="factory", secret_profile_id=APP_PROFILE_ID, db_path=db_path)

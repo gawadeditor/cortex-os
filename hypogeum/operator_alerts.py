@@ -789,7 +789,7 @@ def check_client_drafts(db_path, now: datetime) -> dict:
 
 
 def check_client_publishing(db_path, now: datetime) -> dict:
-    """An approved Instagram post that cannot go out (no material, a [placeholder] left, account not connected in
+    """An approved Instagram/LinkedIn post that cannot go out (no material, a [placeholder] left, account not connected in
     Postiz) or whose send failed / is uncertain (hypogeum.client_publishing). Only clients switched to 'manage'."""
     try:
         from hypogeum.client_publishing import _managed
@@ -798,23 +798,34 @@ def check_client_publishing(db_path, now: datetime) -> dict:
     except Exception:  # noqa: BLE001
         return {}
     out = {}
+    names = {"instagram": "Instagram", "linkedin": "LinkedIn"}
     for c in clients:
         for cal in calendars_of(c.get("brief") or {}).values():
             for p in cal.get("posts") or []:
-                a = (p.get("auto") or {}).get("instagram") or {}
                 if (p.get("status") or "draft") != "approved":
                     continue
-                key = f"{c['client_id']}:{p.get('date')}"
-                if a.get("state") == "blocked":
-                    out[f"clientmedia:{key}"] = (
-                        f"بوست Instagram موافق عليه بس مش قادر يتنشر · {p.get('date')}",
-                        "السبب: " + "؛ ".join(a.get("issues") or ["غير معروف"]) + f"\nمن الداشبورد: /client/{c['client_id']}/plan")
-                elif a.get("state") == "failed":
-                    out[f"clientpost:{key}"] = (f"بوست Instagram فشل · {p.get('date')}", f"{a.get('error') or ''}\nراجع /client/{c['client_id']}/plan")
-                elif a.get("state") == "ambiguous":
-                    out[f"clientpost:{key}"] = (
-                        f"بوست Instagram مش متأكدين اتنشر ولا لأ · {p.get('date')}",
-                        "افتح حساب Instagram وبوستز وشوف الأول. المصنع مش هيبعته تاني لوحده عشان ما يتنشرش مرتين.\n" + (a.get("error") or ""))
+                for plat, label in names.items():
+                    a = (p.get("auto") or {}).get(plat) or {}
+                    key = f"{c['client_id']}:{p.get('date')}" + ("" if plat == "instagram" else f":{plat}")   # instagram keys unchanged
+                    if a.get("state") == "blocked":
+                        out[f"clientmedia:{key}"] = (
+                            f"بوست {label} موافق عليه بس مش قادر يتنشر · {p.get('date')}",
+                            "السبب: " + "؛ ".join(a.get("issues") or ["غير معروف"]) + f"\nمن الداشبورد: /client/{c['client_id']}/plan")
+                    elif a.get("state") == "failed":
+                        out[f"clientpost:{key}"] = (f"بوست {label} فشل · {p.get('date')}", f"{a.get('error') or ''}\nراجع /client/{c['client_id']}/plan")
+                    elif a.get("state") == "ambiguous":
+                        out[f"clientpost:{key}"] = (
+                            f"بوست {label} مش متأكدين اتنشر ولا لأ · {p.get('date')}",
+                            f"افتح حساب {label} وبوستز وشوف الأول. المصنع مش هيبعته تاني لوحده عشان ما يتنشرش مرتين.\n" + (a.get("error") or ""))
+        try:                                                    # LinkedIn gives no refresh token: warn a week before the 60 days end
+            from hypogeum.publishing import linkedin_api as li  # noqa: PLC0415
+            st = li.token_status(c["client_id"], now=now, db_path=Path(db_path) if db_path else None)
+            if st.get("connected") and st.get("renew_soon"):
+                out[f"linkedin_renew:{c['client_id']}"] = (
+                    f"تسجيل دخول لينكدان هيخلص بعد {st.get('days_left')} يوم",
+                    f"ادخل /client/{c['client_id']}/accounts واضغط Sign in again (دقيقة واحدة). لو معملتش كده البوستات هتتوقف.")
+        except Exception:  # noqa: BLE001
+            pass
     return out
 
 

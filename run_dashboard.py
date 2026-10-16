@@ -8979,7 +8979,69 @@ def client_accounts_page(client_id):
     d = get_client_accounts(client_id, db_path=_db_path())
     if not d.get("client"):
         return render_template("not_found.html", kind="Client", id=client_id), 404
-    return render_template("client_accounts.html", d=d, flash=request.args.get("flash"))
+    from hypogeum.publishing import linkedin_api as li
+    li_view = {"app": bool(li.app_credentials(_db_path())), **li.token_status(client_id, db_path=_db_path()),
+               "redirect_uri": _linkedin_redirect()}
+    return render_template("client_accounts.html", d=d, flash=request.args.get("flash"), li=li_view)
+
+
+def _linkedin_redirect() -> str:
+    """The exact URL registered on the LinkedIn app (it must match character for character; 'localhost' is not '127.0.0.1')."""
+    return request.host_url.rstrip("/").replace("//localhost", "//127.0.0.1") + "/linkedin/callback"
+
+
+_LINKEDIN_STATES: dict = {}          # OAuth state -> (client_id, expires_at); in-memory is enough for a single dashboard process
+
+
+@app.route("/client/<client_id>/accounts/linkedin_app", methods=["POST"])
+def client_linkedin_app(client_id):
+    """Save the LinkedIn developer app's Client ID + Secret (the secret goes straight to Credential Manager, never shown again)."""
+    from hypogeum.client_manager import get_client
+    from hypogeum.publishing import linkedin_api as li
+    if not get_client(client_id, db_path=_db_path()):
+        return render_template("not_found.html", kind="Client", id=client_id), 404
+    cid, secret = (request.form.get("app_client_id") or "").strip(), (request.form.get("app_client_secret") or "").strip()
+    back = f"/client/{client_id}/accounts?scope=client:{client_id}"
+    if not cid or not secret:
+        return redirect(f"{back}&flash=Both the Client ID and the Client Secret are needed", 302)
+    li.store_app_credentials(cid, secret, db_path=_db_path())
+    return redirect(f"{back}&flash=LinkedIn app saved. Now press Sign in with LinkedIn", 302)
+
+
+@app.route("/client/<client_id>/accounts/linkedin_connect")
+def client_linkedin_connect(client_id):
+    import secrets as _secrets
+    from hypogeum.client_manager import get_client
+    from hypogeum.publishing import linkedin_api as li
+    if not get_client(client_id, db_path=_db_path()):
+        return render_template("not_found.html", kind="Client", id=client_id), 404
+    app_cfg = li.app_credentials(_db_path())
+    back = f"/client/{client_id}/accounts?scope=client:{client_id}"
+    if not app_cfg:
+        return redirect(f"{back}&flash=Save the LinkedIn app's Client ID and Secret first", 302)
+    now = time.time()
+    for k in [k for k, v in _LINKEDIN_STATES.items() if v[1] < now]:
+        _LINKEDIN_STATES.pop(k, None)
+    state = _secrets.token_urlsafe(24)
+    _LINKEDIN_STATES[state] = (client_id, now + 600)
+    return redirect(li.authorization_url(app_cfg, _linkedin_redirect(), state), 302)
+
+
+@app.route("/linkedin/callback")
+def linkedin_callback():
+    from hypogeum.publishing import linkedin_api as li
+    entry = _LINKEDIN_STATES.pop(request.args.get("state") or "", None)
+    if not entry or entry[1] < time.time():
+        return "This sign-in link expired or is not ours. Start again from the client's Accounts page.", 400
+    client_id = entry[0]
+    back = f"/client/{client_id}/accounts?scope=client:{client_id}"
+    if request.args.get("error") or not request.args.get("code"):
+        return redirect(f"{back}&flash=LinkedIn sign-in was cancelled", 302)
+    try:
+        r = li.sign_in(client_id, request.args["code"], _linkedin_redirect(), db_path=_db_path())
+    except li.LinkedInError as exc:
+        return redirect(f"{back}&flash=LinkedIn sign-in failed ({str(exc)[:120]})", 302)
+    return redirect(f"{back}&flash=LinkedIn connected as {r['name'] or 'your profile'} (valid 60 days)", 302)
 
 
 @app.route("/client/<client_id>/settings", methods=["POST"])

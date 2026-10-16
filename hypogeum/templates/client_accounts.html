@@ -130,6 +130,25 @@
   {% endif %}
 </div>
 
+<div class="card" style="margin-top: var(--space-md);">
+  <div class="card-title">{{ icon('link') }} LinkedIn publishing</div>
+  {% if li.connected %}
+    <p class="note" style="margin-top:4px;">Connected as <b>{{ li.name or 'your profile' }}</b>{% if li.days_left is not none %} · sign-in valid for {{ li.days_left }} more days{% endif %}.
+      {% if li.renew_soon %}<b>Sign in again soon</b> — LinkedIn's sign-in lasts 60 days at most.{% endif %}</p>
+    <div class="btn-row"><a class="btn btn-sm" href="/client/{{ d.client.client_id }}/accounts/linkedin_connect">{{ icon('refresh') }} Sign in again</a></div>
+  {% elif li.app %}
+    <p class="note" style="margin-top:4px;">The LinkedIn app is saved. Sign in once so Cortex can post to your profile after you approve a post.</p>
+    <div class="btn-row"><a class="btn btn-sm" href="/client/{{ d.client.client_id }}/accounts/linkedin_connect">{{ icon('link') }} Sign in with LinkedIn</a></div>
+  {% else %}
+    <p class="note" style="margin-top:4px;">Paste the Client ID and Client Secret of your LinkedIn developer app (the redirect URL it must allow is <code>{{ li.redirect_uri }}</code>). The secret goes to Credential Manager and is never shown again.</p>
+    <form method="post" action="/client/{{ d.client.client_id }}/accounts/linkedin_app" autocomplete="off">
+      <input type="text" name="app_client_id" placeholder="Client ID" required style="margin-top:10px;">
+      <input type="password" name="app_client_secret" placeholder="Client Secret" required style="margin-top:10px;">
+      <div class="btn-row"><button type="submit" class="btn btn-sm">{{ icon('upload') }} Save LinkedIn app</button></div>
+    </form>
+  {% endif %}
+</div>
+
 <form class="card" style="margin-top: var(--space-md);" method="post"
       action="/client/{{ d.client.client_id }}/accounts/linkedin_import" enctype="multipart/form-data">
   <div class="card-title">{{ icon('upload') }} LinkedIn analytics</div>

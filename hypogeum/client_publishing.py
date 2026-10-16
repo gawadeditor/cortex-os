@@ -1,5 +1,6 @@
 """
-hypogeum/client_publishing.py — publishes the operator-approved posts of a managed client (Instagram, via Postiz).
+hypogeum/client_publishing.py — publishes the operator-approved posts of a managed client (Instagram via Postiz, LinkedIn
+through its own API: hypogeum.publishing.linkedin_api).
 
 Rules that make it safe on a real, public account:
   * only a post the operator APPROVED is ever considered, and only for a client in engagement_mode 'manage'
@@ -8,9 +9,11 @@ Rules that make it safe on a real, public account:
     that may have gone through ("ambiguous") is never repeated -- it is reported to the operator instead;
   * a caption that still holds a [placeholder], is empty or too long, or a post without its material is BLOCKED
     with a plain reason (reported on Telegram), never sent half-finished.
-LinkedIn is not automated yet: a post for Instagram + LinkedIn stays 'approved' until the operator marks it posted.
+LinkedIn has no scheduling API, so a LinkedIn post is sent when its time arrives (not 12h ahead); text-only is fine, an
+image must be JPEG/PNG (video is not supported there yet, so it is blocked with a plain reason).
 
     publish_due(db_path, now, provider)  -> [{client_id, date, state, ...}]   schedule approved posts that are due
+    publish_linkedin_due(db_path, now, publisher_for) -> [...]                send approved LinkedIn posts whose time came
     reconcile(db_path, now, provider)    -> [...]                              scheduled -> published / failed
     issues(post)                         -> [str]                              why a post cannot be sent yet
     start_client_publishing_loop(db_path)
@@ -27,8 +30,9 @@ from hypogeum.logger import get_logger
 
 log = get_logger(agent="client_publishing")
 
-AUTOMATED = ("instagram",)
+AUTOMATED = ("instagram", "linkedin")
 CAPTION_MAX = 2200
+LINKEDIN_CAPTION_MAX = 3000
 LEAD_HOURS = 12
 DEFAULT_TIME = "17:00"
 PLACEHOLDER = re.compile(r"\[[^\]\n]{1,80}\]")
@@ -39,19 +43,24 @@ def _p(db_path):
     return Path(db_path) if db_path else None
 
 
-def issues(post: dict) -> list:
+def issues(post: dict, platform: str = "instagram") -> list:
     from hypogeum.client_media import media_issue  # noqa: PLC0415
     out = []
     caption = (post.get("draft") or "").strip()
+    limit = LINKEDIN_CAPTION_MAX if platform == "linkedin" else CAPTION_MAX
     if not caption:
         out.append("the caption is empty")
-    if len(caption) > CAPTION_MAX:
-        out.append(f"the caption is {len(caption)} characters (Instagram allows {CAPTION_MAX})")
+    if len(caption) > limit:
+        out.append(f"the caption is {len(caption)} characters ({platform.capitalize()} allows {limit})")
     if PLACEHOLDER.search(caption):
         out.append("the caption still has a [placeholder] to fill in: " + PLACEHOLDER.search(caption).group(0))
+    if platform == "linkedin" and not (post.get("media") or {}).get("path"):
+        return out                                              # text-only is a normal LinkedIn post
     m = media_issue(post.get("media"))
     if m:
         out.append(m + (f" (needs: {post['needs']})" if post.get("needs") and str(post["needs"]).lower() != "none" else ""))
+    elif platform == "linkedin" and (post["media"].get("kind") or "image") != "image":
+        out.append("LinkedIn video posting is not built yet: remove the video or post this one by hand")
     return out
 
 
@@ -112,6 +121,14 @@ def _set_auto(post: dict, platform: str, **fields) -> None:
     cur["updated_at"] = datetime.now(timezone.utc).isoformat()
     auto[platform] = cur
     post["auto"] = auto
+
+
+def _finish_if_done(post: dict) -> None:
+    """Mark the whole post published once every platform of it is automated and has been published."""
+    plats = post.get("platforms") or []
+    if plats and set(plats) <= set(AUTOMATED) and all(((post.get("auto") or {}).get(x) or {}).get("state") == "published" for x in plats):
+        post["status"] = "published"
+        post["published_marked_at"] = datetime.now(timezone.utc).isoformat()
 
 
 def publish_due(db_path=None, now: Optional[datetime] = None, provider=None, lead_hours: int = LEAD_HOURS) -> list:
@@ -179,6 +196,59 @@ def publish_due(db_path=None, now: Optional[datetime] = None, provider=None, lea
     return results
 
 
+def publish_linkedin_due(db_path=None, now: Optional[datetime] = None, publisher_for=None) -> list:
+    """Send approved LinkedIn posts whose time has come. `publisher_for(client_id)` -> LinkedInPublisher (injectable)."""
+    from hypogeum.dashboard_clients import calendars_of  # noqa: PLC0415
+    from hypogeum.publishing import linkedin_api as li  # noqa: PLC0415
+    now = now or datetime.now(timezone.utc)
+    publisher_for = publisher_for or (lambda cid: li.LinkedInPublisher(cid, db_path=_p(db_path)))
+    results = []
+    for client in _managed(db_path):
+        cid = client["client_id"]
+        for post in [p for cal in calendars_of(client.get("brief") or {}).values() for p in cal.get("posts") or []]:
+            auto = (post.get("auto") or {}).get("linkedin") or {}
+            if (post.get("status") or "draft") != "approved" or "linkedin" not in (post.get("platforms") or []) \
+                    or auto.get("state") in _SENT or not post.get("date") or post["date"] < now.date().isoformat():
+                continue
+            try:
+                if post_time(client, post) > now:
+                    continue
+            except Exception:  # noqa: BLE001
+                bad = ["the post time or the client's timezone is invalid"]
+                if auto.get("issues") != bad:
+                    _store(db_path, cid, post["date"], lambda p, pr=bad: _set_auto(p, "linkedin", state="blocked", issues=pr))
+                continue
+            problems = issues(post, "linkedin")
+            if not problems and not li.token_status(cid, now=now, db_path=_p(db_path)).get("connected"):
+                problems = ["LinkedIn is not connected, or the 60-day sign-in ran out (sign in again from the Accounts page)"]
+            if problems:
+                if not (auto.get("state") == "blocked" and auto.get("issues") == problems):
+                    _store(db_path, cid, post["date"], lambda p, pr=problems: _set_auto(p, "linkedin", state="blocked", issues=pr))
+                results.append({"client_id": cid, "date": post["date"], "state": "blocked", "issues": problems})
+                continue
+            try:
+                pub = publisher_for(cid)
+                image = pub.upload_image(Path(post["media"]["path"]), post["media"].get("mime") or "image/jpeg") if (post.get("media") or {}).get("path") else None
+                sent = pub.publish(post["draft"], image=image)
+                state, extra = "published", {"release_url": sent.get("url"), "post_urn": sent.get("post_urn"), "issues": []}
+            except li.LinkedInAmbiguousError as exc:
+                state, extra = "ambiguous", {"error": str(exc)[:200]}
+            except li.LinkedInRejectedError as exc:
+                # nothing was posted; a bad sign-in / 5xx-free refusal is a plain failure the operator must look at
+                state, extra = "failed", {"error": str(exc)[:200]}
+            except Exception as exc:  # noqa: BLE001
+                state, extra = "blocked", {"issues": [f"unexpected error: {type(exc).__name__}"]}
+
+            def done(p, s=state, e=extra):
+                _set_auto(p, "linkedin", state=s, **e)
+                if s == "published":
+                    _finish_if_done(p)
+            _store(db_path, cid, post["date"], done)
+            log.info("client_linkedin_post_" + state, client_id=cid, date=post["date"])
+            results.append({"client_id": cid, "date": post["date"], "state": state, **extra})
+    return results
+
+
 def reconcile(db_path=None, now: Optional[datetime] = None, provider=None) -> list:
     from hypogeum.publishing import postiz as pz  # noqa: PLC0415
     now = now or datetime.now(timezone.utc)
@@ -199,13 +269,9 @@ def reconcile(db_path=None, now: Optional[datetime] = None, provider=None) -> li
                     continue                                    # Postiz unreachable: look again next round
                 state = (info or {}).get("state")
                 if state == "PUBLISHED":
-                    only_ig = set(post.get("platforms") or []) <= set(AUTOMATED)
-
-                    def done(p, url=info.get("release_url"), only_ig=only_ig):
+                    def done(p, url=info.get("release_url")):
                         _set_auto(p, "instagram", state="published", release_url=url)
-                        if only_ig:
-                            p["status"] = "published"
-                            p["published_marked_at"] = datetime.now(timezone.utc).isoformat()
+                        _finish_if_done(p)
                     _store(db_path, cid, post["date"], done)
                     results.append({"client_id": cid, "date": post["date"], "state": "published", "release_url": info.get("release_url")})
                 elif state == "ERROR" or (info is None and now > when + timedelta(hours=2)):
@@ -223,16 +289,21 @@ def start_client_publishing_loop(db_path=None, interval_s: int = 600) -> Optiona
         while not stop.is_set():
             try:
                 if _managed(db_path):                      # nothing to do (and no Postiz call) until a client is switched to 'manage'
+                    published = []
+                    try:
+                        published += publish_linkedin_due(db_path)
+                    except Exception as exc:  # noqa: BLE001 — LinkedIn trouble must not stop Instagram
+                        log.warn("client_linkedin_loop_failed", error=str(exc)[:200])
                     from hypogeum.publishing import postiz as pz  # noqa: PLC0415
                     prov = pz.PostizProvider()
                     publish_due(db_path, provider=prov)
-                    for r in reconcile(db_path, provider=prov):
-                        if r["state"] == "published":
-                            try:
-                                from hypogeum.agents import brand_strategy_agent as bsa  # noqa: PLC0415
-                                bsa.draft_next_posts(r["client_id"], db_path=_p(db_path))
-                            except Exception:  # noqa: BLE001 — drafting is budget-gated and optional
-                                pass
+                    published += reconcile(db_path, provider=prov)
+                    for cid in [r["client_id"] for r in published if r["state"] == "published"]:
+                        try:
+                            from hypogeum.agents import brand_strategy_agent as bsa  # noqa: PLC0415
+                            bsa.draft_next_posts(cid, db_path=_p(db_path))
+                        except Exception:  # noqa: BLE001 — drafting is budget-gated and optional
+                            pass
             except Exception as exc:  # noqa: BLE001
                 log.warn("client_publishing_loop_failed", error=str(exc)[:200])
             stop.wait(interval_s)

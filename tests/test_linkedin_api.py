@@ -198,3 +198,32 @@ def test_dashboard_card_and_callback_state(env):
         assert cl.get("/linkedin/callback?code=x&state=forged").status_code == 400
     finally:
         rd.app.config["DB_PATH"] = old
+
+
+# -- the draft gate: nothing is shown to the operator before it is checked ------------------------------------------------
+
+def _ok_llm(system, user, max_tokens, **k):
+    return json.dumps({"pass": True, "problems": []}), 0.0
+
+
+def test_gate_holds_back_pitchy_empty_and_picture_pointing_drafts():
+    from hypogeum.agents import brand_strategy_agent as bsa
+    prof, strat = {"verified_facts": ["x"]}, {"guardrails": []}
+    chk = lambda text, **kw: bsa.check_draft({"draft": text, "needs": kw.get("needs"), "lang": "en"}, prof, strat, llm=_ok_llm)
+    assert chk("A real point about how briefs arrive.") == []
+    assert any("waiting to be hired" in x for x in chk("Good work. I'm available for projects. DM me."))
+    assert any("waiting to be hired" in x for x in chk("My DMs are open."))
+    assert any("placeholder" in x for x in chk("We made [number] clips."))
+    assert any("does not exist" in x for x in chk("The shot on the left is raw. The shot on the right is graded."))
+    assert chk("The shot on the left is raw.", needs="a before/after clip") == []        # the media exists, so pointing at it is fine
+    assert chk("What is this scene doing? What did the cut before it set up?") == []     # ordinary prose is not a pointer
+
+
+def test_gate_follows_the_reviewer_and_fails_closed():
+    from hypogeum.agents import brand_strategy_agent as bsa
+    post = {"draft": "A claim.", "needs": None, "lang": "en"}
+    reject = lambda *a, **k: (json.dumps({"pass": False, "problems": ["invents a client"]}), 0.0)
+    assert bsa.check_draft(post, {}, {}, llm=reject) == ["invents a client"]
+    def down(*a, **k):
+        raise RuntimeError("provider down")
+    assert "held back" in bsa.check_draft(post, {}, {}, llm=down)[0]

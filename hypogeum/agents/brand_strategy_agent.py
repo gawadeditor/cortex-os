@@ -320,6 +320,47 @@ def _all_posts(brief: dict) -> list:
     return [p for cal in calendars_of(brief).values() for p in (cal.get("posts") or [])]
 
 
+# -- the gate: nothing reaches the operator until it has been checked against who they actually are --------------------
+MAX_FIX_ROUNDS = 2
+_AVAILABILITY = re.compile(
+    r"\b(i['’]m|i am|we['’]re|currently)\s+(available|open to|taking on|looking for)\b|\bavailable for\b|\bopen to (work|projects|collaborations?|opportunities)\b|"
+    r"\b(dm me|my dms? (are|is) open|message me|reach out to me|get in touch|hire me|looking for (projects|work|clients))\b", re.I)
+_MEDIA_REF = re.compile(   # words that POINT at a visual the reader would see; "this scene" / "before and after" alone are ordinary prose
+    r"\b(on the (left|right)|left:|right:|the (shot|clip|video|image|photo|frame|still) (above|below|on the)|attached|swipe|"
+    r"see the (frame|clip|image|photo|still)|(look|watch) (at )?(the|this) (shot|clip|frame))\b", re.I)
+
+
+def check_draft(post: dict, profile: dict, strategy: dict, *, llm: Optional[Callable] = None, client_id: Optional[str] = None) -> list:
+    """Why this draft must NOT be shown to the operator yet. [] = it may go. Cheap deterministic checks first, then one
+    small LLM review against the verified facts."""
+    text = (post.get("draft") or "").strip()
+    problems = []
+    if not text:
+        return ["the draft is empty"]
+    if _AVAILABILITY.search(text):
+        problems.append("it sounds like someone waiting to be hired (availability / DM-me line) — talk about the industry from a position of working, not waiting")
+    if re.search(r"\[[^\]\n]{1,80}\]", text):
+        problems.append("it still has a [placeholder]: a draft must be finished before it is shown")
+    if not post.get("needs") and _MEDIA_REF.search(text):
+        problems.append("it points at a picture, clip or before/after that does not exist (no media is attached to this post)")
+    if (post.get("lang") or "en") == "en" and len(text.split()) > 260:
+        problems.append("too long for LinkedIn (over ~260 words)")
+    if problems or llm is None:
+        return problems
+    try:
+        raw, _cost = llm(load_prompt(_PROMPTS / "brand_draft_review.txt"),
+                         "Input:\n" + json.dumps({"verified_facts": profile.get("verified_facts") or [], "avoid": profile.get("avoid") or [],
+                                                  "guardrails": (strategy or {}).get("guardrails") or [], "needs": post.get("needs"),
+                                                  "draft": text}, ensure_ascii=False),
+                         600, agent="brand_draft_review", client_id=client_id)
+        verdict = _parse(raw)
+        if not verdict.get("pass"):
+            problems += [str(x)[:200] for x in (verdict.get("problems") or ["the reviewer rejected it"])][:4]
+    except Exception as exc:  # noqa: BLE001 — a reviewer outage must not push unchecked drafts through
+        problems.append(f"the review could not run ({str(exc)[:60]}), so the draft is held back")
+    return problems
+
+
 def draft_next_posts(client_id: str, *, db_path: Optional[Path] = None, llm: Optional[Callable] = None,
                      today: Optional[date] = None, ahead: Optional[int] = None) -> list:
     """Top the queue of unposted upcoming drafts back up to `ahead` (default
@@ -373,6 +414,28 @@ def draft_next_posts(client_id: str, *, db_path: Optional[Path] = None, llm: Opt
         _log_call(brief, f"drafts x{need}", cost, False, str(exc))
         cm.update_client(client_id, brief=brief, db_path=db_path)
         raise BrandGenerationError(f"drafting failed: {exc}") from exc
+    vetted = []
+    for post in new:                                            # the gate: fix or drop, never show an unchecked draft
+        slot = next((x for x in slots if x.get("date") == post["date"]), None)
+        for attempt in range(MAX_FIX_ROUNDS + 1):
+            problems = check_draft(post, ctx["profile"], strategy, llm=llm, client_id=client_id)
+            if not problems:
+                vetted.append(post)
+                break
+            log.info("brand_draft_held_back", client_id=client_id, date=post["date"], attempt=attempt, problems=problems)
+            if attempt == MAX_FIX_ROUNDS or slot is None:
+                break
+            try:
+                raw, c2 = llm(load_prompt(_PROMPTS / "brand_calendar.txt"),
+                              "Input:\n" + json.dumps({**payload, "slots": [slot], "rewrite": {"previous_draft": post.get("draft"), "fix": problems}},
+                                                      ensure_ascii=False, default=str),
+                              _STRATEGY_MAX_TOKENS + 1500, agent="brand_calendar_agent", client_id=client_id)
+                cost += c2
+                fixed = _coerce_calendar(_parse(raw), [slot], lang_default)
+                post = fixed[0] if fixed else post
+            except Exception:  # noqa: BLE001
+                break
+    new = vetted
     cals = calendars_of(brief)
     for p in new:
         m = p["date"][:7]

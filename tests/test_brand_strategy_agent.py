@@ -41,6 +41,8 @@ class FakeLLM:
         self.reply, self.cost, self.calls = reply, cost, []
 
     def __call__(self, system, user, max_tokens, *, agent, client_id):
+        if agent == "brand_draft_review":          # the draft gate's reviewer (covered in test_linkedin_api.py): always passes here
+            return json.dumps({"pass": True, "problems": []}), 0.0
         self.calls.append({"system": system, "user": user, "agent": agent})
         reply = self.reply(user) if callable(self.reply) else self.reply
         return (reply if isinstance(reply, str) else json.dumps(reply)), self.cost

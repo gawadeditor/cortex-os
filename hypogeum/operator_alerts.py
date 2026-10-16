@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS operator_alert_checks (
 
 # per-check minimum interval (seconds) — run_operator_checks is called from
 # every worker iteration (~60s); the network-backed checks run less often.
-_INTERVALS = {"adapters": 300, "run_failures": 60, "queue_failures": 120, "buffer_gap": 1800, "production_stalled": 1800, "partial_releases": 300, "public_youtube_shorts": 600, "postiz_post_errors": 600, "postiz_health": 120, "client_grants": 3600, "client_drafts": 600, "client_reviews": 900, "client_publishing_media": 600, "client_publishing_posts": 600, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
+_INTERVALS = {"adapters": 300, "run_failures": 60, "queue_failures": 120, "buffer_gap": 1800, "production_stalled": 1800, "partial_releases": 300, "public_youtube_shorts": 600, "postiz_post_errors": 600, "postiz_health": 120, "client_grants": 3600, "client_drafts": 600, "client_intake": 3600, "client_reviews": 900, "client_publishing_media": 600, "client_publishing_posts": 600, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
               "youtube_covers": 300, "stuck_releases": 300, "youtube_flip_auth": 3600, "posts": 1800, "unpublished": 300, "accounts": 600, "archive": 300, "archive_backlog": 600, "disk": 1800}
 _DASHBOARD = "http://127.0.0.1:5001"
 _CREDIT_LOW_USD = 3.0
@@ -829,6 +829,30 @@ def check_client_publishing(db_path, now: datetime) -> dict:
     return out
 
 
+def check_client_intake(db_path, now: datetime) -> dict:
+    """The factory's knowledge of a client (who they are, from their own LinkedIn archive) is missing or a month old:
+    no new drafts are written until the operator uploads a fresh archive."""
+    try:
+        from hypogeum import client_manager as cm
+        from hypogeum.client_intake import STALE_DAYS, age_days
+        clients = cm.list_clients(db_path=Path(db_path) if db_path else None)
+    except Exception:  # noqa: BLE001
+        return {}
+    out = {}
+    for c in clients:
+        prof = (c.get("brief") or {}).get("brand_profile") or {}
+        if (c.get("status") or "active") != "active" or not prof.get("facts_required"):
+            continue
+        age = age_days(prof, now)
+        if age is None or age > STALE_DAYS:
+            out[f"clientintake:{c['client_id']}"] = (
+                f"المصنع محتاج ملف جديد عنك عشان يكمل يكتب · {c.get('name') or c['client_id']}",
+                "اللي المصنع عارفه عنك عمره أكتر من شهر، فوقّف المسودات الجديدة.\n"
+                "من لينكدان: Settings → Data privacy → Get a copy of your data → اختار Profile و Posts → هيجيلك الملف على الإيميل.\n"
+                f"ارفع الـ .zip في /client/{c['client_id']}/accounts (نفس كارت التحليلات). المصنع هيقراه ويحدّث نفسه.")
+    return out
+
+
 def check_client_reviews(db_path, now: datetime) -> dict:
     """A monthly strategy review is waiting for the operator (hypogeum.client_review): what last month showed and
     what the proposal changes, each with its evidence. Apply or discard from the buttons or the plan page."""
@@ -1499,6 +1523,7 @@ def run_operator_checks(*, db_path=None, config=None, now: Optional[datetime] = 
         ("postiz_post_errors", "pzerr:", lambda: check_postiz_post_errors(db_path, now)),
         ("client_grants", "clientgrant:", lambda: check_client_grants(db_path, now)),
         ("client_drafts", "clientdraft:", lambda: check_client_drafts(db_path, now)),
+        ("client_intake", "clientintake:", lambda: check_client_intake(db_path, now)),
         ("client_reviews", "clientreview:", lambda: check_client_reviews(db_path, now)),
         ("client_publishing_media", "clientmedia:", lambda: {k: v for k, v in check_client_publishing(db_path, now).items() if k.startswith("clientmedia:")}),
         ("client_publishing_posts", "clientpost:", lambda: {k: v for k, v in check_client_publishing(db_path, now).items() if k.startswith("clientpost:")}),

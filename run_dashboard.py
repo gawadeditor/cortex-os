@@ -8982,7 +8982,9 @@ def client_accounts_page(client_id):
     from hypogeum.publishing import linkedin_api as li
     li_view = {"app": bool(li.app_credentials(_db_path())), **li.token_status(client_id, db_path=_db_path()),
                "redirect_uri": _linkedin_redirect()}
-    return render_template("client_accounts.html", d=d, flash=request.args.get("flash"), li=li_view)
+    from hypogeum import client_intake as ci
+    return render_template("client_accounts.html", d=d, flash=request.args.get("flash"), li=li_view,
+                           know=ci.status(client_id, db_path=_db_path()))
 
 
 def _linkedin_redirect() -> str:
@@ -9258,8 +9260,16 @@ def client_linkedin_import(client_id):
         return render_template("not_found.html", kind="Client", id=client_id), 404
     back = f"/client/{client_id}/accounts?scope=client:{client_id}"
     f = request.files.get("file")
+    if f and (f.filename or "").lower().endswith(".zip"):
+        from hypogeum import client_intake as ci
+        try:
+            ci.save_archive(client_id, f.stream, db_path=_db_path())
+        except ci.IntakeError as exc:
+            return redirect(f"{back}&flash={exc}", 302)
+        ci.analyze_in_background(client_id, db_path=_db_path())
+        return redirect(f"{back}&flash=Archive received. The factory is reading it now and will refresh what it knows about you (about a minute)", 302)
     if not f or not (f.filename or "").lower().endswith(".xlsx"):
-        return redirect(f"{back}&flash=Choose the .xlsx file LinkedIn exported", 302)
+        return redirect(f"{back}&flash=Choose the .xlsx analytics file, or the .zip data archive, from LinkedIn", 302)
     with _tf.TemporaryDirectory() as tmp:
         path = Path(tmp) / Path(f.filename).name
         f.save(path)
@@ -11719,6 +11729,8 @@ def main():
     # and calls nobody, while every client is still in 'observe'.
     from hypogeum.client_publishing import start_client_publishing_loop
     start_client_publishing_loop(_db_path())
+    from hypogeum.client_intake import start_client_intake_loop
+    start_client_intake_loop(_db_path())
 
     # Once a month: measure last month's posts and PROPOSE a revised strategy (never applied without the operator).
     from hypogeum.client_review import start_client_review_loop

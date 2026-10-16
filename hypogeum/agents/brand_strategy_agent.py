@@ -376,6 +376,10 @@ def draft_next_posts(client_id: str, *, db_path: Optional[Path] = None, llm: Opt
         raise BrandGenerationError("generate a strategy first")
     today = today or datetime.now(timezone.utc).date()
     prof = brief.get("brand_profile") or {}
+    from hypogeum.client_intake import facts_ready  # noqa: PLC0415
+    held = facts_ready(prof)
+    if held:
+        raise BrandGenerationError(f"no new drafts: {held}")           # never write for someone the factory has not read
     if ahead is None and prof.get("drafts_paused"):
         return []   # operator paused drafting for this client
     ahead = int(ahead if ahead is not None else (prof.get("drafts_ahead") or DRAFTS_AHEAD))

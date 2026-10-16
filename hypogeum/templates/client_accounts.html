@@ -152,11 +152,23 @@
 <form class="card" style="margin-top: var(--space-md);" method="post"
       action="/client/{{ d.client.client_id }}/accounts/linkedin_import" enctype="multipart/form-data">
   <div class="card-title">{{ icon('upload') }} LinkedIn analytics</div>
-  <p class="note" style="margin-top:4px;">LinkedIn doesn't share a personal profile's numbers with apps, so Cortex reads the file LinkedIn gives you.
-    On LinkedIn: <b>Analytics</b> → <b>Content</b> → choose <b>365 days</b> → <b>Export</b>, then upload that <code>.xlsx</code> here. Once a month is enough.</p>
-  <input type="file" name="file" accept=".xlsx" required style="margin-top:10px;">
+  <p class="note" style="margin-top:4px;">LinkedIn doesn't share a personal profile's numbers with apps, so Cortex reads the files LinkedIn gives you. Upload either one here, once a month:
+    the <b>analytics export</b> (<b>Analytics</b> → <b>Content</b> → <b>365 days</b> → <b>Export</b>, an <code>.xlsx</code>), and your <b>data archive</b> (Settings → Data privacy → Get a copy of your data → Profile + Posts, a <code>.zip</code>), which is how Cortex learns who you are.</p>
+  <input type="file" name="file" accept=".xlsx,.zip" required style="margin-top:10px;">
   <div class="btn-row"><button type="submit" class="btn btn-sm">{{ icon('upload') }} Import LinkedIn file</button></div>
 </form>
+
+<div class="card" style="margin-top: var(--space-md);">
+  <div class="card-title">{{ icon('user') }} What Cortex knows about you</div>
+  {% if know.facts %}
+    <p class="note" style="margin-top:4px;">{{ know.facts|length }} facts · {{ know.source or 'read from your profile' }}{% if know.age_days is not none %} · updated {{ know.age_days }} day{{ '' if know.age_days == 1 else 's' }} ago{% endif %}.
+      {% if know.stale %}<b>It is a month old or more: upload a fresh LinkedIn data archive (.zip) in the card above.</b>{% endif %}
+      Every draft is checked against these before you see it.</p>
+    <details style="margin-top:8px;"><summary>See the facts</summary><ul style="margin-top:6px;">{% for f in know.facts %}<li>{{ f }}</li>{% endfor %}</ul></details>
+  {% else %}
+    <p class="note" style="margin-top:4px;">Cortex has not read who you are yet. Request your data from LinkedIn (Settings → Data privacy → Get a copy of your data → Profile + Posts) and upload the <code>.zip</code> in the card above. No draft is written until it has.</p>
+  {% endif %}
+</div>
 
 <div class="card" style="margin-top: var(--space-md);">
   <div class="card-head">

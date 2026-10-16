@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS operator_alert_checks (
 
 # per-check minimum interval (seconds) — run_operator_checks is called from
 # every worker iteration (~60s); the network-backed checks run less often.
-_INTERVALS = {"adapters": 300, "run_failures": 60, "queue_failures": 120, "buffer_gap": 1800, "production_stalled": 1800, "partial_releases": 300, "public_youtube_shorts": 600, "postiz_post_errors": 600, "client_grants": 3600, "client_drafts": 600, "client_reviews": 900, "client_publishing_media": 600, "client_publishing_posts": 600, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
+_INTERVALS = {"adapters": 300, "run_failures": 60, "queue_failures": 120, "buffer_gap": 1800, "production_stalled": 1800, "partial_releases": 300, "public_youtube_shorts": 600, "postiz_post_errors": 600, "postiz_health": 120, "client_grants": 3600, "client_drafts": 600, "client_reviews": 900, "client_publishing_media": 600, "client_publishing_posts": 600, "openrouter_credits": 1800, "workspace_credits": 1800, "worker": 300, "production_paused": 60, "blocking_signals": 120,
               "youtube_covers": 300, "stuck_releases": 300, "youtube_flip_auth": 3600, "posts": 1800, "unpublished": 300, "accounts": 600, "archive": 300, "archive_backlog": 600, "disk": 1800}
 _DASHBOARD = "http://127.0.0.1:5001"
 _CREDIT_LOW_USD = 3.0
@@ -979,6 +979,57 @@ def check_stuck_releases(db_path, now: datetime) -> dict:
     return out
 
 
+_POSTIZ_DOWN_AFTER = 2          # consecutive failed probes before the operator is told
+_POSTIZ_PROBE_TIMEOUT_S = 15    # short: a dead server must not stall the whole alert loop
+
+
+def _probe_postiz(db_path) -> None:
+    """One cheap authenticated GET against Postiz; raises on anything but a 200."""
+    from hypogeum.publishing.postiz import PostizProvider
+    prov = PostizProvider()
+    resp = prov._transport.get(url=f"{prov._base_url}/integrations", headers=prov._headers(db_path),
+                               timeout=_POSTIZ_PROBE_TIMEOUT_S)
+    if resp.status_code != 200:
+        raise RuntimeError(f"HTTP {resp.status_code}")
+
+
+def check_postiz_health(db_path, *, probe=None) -> dict:
+    """Postiz itself must answer. A post scheduled while it is down is marked ERROR and never retried
+    (2026-10-15: ~8h of 502s from 13:49Z covered a 16:00Z YouTube slot and nobody was told). Alerts only after
+    _POSTIZ_DOWN_AFTER failed probes in a row, so one network blip is silent. {} when Postiz isn't in use or
+    answers; the alert clears by itself the first time it answers again."""
+    from hypogeum.db import get_worker_control, set_worker_control
+    dbp = Path(db_path) if db_path else None
+    conn = _conn(db_path, ddl=False)
+    try:
+        in_use = conn.execute("SELECT 1 FROM channel_provider_bindings WHERE provider_id='postiz' "
+                              "AND capability='publishing' AND enabled=1 LIMIT 1").fetchone()
+    except Exception:  # noqa: BLE001
+        return {}
+    finally:
+        conn.close()
+    if not in_use:
+        return {}
+    try:
+        (probe or _probe_postiz)(dbp)
+    except Exception as exc:  # noqa: BLE001
+        fails = int(get_worker_control("postiz_health_fails", "0", db_path=dbp) or 0) + 1
+        set_worker_control("postiz_health_fails", str(fails), db_path=dbp)
+        if fails < _POSTIZ_DOWN_AFTER:
+            return {}
+        err = f"{type(exc).__name__}: {exc}"[:160]
+        local_dns = "NameResolution" in err or "nodename nor servname" in err
+        hint = ("ممكن يكون النت عندك مش شغال، مش السيرفر." if local_dns
+                else "السيرفر هو اللي مش بيرد. أي بوست ميعاده عدّى وهو واقع بيتعلّم ERROR ومش بيتعاد.")
+        return {"pzdown:postiz": (
+            "Postiz مش بيرد",
+            f"فشل {fails} فحوصات ورا بعض (آخر خطأ: {err}).\n{hint}\n"
+            "كل نشر على Facebook وInstagram وYouTube واقف لحد ما يرجع. بعد ما يرجع، راجع أي بوست اتعلّم ERROR.")}
+    if get_worker_control("postiz_health_fails", "0", db_path=dbp) != "0":
+        set_worker_control("postiz_health_fails", "0", db_path=dbp)
+    return {}
+
+
 def check_youtube_flip_auth(db_path, *, probe=None) -> dict:
     """The per-channel YouTube authorization that flips held Shorts public must
     still work. A refresh token that Google has revoked/expired (a Testing-mode
@@ -1359,6 +1410,7 @@ def run_operator_checks(*, db_path=None, config=None, now: Optional[datetime] = 
         ("production_stalled", "stalled:", lambda: check_production_stalled(db_path, now)),
         ("partial_releases", "partial:", lambda: check_partial_releases(db_path, now)),
         ("public_youtube_shorts", "ytpublic:", lambda: check_public_youtube_shorts(db_path, now)),
+        ("postiz_health", "pzdown:", lambda: None if just_woke else check_postiz_health(db_path)),
         ("postiz_post_errors", "pzerr:", lambda: check_postiz_post_errors(db_path, now)),
         ("client_grants", "clientgrant:", lambda: check_client_grants(db_path, now)),
         ("client_drafts", "clientdraft:", lambda: check_client_drafts(db_path, now)),

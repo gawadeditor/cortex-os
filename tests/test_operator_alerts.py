@@ -303,6 +303,25 @@ def test_run_failure_alert_carries_the_cause_once_per_episode(db):
     assert oa.check_run_failures(db, NOW) == {}                 # dealt with by the operator's resume
 
 
+def test_run_failure_alert_names_empty_provider_balance_not_the_qa_symptom(db):
+    # 2026-10-14..15: three episodes were reported as "QA rejected" while MUAPI's balance was empty
+    conn = get_connection(db)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+    data = {"run_id": "rb", "episode_id": "epb", "status": "failed", "channel_id": "hypogeum",
+            "started_at": (NOW - timedelta(minutes=30)).isoformat(),
+            "error_message": "assembly did not produce viable package, no music, video_asset_id empty"}
+    if "created_at" in cols:
+        data["created_at"] = data["started_at"]
+    conn.execute(f"INSERT INTO runs ({','.join(data)}) VALUES ({','.join('?' * len(data))})", list(data.values()))
+    conn.commit()
+    conn.close()
+    assert "رصيد MUAPI" not in oa.check_run_failures(db, NOW)["run_failed:epb"][1]
+    set_worker_control("queue_paused", "1", db_path=db)
+    set_worker_control("queue_paused_reason", "provider_billing: رصيد MUAPI خلص (HTTP 402)", db_path=db)
+    body = oa.check_run_failures(db, NOW)["run_failed:epb"][1]
+    assert "رصيد MUAPI خلص" in body and "أثر جانبي" in body
+
+
 def _completed_run(db, ep, completed_at, status="completed"):
     conn = get_connection(db)
     cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}

@@ -368,6 +368,21 @@ def _recent_failures(db_path, since_iso: str, limit: int = 40) -> list:
         conn.close()
 
 
+def _active_billing_cause(db_path) -> str:
+    """The pause reason while production is paused for an empty provider
+    balance, else ''. Never raises."""
+    try:
+        from hypogeum.db import get_worker_control
+        from hypogeum.muapi_spend_breaker import PROVIDER_BILLING_PREFIX
+        dbp = Path(db_path) if db_path else None
+        if str(get_worker_control("queue_paused", "0", db_path=dbp)) != "1":
+            return ""
+        reason = str(get_worker_control("queue_paused_reason", "", db_path=dbp) or "")
+        return reason[len(PROVIDER_BILLING_PREFIX):].strip() if reason.startswith(PROVIDER_BILLING_PREFIX) else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def check_run_failures(db_path, now: datetime) -> dict:
     """One alert per episode whose latest run failed in the last 6h — with the
     cause in plain words (2026-10-05: "لازم تجيلي رسالة اية سبب المشكلة").
@@ -383,10 +398,16 @@ def check_run_failures(db_path, now: datetime) -> dict:
     for r in _recent_failures(db_path, since):
         latest.setdefault(r["episode_id"], r)      # newest first
     out = {}
+    # A provider-billing pause is the real cause behind downstream symptoms
+    # ("QA rejected", "no viable package") -- 2026-10-14..15: three episodes
+    # were reported as QA failures while MUAPI's balance was simply empty.
+    billing = _active_billing_cause(db_path)
     for ep, r in latest.items():
         if r["status"] not in ("failed", "error"):
             continue
         cause = _plain_error(r.get("error_message") or "")
+        if billing:
+            cause = f"{billing} — الفشل ده غالبًا أثر جانبي لده (الظاهر: {cause})"
         raw = (r.get("error_message") or "").strip().splitlines()[0][:220] if r.get("error_message") else ""
         out[f"run_failed:{ep}"] = (
             f"حلقة {r['channel_id']} فشلت",

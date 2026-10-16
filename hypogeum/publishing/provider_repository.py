@@ -494,6 +494,29 @@ def list_bindings(
         conn.close()
 
 
+def zernio_publishing_in_use(db_path: Optional[Path]) -> bool:
+    """True while any channel still publishes through Zernio. Once every
+    platform is bound to another provider (Postiz) the Zernio-only syncs
+    (schedule mirror, account snapshot, per-post/aggregate analytics) have
+    nothing left to read and, on a lapsed account, fail every cycle.
+
+    Fails open (True) when the bindings can't be read, so a DB hiccup never
+    silently disables a sync that is still needed."""
+    try:
+        initialize_schema(db_path)
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM channel_provider_bindings "
+                "WHERE provider_id = 'zernio' AND capability = 'publishing' AND enabled = 1 LIMIT 1"
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def resolve_provider_ready_platforms(
     db_path: Optional[Path], *, channel_id: str, capability: str = "publishing", logical_alias: str = "default",
 ) -> list:

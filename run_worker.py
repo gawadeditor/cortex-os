@@ -287,6 +287,10 @@ def _release_worker_singleton_lock() -> None:
         pass
 
 
+class _ZernioNotInUse(Exception):
+    """Control flow: no channel publishes through Zernio, so its syncs are skipped."""
+
+
 def _sync_analytics_background(db_path: Path, config) -> None:
     """
     Background analytics sync — runs automatically, non-blocking, best-effort.
@@ -297,8 +301,12 @@ def _sync_analytics_background(db_path: Path, config) -> None:
     YouTube Analytics API: an extra pass for richer retention data, only
     when OAuth credentials are configured.
     """
-    # Zernio — real per-episode numbers for all four platforms.
+    # Zernio — real per-episode numbers for all four platforms. Skipped once no
+    # channel publishes through Zernio any more (the lapsed account would only 402).
     try:
+        from hypogeum.publishing.provider_repository import zernio_publishing_in_use
+        if not zernio_publishing_in_use(db_path):
+            raise _ZernioNotInUse()
         from hypogeum.publishing.zernio_analytics_sync import sync_zernio_analytics
         z = sync_zernio_analytics(db_path=db_path, window_days=7)
         if z.get("ok"):
@@ -309,6 +317,8 @@ def _sync_analytics_background(db_path: Path, config) -> None:
             )
         else:
             log.warning("analytics_sync_zernio_no_data error=%s", z.get("error"))
+    except _ZernioNotInUse:
+        log.debug("analytics_sync_zernio_skipped reason=no_channel_publishes_via_zernio")
     except Exception as exc:
         log.error("analytics_sync_error provider=zernio error=%s", exc)
 
@@ -1343,8 +1353,10 @@ def run_iteration(
             # against Zernio's truth, not a ledger that has drifted. Cheap
             # (one Zernio GET), best-effort, never blocks the sweep.
             try:
+                from hypogeum.publishing.provider_repository import zernio_publishing_in_use
                 from hypogeum.publishing.zernio_schedule_sync import sync_zernio_schedule
-                _ss = sync_zernio_schedule(db_path=db_path, window_days_back=3)
+                _ss = (sync_zernio_schedule(db_path=db_path, window_days_back=3)
+                       if zernio_publishing_in_use(db_path) else {"ok": True})
                 if _ss.get("ok"):
                     log.debug("zernio_schedule_synced written=%d removed=%d unattributed=%d",
                               _ss.get("slots_written", 0), _ss.get("slots_removed", 0),
@@ -1421,8 +1433,10 @@ def run_iteration(
         # Refresh the Zernio account snapshot (connection health + follower
         # counts) that the dashboard's platform pages read non-blockingly.
         try:
+            from hypogeum.publishing.provider_repository import zernio_publishing_in_use
             from hypogeum.publishing.zernio_accounts import sync_zernio_accounts
-            _zr = sync_zernio_accounts(db_path)
+            _zr = (sync_zernio_accounts(db_path) if zernio_publishing_in_use(db_path)
+                   else {"ok": False, "error": "no_channel_publishes_via_zernio"})
             if _zr["ok"]:
                 log.info("zernio_accounts_synced count=%d analytics_access=%s",
                          _zr["synced"], _zr["has_analytics_access"])

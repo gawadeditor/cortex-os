@@ -68,8 +68,10 @@ def run_autosync_if_due(db_path: Optional[Path] = None, max_age_s: int = 3600) -
         result = run_platform_sync(db_path=db_path, window_days=30,
                                    triggered_by="dashboard_autosync")
         try:
+            from hypogeum.publishing.provider_repository import zernio_publishing_in_use
             from hypogeum.publishing.zernio_accounts import sync_zernio_accounts
-            sync_zernio_accounts(db_path)
+            if zernio_publishing_in_use(db_path):
+                sync_zernio_accounts(db_path)
         except Exception as exc:  # noqa: BLE001
             log.warn("analytics_autosync_accounts_failed", error=str(exc)[:200])
         log.info("analytics_autosync_ran", ok=result.get("ok"),

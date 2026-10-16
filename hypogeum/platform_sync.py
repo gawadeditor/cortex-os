@@ -288,10 +288,14 @@ def run_platform_sync(
     # locked" cascade this used to cause).
     results = []
 
-    # Primary: one Zernio pass for every platform.
+    # Primary: one Zernio pass for every platform -- skipped once no channel
+    # publishes through Zernio (a lapsed account would only log 402 errors).
+    from hypogeum.publishing.provider_repository import zernio_publishing_in_use
+    _zernio_live = zernio_publishing_in_use(db_path)
     if not platforms or set(platforms) & set(_SUPPORTED_PLATFORMS):
         try:
-            results.extend(_sync_zernio(channel_id, db_path, window_days, triggered_by))
+            if _zernio_live:
+                results.extend(_sync_zernio(channel_id, db_path, window_days, triggered_by))
         except Exception:  # noqa: BLE001
             pass
         # Account-level aggregate rollups (content-decay / best-time /
@@ -299,7 +303,8 @@ def run_platform_sync(
         # separate table; a failure here must never fail the per-post sync.
         try:
             from hypogeum.publishing.zernio_aggregate_sync import sync_zernio_aggregates
-            sync_zernio_aggregates(db_path=db_path)
+            if _zernio_live:
+                sync_zernio_aggregates(db_path=db_path)
         except Exception:  # noqa: BLE001
             pass
         # Platform-native account analytics (YouTube channel-insights +
@@ -307,7 +312,8 @@ def run_platform_sync(
         # series). Own tables; failure-isolated from the per-post sync.
         try:
             from hypogeum.publishing.zernio_native_sync import sync_zernio_native_analytics
-            sync_zernio_native_analytics(db_path=db_path)
+            if _zernio_live:
+                sync_zernio_native_analytics(db_path=db_path)
         except Exception:  # noqa: BLE001
             pass
         # Cortex Advisory: pull every active client's externally-published

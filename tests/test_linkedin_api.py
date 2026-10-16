@@ -90,6 +90,14 @@ def test_pasted_values_lose_stray_punctuation(env):
     assert li.app_credentials(p) == {"client_id": "78eand4adosxdi", "client_secret": "WPL_AP1.abc.def=="}
 
 
+def test_a_value_saved_dirty_before_the_cleanup_is_cleaned_on_read(env):
+    from hypogeum.credential_manager import create_secret_profile
+    p, _, _ = env
+    create_secret_profile(provider="linkedin", label="x", credential_type="oauth2_token", scope="factory", secret_profile_id=li.APP_PROFILE_ID,
+                          credential_data=json.dumps({"client_id": "78eand4adosxdi،", "client_secret": "S"}), db_path=p)
+    assert li.app_credentials(p)["client_id"] == "78eand4adosxdi"
+
+
 def test_sign_in_without_app_is_a_plain_error(env):
     p, _, _ = env
     with pytest.raises(li.LinkedInError):

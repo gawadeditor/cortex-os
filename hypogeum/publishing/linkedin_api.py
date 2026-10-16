@@ -112,7 +112,9 @@ def app_credentials(db_path: Optional[Path] = None) -> Optional[dict]:
         d = json.loads(resolve_credential(APP_PROFILE_ID, db_path=db_path))
     except Exception:  # noqa: BLE001 — missing/revoked/garbled: treated as "not configured"
         return None
-    return d if d.get("client_id") and d.get("client_secret") else None
+    d["client_id"] = re.sub(r"[^A-Za-z0-9]", "", d.get("client_id") or "")       # a value saved before the clean-up existed
+    d["client_secret"] = (d.get("client_secret") or "").strip().strip("،,;:؛ \u200f\u200e\"'`")
+    return d if d["client_id"] and d["client_secret"] else None
 
 
 # -- signing in --------------------------------------------------------------------------------------------------

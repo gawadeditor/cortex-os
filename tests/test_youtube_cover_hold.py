@@ -189,3 +189,21 @@ def test_hold_keeps_release_day_on_the_real_slot():
     post["scheduledFor"] = "2026-09-29T18:00:00.000Z"
     assert post_release_time(post) == SLOT
     assert post_release_time({"scheduledFor": SLOT}) == SLOT
+
+
+def test_retired_zernio_release_falls_back_to_flipping_the_video_through_youtube(db, monkeypatch):
+    z = FakeZernio(_post())
+    h.apply_hold("P1", "hypogeum", provider=z, db_path=db, now=NOW)
+    _confirm(db)
+    z.set_youtube_privacy = lambda pid, privacy, **kw: {"status_code": 404, "error": {"code": "account_not_found"}}
+    calls = []
+    monkeypatch.setattr(h, "_release_direct", lambda pid, ch, **kw: calls.append((pid, ch)) or None)
+    out = h.release_due(provider=z, db_path=db, now=datetime(2026, 9, 30, 18, 1, tzinfo=timezone.utc))
+    assert out == [{"post_id": "P1", "status": "released"}] and calls == [("P1", "hypogeum")]
+
+
+def test_direct_release_reads_the_video_id_from_the_post_and_reports_a_missing_one(db):
+    seen = []
+    assert h._release_direct("P1", "hypogeum", db_path=db, video_id="abc", set_privacy=lambda ch, v, p, **k: seen.append((ch, v, p)) or {"ok": True}) is None
+    assert seen == [("hypogeum", "abc", "public")]
+    assert "no YouTube video id" in h._release_direct("NOPE", "hypogeum", db_path=db)

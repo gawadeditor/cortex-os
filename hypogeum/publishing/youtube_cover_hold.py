@@ -155,6 +155,23 @@ def _release_postiz(post_id: str, channel_id: str, upload_at: str, *, db_path=No
     return res.get("error")
 
 
+def _release_direct(post_id: str, channel_id: str, *, db_path=None, video_id=None,
+                    set_privacy=None) -> Optional[str]:
+    """Flip a (formerly Zernio) post's YouTube video public through YouTube's own API.
+    Returns an error text or None."""
+    if not video_id:
+        from hypogeum.dashboard_content_grid import get_content_grid
+        for it in get_content_grid(channel_id, db_path=db_path):
+            if it.get("post_id") == post_id:
+                for p in it.get("platforms") or []:
+                    if p.get("platform") == "youtube" and "v=" in (p.get("url") or ""):
+                        video_id = p["url"].split("v=", 1)[1].split("&")[0]
+    if not video_id:
+        return "no YouTube video id known for this post"
+    from hypogeum.publishing.youtube_privacy import set_video_privacy
+    return (set_privacy or set_video_privacy)(channel_id, video_id, "public", db_path=db_path).get("error")
+
+
 def get_holds(db_path=None) -> dict:
     initialize_schema(db_path)
     conn = get_connection(db_path)
@@ -267,6 +284,10 @@ def release_due(*, provider=None, db_path=None, now: Optional[datetime] = None) 
                 z = z or _provider(provider)
                 res = z.set_youtube_privacy(pid, "public", db_path=db_path, channel_id=h["channel_id"])
                 err = res.get("error")
+                if err:
+                    # Zernio is retired (its YouTube account is gone): flip the video through
+                    # YouTube itself, using the video id the post already carries.
+                    err = _release_direct(pid, h["channel_id"], db_path=db_path) or None
         except Exception as exc:  # noqa: BLE001
             err = str(exc)
         if err:

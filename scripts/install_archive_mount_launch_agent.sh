@@ -69,8 +69,13 @@ cat > "$PLIST_PATH" << PLIST
     <key>RunAtLoad</key>
     <true/>
 
-    <key>StartInterval</key>
-    <integer>300</integer>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>6</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
 
     <key>ThrottleInterval</key>
     <integer>30</integer>

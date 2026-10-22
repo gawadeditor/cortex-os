@@ -11,7 +11,7 @@
 # macOS does NOT remount a user-mounted SMB share after a reboot, so after the
 # 2026-09-08 reboots the share was gone and every relocation fell back to the
 # working tree. This script + its LaunchAgent (com.hypogeum.archive-mount,
-# RunAtLoad + every 300s) close that gap.
+# RunAtLoad + daily at 06:00) close that gap.
 #
 # Safe to run repeatedly and on a timer: exits 0 immediately when the share
 # is already mounted and healthy.
@@ -47,7 +47,7 @@ fi
 
 # --- NAS not on this network (operator away from home)? stay silent --------
 # `osascript mount volume` pops a "Connection failed" dialog every time the
-# attempt times out, which repeats every StartInterval while away. ping
+# attempt times out, which repeats on every scheduled run while away. ping
 # resolves the .local name through the system resolver; if it can't reach
 # the NAS there is nothing to mount, so exit without showing anything.
 if ! /sbin/ping -c1 -t3 "${NAS_HOST}" >/dev/null 2>&1; then

@@ -25,6 +25,7 @@
 set -uo pipefail
 
 MOUNT_POINT="/Volumes/Archive"
+NAS_HOST="Flexplex.local"
 SMB_URL="smb://ABDELGAWAD@Flexplex._smb._tcp.local/Archive"
 ARCHIVE_SUBDIR="${MOUNT_POINT}/Cortex"
 MOUNT_TIMEOUT=60   # seconds to allow the mount attempt before giving up
@@ -41,6 +42,15 @@ healthy() {
 
 # --- already mounted and the Cortex subdir is reachable? -> nothing to do ----
 if healthy; then
+    exit 0
+fi
+
+# --- NAS not on this network (operator away from home)? stay silent --------
+# `osascript mount volume` pops a "Connection failed" dialog every time the
+# attempt times out, which repeats every StartInterval while away. ping
+# resolves the .local name through the system resolver; if it can't reach
+# the NAS there is nothing to mount, so exit without showing anything.
+if ! /sbin/ping -c1 -t3 "${NAS_HOST}" >/dev/null 2>&1; then
     exit 0
 fi
 

@@ -1,47 +1,64 @@
 <div align="center">
 
-<img src="docs/brand_guardian/thumbnail_grid.png" alt="Hypogeum Chronicles — the first channel produced by Cortex" width="100%">
+<img src="docs/brand_guardian/thumbnail_grid.png" alt="Cortex OS — the first channel it runs, Hypogeum Chronicles" width="100%">
 
-# Cortex OS
+# Cortex OS 🧠
 
-**An autonomous, multi-agent operating system for media production.**
-It finds topics, researches, writes, voices, films, edits, publishes and learns from analytics — across multiple channels, with minimal human operation.
+### An Autonomous AI Media Factory — Topic to Published Video, Hands-Free
+
+Give Cortex a channel brand and it **discovers topics**, **researches**, **writes**, **voices**, **films**, **edits**, **publishes** and **learns from real analytics** — for documentary episodes and Shorts, across multiple isolated channels.
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.9+-3776AB?logo=python&logoColor=white)](requirements.txt)
+[![Stars](https://img.shields.io/github/stars/gawadeditor/cortex-os?style=flat&logo=github)](https://github.com/gawadeditor/cortex-os/stargazers)
+[![Last commit](https://img.shields.io/github/last-commit/gawadeditor/cortex-os)](https://github.com/gawadeditor/cortex-os/commits/main)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+[![Issues](https://img.shields.io/github/issues/gawadeditor/cortex-os)](https://github.com/gawadeditor/cortex-os/issues)
+
+<a href="https://www.star-history.com/gawadeditor/cortex-os"><img src="https://api.star-history.com/badge?repo=gawadeditor/cortex-os" alt="Star History" height="55"/></a>
+
+[Quick Start](#quick-start-) | [Features](#features-) | [Contributing](CONTRIBUTING.md) | [Architecture](CORTEX_ARCHITECTURE.md) | [Issues](https://github.com/gawadeditor/cortex-os/issues)
+
+⭐ **If Cortex is useful or interesting to you, please star the repo — it helps others find it.**
 
 </div>
 
----
+Cortex is **not** a YouTube tool and **not** a workflow builder. It is a *factory OS*: a human sets the goals and the brand, and Cortex decides and executes production, then uses measured audience data to make the next episode better. It currently runs two real channels with completely different identities.
 
-## What is this?
+## Screenshots 🖥
 
-Cortex is **not** a YouTube tool and **not** a workflow builder. It is a *factory OS*: a human defines the goals and the brand, and Cortex decides and executes the production of documentary-style episodes and Shorts end to end, then uses real analytics to improve the next ones.
+<h4 align="center">Control room — all channels at a glance</h4>
 
-The first channel built on it is **Hypogeum Chronicles** (history & archaeology documentaries). New channels are created by cloning a channel template with a different brand and topic configuration, while staying fully isolated from each other.
+![Control room](docs/screenshots/dashboard-control-room.png)
 
-<p align="center">
-  <img src="hypogeum/brand/references/brand_board.jpg" alt="Hypogeum Chronicles brand board" width="85%">
-</p>
+<h4 align="center">Discovery — scored topic ideas with hook, evidence and rationale</h4>
 
-A second, completely different channel runs on the same factory: **Twinkle Mini Tales**, a calm bedtime-stories channel for kids — different brand, voice, music library and audience.
+![Discovery](docs/screenshots/dashboard-discovery.png)
 
-<p align="center">
-  <img src="channel_packages/twinkle_mini_tales/Photos/youtube%20cover.png" alt="Twinkle Mini Tales channel art" width="85%">
-</p>
+<h4 align="center">Production history — every run, status and step count</h4>
 
-## The operator dashboard
+![Production](docs/screenshots/dashboard-production.png)
 
-Everything is run from one web dashboard: a control room across all channels, topic discovery with scores and rationale, and the production history of every run. (Client names are replaced and spend figures blurred in these screenshots.)
+> Client names are replaced and spend figures blurred in these screenshots.
 
-<p align="center">
-  <img src="docs/screenshots/dashboard-control-room.png" alt="Control room: factory readiness, queue, views across channels" width="95%">
-</p>
-<p align="center">
-  <img src="docs/screenshots/dashboard-discovery.png" alt="Discovery: scored topic candidates with hook, evidence and score breakdown" width="95%">
-</p>
-<p align="center">
-  <img src="docs/screenshots/dashboard-production.png" alt="Production history: every episode run, status and steps" width="95%">
-</p>
+## Channels Built With Cortex 🎬
 
-## How an episode is made
+Two channels run on the same factory — different brand, voice, music library and audience. New channels are created by cloning a channel template.
+
+<table width="100%">
+  <tr>
+    <td align="center" width="50%">
+      <img src="hypogeum/brand/references/brand_board.jpg" width="100%"><br>
+      <b>Hypogeum Chronicles</b><br>History &amp; archaeology documentaries
+    </td>
+    <td align="center" width="50%">
+      <img src="channel_packages/twinkle_mini_tales/Photos/youtube%20cover.png" width="100%"><br>
+      <b>Twinkle Mini Tales</b><br>Calm bedtime stories for kids
+    </td>
+  </tr>
+</table>
+
+## How an Episode Is Made 🏭
 
 ```mermaid
 flowchart LR
@@ -59,60 +76,129 @@ flowchart LR
     AN -. learning .-> D
 ```
 
-| Stage | What it does |
+Every agent's output is validated against a strict schema before the next stage runs; a failed validation halts the pipeline instead of passing bad data forward.
+
+## Features 🎯
+
+### Autonomous Production
+- [x] **Topic discovery** — LLM + web research proposes topics, scores each for click, retention and fit, and explains why
+- [x] **10-stage agent pipeline** — producer, research, narrative, script, thumbnail strategy, visuals, thumbnails, audio, assembly, publishing
+- [x] **Long-form documentaries and vertical Shorts** (1080×1920) from the same pipeline
+- [x] **Autonomous worker** — a scheduler → queue → pipeline loop that keeps the production buffer filled
+
+### Quality
+- [x] **Cinematic prompt architecture ("Video DNA")** — topic-agnostic camera, motion, lighting and historical-plausibility modules assembled into every scene prompt, so one improvement lifts every future episode
+- [x] **Schema-validated hand-offs** between all agents
+- [x] **Thumbnail QA** and concept-driven thumbnail generation
+- [x] **Hook pattern library** — every script opens with a deliberate, tested hook move
+
+### Safety & Control
+- [x] **Budget gates** — per-episode, weekly and monthly spend ceilings, with a spend circuit-breaker
+- [x] **Operator alerts** — every blocker is pushed to the operator (Telegram)
+- [x] **Dry-run mode** — exercise the whole pipeline with no provider spend (`MUAPI_DRY_RUN=true`)
+- [x] **Strict channel isolation** — brand, voice, music, policy and budget per channel
+
+### Providers
+- [x] **LLM** via OpenRouter (Claude) · **research** via Perplexity
+- [x] **Video** via MUAPI (Veo 3.1 and other models) · **voice & music** via ElevenLabs, with optional local music generation
+- [x] **Assembly** with FFmpeg
+- [x] **Publishing** to YouTube, Facebook and Instagram (self-hosted Postiz)
+
+### Learning
+- [x] **Real analytics only** — mock data is never shown as KPIs
+- [x] **Audience-aware** topic, script and thumbnail decisions from measured performance
+
+## System Requirements 📦
+
+| | Minimum |
 |---|---|
-| **Executive Producer** | Scores the topic (accept / warn / reject) and writes the topic brief |
-| **Research Director** | Runs research queries and builds the research package |
-| **Narrative Architect** | Designs the story structure |
-| **Script Engine** | Writes narration beats and matching visual directions |
-| **Thumbnail Strategy** | Proposes click-through-rate concept hypotheses |
-| **Visual Package Director** | Plans scenes and generates video clips |
-| **Thumbnail Director** | Generates and QA-checks thumbnail candidates |
-| **Audio Agent** | Narration (ElevenLabs) and music |
-| **Assembly Agent** | FFmpeg render of the final video |
-| **Publishing Agent** | Uploads and schedules to the channel's platforms |
+| Python | 3.9+ |
+| OS | macOS or Linux |
+| FFmpeg | Required for video assembly |
+| Provider keys | Only needed for real production — **not** needed for tests or dry runs |
 
-Every agent output is validated against a strict schema before it reaches the next stage; a failed validation halts the pipeline instead of passing bad data forward.
+## Quick Start 🚀
 
-## Key ideas
+### Try it without any API keys
 
-- **Operator dashboard** — a Flask web app: discover topics with a score and rationale, queue them, start runs, track progress live, and read real (never mock) analytics.
-- **Autonomous worker** — a scheduler → queue → pipeline loop that keeps the production buffer filled.
-- **Budget & safety gates** — per-episode, weekly and monthly spend ceilings; provider leases; operator alerts on every blocker.
-- **Cinematic prompt architecture** — a topic-agnostic "Video DNA" (camera, motion, lighting, historical-plausibility modules) assembled into every scene prompt, so quality improvements apply to all future episodes.
-- **Brand isolation** — each channel has its own brand identity, voice, music library, policies and budget.
-- **Learning loop** — measured audience data feeds back into topic selection, scripts and thumbnails.
+```bash
+git clone https://github.com/gawadeditor/cortex-os.git
+cd cortex-os
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt
+cp .env.example .env
+python3 -m pytest -q tests/test_pipeline.py     # run the tests
+python3 run_dashboard.py                        # open http://127.0.0.1:5001
+```
 
-## Repository map
+### Run the pipeline in dry-run (no spend)
+
+Set `MUAPI_DRY_RUN=true` in `.env`, then queue a topic from the dashboard, or for a single debug run:
+
+```bash
+python3 run_pipeline.py --topic "The Antikythera Mechanism" --episode-id ep_001
+```
+
+### Run for real
+
+Fill in your provider keys in `.env` (see the comments in [`.env.example`](.env.example)) and set the budget ceilings you are comfortable with. Then:
+
+```bash
+python3 run_dashboard.py      # operator UI
+python3 run_worker.py         # autonomous production loop
+```
+
+> ⚠️ Real production calls paid APIs (video generation is the main cost). Start with dry-run and low budget ceilings.
+
+## Repository Map 🗺
 
 | Path | Contents |
 |---|---|
-| `hypogeum/` | Core package: agents, pipeline orchestrator, providers, DB, schemas |
+| `hypogeum/` | Core package: pipeline orchestrator, providers, DB, schemas |
 | `hypogeum/agents/` | The individual production agents |
-| `run_dashboard.py` | Operator dashboard (`http://127.0.0.1:5001`) |
+| `run_dashboard.py` | Operator dashboard |
 | `run_worker.py` | Autonomous production loop |
-| `run_pipeline.py` | Single-episode CLI (debugging tool) |
+| `run_pipeline.py` | Single-episode CLI (debugging) |
 | `channel_packages/` | Per-channel brand, voice and policy packages |
 | `docs/` | Architecture, governance and design documents |
 | `tests/` | Test suite |
 
 Start with [`PROJECT_NORTH_STAR.md`](PROJECT_NORTH_STAR.md), [`CORTEX_ARCHITECTURE.md`](CORTEX_ARCHITECTURE.md) and [`docs/architecture-index.md`](docs/architecture-index.md).
 
-## Quick start
+## Common Questions 🤔
 
-```bash
-cp .env.example .env          # add your own provider keys
-python3 -m pytest -q          # run the test suite
-python3 run_dashboard.py      # operator dashboard
-python3 run_worker.py --dry-run   # exercise the loop without calling providers
-```
+<details>
+<summary><b>Do I need paid API keys to try it?</b></summary>
 
-Provider keys (LLM, video, voice, publishing) are read from `.env` only and are never committed.
+No. Tests and dry-run mode need no keys. Keys are only needed to actually generate and publish videos.
+</details>
 
-## Status
+<details>
+<summary><b>How much does an episode cost?</b></summary>
 
-Active, in production on real channels. This repository is shared for transparency and portfolio purposes; it is not a packaged, ready-to-install product.
+It depends on the video model and episode length. Video generation dominates the cost; per-episode, weekly and monthly ceilings stop runaway spend. Use dry-run first.
+</details>
 
-## License
+<details>
+<summary><b>Can I make my own channel?</b></summary>
 
-All rights reserved unless a license file states otherwise.
+Yes — channels are defined by a package (brand, voice, policies). See [`CHANNEL_PACKAGE_SPEC.md`](CHANNEL_PACKAGE_SPEC.md) and the dashboard's "New channel" flow.
+</details>
+
+<details>
+<summary><b>Is it only for YouTube?</b></summary>
+
+No. The factory is platform-agnostic; publishing currently targets YouTube, Facebook and Instagram, and new platforms are added as provider adapters.
+</details>
+
+## Contributing 🤝
+
+Contributions are very welcome — new provider adapters, channel templates, dashboard improvements, tests and docs. Read [CONTRIBUTING.md](CONTRIBUTING.md), then look for issues labelled **good first issue** and **help wanted**.
+
+## Feedback & Suggestions 📢
+
+Open an [issue](https://github.com/gawadeditor/cortex-os/issues) or a [pull request](https://github.com/gawadeditor/cortex-os/pulls).
+
+## License 📝
+
+[MIT](LICENSE) © 2026 Muhamed Abdelgawad

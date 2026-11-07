@@ -1,0 +1,10 @@
+# Runtime
+Flask>=3.0
+requests>=2.31
+Pillow>=10.0
+numpy>=1.26
+cryptography>=42.0
+openpyxl>=3.1
+
+# Optional: reference-video downloads in the research stage
+yt-dlp>=2024.1.0

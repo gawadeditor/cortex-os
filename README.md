@@ -129,7 +129,13 @@ cd cortex-os
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt
 cp .env.example .env
-python3 -m pytest -q tests/test_pipeline.py     # run the tests
+
+# placeholder keys are enough to explore: nothing is called in dry-run mode
+export OPENROUTER_API_KEY=placeholder PERPLEXITY_API_KEY=placeholder \
+       MUAPI_API_KEY=placeholder ELEVENLABS_API_KEY=placeholder MUAPI_DRY_RUN=true
+
+python3 scripts/bootstrap_channel.py            # creates the local DB and the first channel
+python3 -m pytest -q tests/test_pipeline.py     # 117 tests
 python3 run_dashboard.py                        # open http://127.0.0.1:5001
 ```
 

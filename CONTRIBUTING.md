@@ -8,7 +8,10 @@ Thanks for helping! Cortex is an autonomous media-production factory, and there 
 git clone https://github.com/gawadeditor/cortex-os.git && cd cortex-os
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt
-cp .env.example .env            # provider keys are optional for tests and dry runs
+cp .env.example .env
+export OPENROUTER_API_KEY=placeholder PERPLEXITY_API_KEY=placeholder \
+       MUAPI_API_KEY=placeholder ELEVENLABS_API_KEY=placeholder MUAPI_DRY_RUN=true
+python3 scripts/bootstrap_channel.py   # creates the local DB + first channel (needed by the tests)
 python3 -m pytest -q tests/test_pipeline.py
 python3 run_dashboard.py        # http://127.0.0.1:5001
 ```

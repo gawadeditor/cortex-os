@@ -150,8 +150,12 @@ def _load_dotenv(path: Path) -> None:
             key, _, value = line.partition("=")
             key = key.strip()
             value = value.strip()
+            # An unquoted value that starts with # is only a comment
+            # (e.g. `KEY=    # Optional` in .env.example): the value is empty
+            if value.startswith("#"):
+                value = ""
             # Strip inline comment (space then #)
-            if " #" in value:
+            elif " #" in value:
                 value = value[: value.index(" #")].strip()
             # Strip matching surrounding quotes
             if len(value) >= 2 and value[0] in ('"', "'") and value[-1] == value[0]:

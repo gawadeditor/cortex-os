@@ -42,6 +42,7 @@ from hypogeum.channel_config import (
 )
 from hypogeum.config import Config
 from hypogeum.dashboard_api import get_notifications
+from hypogeum.db import initialize_schema
 from hypogeum.factory_entity import FactoryExistsError, create_factory, get_factory
 
 # ---------------------------------------------------------------------------
@@ -433,6 +434,9 @@ def main() -> int:
     args = parser.parse_args()
 
     config = Config()
+
+    # A fresh clone has no DB yet; create the tables first (idempotent).
+    initialize_schema()
 
     if not args.verify_only:
         if not _run_bootstrap(config):

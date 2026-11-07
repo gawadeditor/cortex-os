@@ -357,6 +357,14 @@ class TestDotenvParser:
         assert os.environ.get("QUX") == "value"
         del os.environ["QUX"]
 
+    def test_empty_value_with_trailing_comment_is_empty(self):
+        # .env.example style: `KEY=      # Optional — note` must not become the value
+        path = self._write_env("EMPTYC=      # Optional — response length control\n")
+        os.environ.pop("EMPTYC", None)
+        _load_dotenv(path)
+        assert os.environ.get("EMPTYC") == ""
+        del os.environ["EMPTYC"]
+
     def test_quoted_value_unquoted(self):
         path = self._write_env('QUOTED="hello world"\n')
         os.environ.pop("QUOTED", None)

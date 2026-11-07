@@ -25,6 +25,10 @@ Cortex is **not** a YouTube tool and **not** a workflow builder. It is a *factor
 
 ## Screenshots 🖥
 
+<p align="center">
+  <img src="docs/screenshots/dashboard-tour.gif" alt="A quick tour of the Cortex dashboard" width="95%">
+</p>
+
 <h4 align="center">Control room — all channels at a glance</h4>
 
 ![Control room](docs/screenshots/dashboard-control-room.png)

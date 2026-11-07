@@ -35,9 +35,13 @@ Cortex is **not** a YouTube tool and **not** a workflow builder. It is a *factor
 
 ![Discovery](docs/screenshots/dashboard-discovery.png)
 
-<h4 align="center">Production history — every run, status and step count</h4>
+<h4 align="center">Production line — approved topics queue up and are produced on each channel's schedule</h4>
 
-![Production](docs/screenshots/dashboard-production.png)
+![Production queue](docs/screenshots/dashboard-production-queue.png)
+
+<h4 align="center">Analytics — real audience numbers per platform feed back into future episodes</h4>
+
+![Analytics](docs/screenshots/dashboard-analytics-twinkle.png)
 
 > Client names are replaced and spend figures blurred in these screenshots.
 

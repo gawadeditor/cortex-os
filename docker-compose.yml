@@ -1,0 +1,25 @@
+# Try Cortex with one command:   docker compose up --build
+# Open http://127.0.0.1:5001
+#
+# By default it runs in dry-run mode with placeholder keys, so nothing is
+# called and nothing is spent. To run for real, put your keys in a .env file
+# next to this one (see .env.example) and set MUAPI_DRY_RUN=false.
+services:
+  cortex:
+    build: .
+    ports:
+      - "127.0.0.1:${CORTEX_PORT:-5001}:5001"   # local only; the dashboard has no login
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-placeholder}
+      PERPLEXITY_API_KEY: ${PERPLEXITY_API_KEY:-placeholder}
+      MUAPI_API_KEY: ${MUAPI_API_KEY:-placeholder}
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-placeholder}
+      MUAPI_DRY_RUN: ${MUAPI_DRY_RUN:-true}
+    volumes:
+      - cortex-data:/app/.hypogeum-assets
+
+volumes:
+  cortex-data:

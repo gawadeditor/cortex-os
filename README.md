@@ -121,7 +121,17 @@ Every agent's output is validated against a strict schema before the next stage 
 
 ## Quick Start 🚀
 
-### Try it without any API keys
+### Fastest: Docker (no API keys needed)
+
+```bash
+git clone https://github.com/gawadeditor/cortex-os.git
+cd cortex-os
+docker compose up --build
+```
+
+Open **http://127.0.0.1:5001**. It starts in dry-run mode with placeholder keys, so nothing is called and nothing is spent. Use another port with `CORTEX_PORT=5002 docker compose up --build`. To run for real, put your keys in a `.env` file (see [`.env.example`](.env.example)) and set `MUAPI_DRY_RUN=false`.
+
+### Or run it locally (no API keys needed)
 
 ```bash
 git clone https://github.com/gawadeditor/cortex-os.git

@@ -15,8 +15,6 @@ Give Cortex a channel brand and it **discovers topics**, **researches**, **write
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 [![Issues](https://img.shields.io/github/issues/gawadeditor/cortex-os)](https://github.com/gawadeditor/cortex-os/issues)
 
-<a href="https://www.star-history.com/gawadeditor/cortex-os"><img src="https://api.star-history.com/badge?repo=gawadeditor/cortex-os" alt="Star History" height="55"/></a>
-
 [Quick Start](#quick-start-) | [Features](#features-) | [Contributing](CONTRIBUTING.md) | [Architecture](CORTEX_ARCHITECTURE.md) | [Issues](https://github.com/gawadeditor/cortex-os/issues)
 
 ⭐ **If Cortex is useful or interesting to you, please star the repo — it helps others find it.**

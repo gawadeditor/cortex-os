@@ -21,6 +21,26 @@ The first channel built on it is **Hypogeum Chronicles** (history & archaeology 
   <img src="hypogeum/brand/references/brand_board.jpg" alt="Hypogeum Chronicles brand board" width="85%">
 </p>
 
+A second, completely different channel runs on the same factory: **Twinkle Mini Tales**, a calm bedtime-stories channel for kids — different brand, voice, music library and audience.
+
+<p align="center">
+  <img src="channel_packages/twinkle_mini_tales/Photos/youtube%20cover.png" alt="Twinkle Mini Tales channel art" width="85%">
+</p>
+
+## The operator dashboard
+
+Everything is run from one web dashboard: a control room across all channels, topic discovery with scores and rationale, and the production history of every run. (Client names are replaced and spend figures blurred in these screenshots.)
+
+<p align="center">
+  <img src="docs/screenshots/dashboard-control-room.png" alt="Control room: factory readiness, queue, views across channels" width="95%">
+</p>
+<p align="center">
+  <img src="docs/screenshots/dashboard-discovery.png" alt="Discovery: scored topic candidates with hook, evidence and score breakdown" width="95%">
+</p>
+<p align="center">
+  <img src="docs/screenshots/dashboard-production.png" alt="Production history: every episode run, status and steps" width="95%">
+</p>
+
 ## How an episode is made
 
 ```mermaid
